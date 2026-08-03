@@ -1,6 +1,7 @@
 import { appendJobToSpreadsheet } from "./sheets.js";
 import { buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson } from "./resume-json.js";
+import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 
 let isRunning = false;
 let keepAliveTimer = null;
@@ -396,10 +397,8 @@ function downloadBase64File(base64, mimeType, filename) {
 }
 
 async function autoDownloadResumeFiles(rawText, resumeData, jobMeta = {}) {
-  const baseHtml = resumeJsonToHtml(resumeData);
-  // Do not run legacy HTML bullet rewriting on JSON-rendered resumes —
-  // it pads certification <li> items and can distort content.
-  const html = enforceA4PrintCss(baseHtml);
+  const templateId = jobMeta.templateId || DEFAULT_TEMPLATE_ID;
+  const html = resumeJsonToHtml(resumeData, templateId);
   const pdfBase64 = await htmlToPdfBase64(html);
 
   const outputDir = sanitizePathSegment(jobMeta.outputDir || "Resume Applications", "Resume Applications");

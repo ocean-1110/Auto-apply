@@ -5,6 +5,7 @@ import {
   addCustomProfile,
   deleteCustomProfile
 } from "./profiles.js";
+import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { extractSpreadsheetId, buildSheetRowTsv } from "./sheets.js";
 
 const DEFAULT_OUTPUT_DIR = "Resume Applications";
@@ -49,6 +50,7 @@ function doGet() {
 
 const statusEl = document.getElementById("status");
 const profileSelectEl = document.getElementById("profileSelect");
+const templateSelectEl = document.getElementById("templateSelect");
 const deleteProfileBtn = document.getElementById("deleteProfile");
 const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
@@ -72,9 +74,28 @@ const newProfilePromptEl = document.getElementById("newProfilePrompt");
 const saveProfileBtn = document.getElementById("saveProfile");
 
 let profilesCache = [];
+let templatesCache = [];
 
 function setStatus(message) {
   statusEl.textContent = message;
+}
+
+function populateTemplateSelect(selectedId) {
+  templateSelectEl.innerHTML = "";
+  for (const template of templatesCache) {
+    const option = document.createElement("option");
+    option.value = template.id;
+    option.textContent = template.label;
+    option.title = template.description || "";
+    templateSelectEl.appendChild(option);
+  }
+  const validIds = new Set(templatesCache.map((t) => t.id));
+  templateSelectEl.value = validIds.has(selectedId) ? selectedId : DEFAULT_TEMPLATE_ID;
+}
+
+function templateIdForProfile(profileId) {
+  const profile = profilesCache.find((p) => p.id === profileId);
+  return profile?.templateId || DEFAULT_TEMPLATE_ID;
 }
 
 function syncDeleteButton() {
@@ -105,8 +126,27 @@ async function refreshProfiles(selectedId) {
   populateProfileSelect(preferred);
 }
 
+async function saveSelectedTemplate(templateId) {
+  await chrome.storage.local.set({ selected_template_id: templateId });
+}
+
+async function refreshTemplates(selectedId) {
+  templatesCache = getAllTemplates();
+  const preferred =
+    selectedId ||
+    (await chrome.storage.local.get("selected_template_id")).selected_template_id ||
+    DEFAULT_TEMPLATE_ID;
+  populateTemplateSelect(preferred);
+}
+
 async function saveSelectedProfile(profileId) {
   await chrome.storage.local.set({ selected_profile_id: profileId });
+}
+
+async function applyProfileTemplateDefault(profileId) {
+  const templateId = templateIdForProfile(profileId);
+  templateSelectEl.value = templateId;
+  await saveSelectedTemplate(templateId);
 }
 
 async function persistJobFields() {
@@ -124,6 +164,7 @@ async function persistJobFields() {
 async function loadSettings() {
   const data = await chrome.storage.local.get([
     "selected_profile_id",
+    "selected_template_id",
     "last_job_title",
     "last_company_name",
     "last_jd_link",
@@ -136,6 +177,7 @@ async function loadSettings() {
   ]);
 
   await refreshProfiles(data.selected_profile_id || DEFAULT_PROFILE_ID);
+  await refreshTemplates(data.selected_template_id || templateIdForProfile(profileSelectEl.value));
   jobTitleEl.value = data.last_job_title || "";
   companyNameEl.value = data.last_company_name || "";
   jdLinkEl.value = data.last_jd_link || "";
@@ -198,6 +240,7 @@ async function copySheetRow() {
 
 async function collectJobMetaOrShowError() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
   const jobTitle = (jobTitleEl.value || "").trim();
   const companyName = (companyNameEl.value || "").trim();
   const jdLink = (jdLinkEl.value || "").trim();
@@ -237,6 +280,7 @@ async function collectJobMetaOrShowError() {
 
   await chrome.storage.local.set({
     selected_profile_id: profileId,
+    selected_template_id: templateId,
     last_job_title: jobTitle,
     last_company_name: companyName,
     last_jd_link: jdLink,
@@ -255,7 +299,8 @@ async function collectJobMetaOrShowError() {
       jdText: jd,
       outputDir,
       spreadsheetUrl,
-      sheetsWebAppUrl
+      sheetsWebAppUrl,
+      templateId
     }
   };
 }
@@ -409,6 +454,11 @@ async function removeSelectedProfile() {
 profileSelectEl.addEventListener("change", () => {
   syncDeleteButton();
   saveSelectedProfile(profileSelectEl.value).catch(() => {});
+  applyProfileTemplateDefault(profileSelectEl.value).catch(() => {});
+});
+
+templateSelectEl.addEventListener("change", () => {
+  saveSelectedTemplate(templateSelectEl.value).catch(() => {});
 });
 
 for (const el of [
@@ -441,6 +491,20 @@ saveFromJsonBtn.addEventListener("click", saveFromPastedJson);
 resetBtn.addEventListener("click", resetWorkflow);
 saveProfileBtn.addEventListener("click", saveNewProfile);
 deleteProfileBtn.addEventListener("click", removeSelectedProfile);
+
+// Popup shortcuts: Ctrl+Shift+V paste JSON; Ctrl+Enter render.
+document.addEventListener("keydown", (e) => {
+  const key = String(e.key || "").toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === "v") {
+    e.preventDefault();
+    pasteJsonFromClipboard().catch(() => {});
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && key === "enter") {
+    e.preventDefault();
+    saveFromPastedJson().catch(() => {});
+  }
+});
 
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`));
 setInterval(async () => {

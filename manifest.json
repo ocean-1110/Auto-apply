@@ -28,11 +28,20 @@
     "128": "icons/j-icon.svg"
   },
   "action": {
-    "default_title": "Resume GPT Builder",
+    "default_title": "Resume GPT Builder (Ctrl+Shift+Z)",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/j-icon.svg",
       "32": "icons/j-icon.svg"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Z",
+        "mac": "Command+Shift+Z"
+      },
+      "description": "Open Resume GPT Builder"
     }
   }
 }

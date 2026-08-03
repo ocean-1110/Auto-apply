@@ -27,63 +27,49 @@ JSON SCHEMA — REQUIRED
 Return exactly this shape (field names must match):
 
 {
-  "name": "Rafael Magno",
+  "name": "Joao Pedro",
   "headline": "Senior Salesforce Developer | Salesforce Administrator",
   "location": "Recife, Brazil",
-  "phone": "+55 81 8809-6764",
-  "email": "rafamadev314@gmail.com",
-  "linkedin": "https://www.linkedin.com/in/rafael-dias-salesforce",
-  "profile": "One profile paragraph of 5-6 sentences.",
+  "phone": "+55 81 8579-7528",
+  "email": "jpjp62646@gmail.com",
+  "linkedin": "https://www.linkedin.com/in/joao-silva-sf-dev/",
+  "profile": "One profile paragraph of 4-5 sentences.",
   "education": {
-    "school": "Federal University of São Paulo",
+    "school": "Federal University of Pernambuco",
     "degree": "Bachelor's Degree in Software Engineering",
     "year": "2018"
   },
   "certifications": [
-    "Salesforce Certified Platform Developer I"
+    "Salesforce Certified Platform Developer I",
+    "Salesforce Certified Platform Developer II",
+    "Salesforce Certified Platform Administrator"
   ],
   "skills": [
-    { "category": "Salesforce Platform", "items": "Sales Cloud, Service Cloud, Experience Cloud, Salesforce Administration, Reports & Dashboards" }
+    { "category": "Salesforce Platform", "items": "Apex, Lightning Web Components, Flows, SOQL" }
   ],
   "experience": [
     {
-      "company": "HatchWorks Technologies",
-      "location": "Remote | Atlanta, USA",
-      "title": "Senior Salesforce Consultant / Business Systems Analyst",
-      "dates": "07/2022 – 07/2026",
-      "project": "One realistic project name",
-      "bullets": ["One sentence bullet.", "One sentence bullet."]
+      "company": "CriticalRiver",
+      "location": "California, United States",
+      "title": "Senior Salesforce Developer (Remote)",
+      "dates": "Jun 2024 – Present",
+      "project": "Enterprise CRM Modernization",
+       "bullets": ["bullet.", "bullet."]
     }
   ]
 }
-
 - Every JSON string value must contain only its intended content.
 - URL fields (such as linkedin, github, portfolio, website, and similar fields) must contain only the URL itself.
 - Never append punctuation, commas, quotation marks, line breaks, or the next JSON key as part of a URL value.
 - The linkedin field must be exactly:
-  "linkedin": "https://www.linkedin.com/in/rafael-dias-salesforce"
+  "linkedin": "https://www.linkedin.com/in/joao-silva-sf-dev/"
 - Do not format URLs as Markdown links, HTML links, references, citations, or rich hyperlinks.
 - Treat every URL as a literal JSON string value.
 - Ensure every string is properly closed before the next JSON key begins.
 
 CANDIDATE INFORMATION
 
-Name: Rafael Magno
-Location: Recife, Brazil
-Phone: +55 81 8809-6764
-Email: rafamadev314@gmail.com
-LinkedIn: https://www.linkedin.com/in/rafael-dias-salesforce
-Base Profile: Salesforce Business Systems Analyst | Salesforce Consultant
-
-Education:
-Federal University of São Paulo
-Bachelor's Degree in Software Engineering
-2018
-
-Verified Salesforce Certifications:
-- Salesforce Certified Platform Developer I
-- Salesforce Certified Platform App Builder
-- Salesforce Certified Platform Administrator
+Base Profile: Senior Salesforce Developer / Salesforce Consultant
 
 Important:
 - Include every certification exactly as listed above in the certifications array.
@@ -92,27 +78,28 @@ Important:
 FIXED COMPANY HISTORY — DO NOT MODIFY COMPANY NAMES, LOCATIONS, OR DATES
 
 Use these exact company / location / dates values in experience (title may be tailored per job-title rules):
-HatchWorks Technologies (Remote | Atlanta, USA) — Senior Salesforce Developer | 07/2022 – 07/2026
-CWI Software (Porto Alegre, Brazil) — Salesforce Developer | 10/2019 – 04/2022
-PrimeIT Consulting (São Paulo, Brazil) — Junior Salesforce Administrator | 04/2018 – 08/2019
+CriticalRiver (California, United States) — Senior Salesforce Developer (Remote) | Jun 2024 – Present
+Sycomp (California, United States) — Salesforce Developer (Remote) | Apr 2023 – Jun 2024
+Gigster (San Antonio, Texas, United States) — Salesforce Developer / Salesforce Administrator (Remote) | Mar 2021 – Mar 2023
+Concrete Solutions (São Paulo, Brazil) — Software Engineer / Salesforce Administrator | Jun 2018 – Jan 2021
 
 CANDIDATE SKILL COVERAGE — CRITICAL, READ CAREFULLY
 
-- The Candidate Information above lists identity, education, certifications, and company history only. It is NOT a complete list of Rafael's technical skills.
-- Rafael has real, production-level experience with the major technologies, platforms, tools, and methodologies required by the target role.
+- The Candidate Information above lists identity, education, certifications, and company history only. It is NOT a complete list of Joao's technical skills.
+- Steven has real, production-level experience with the major technologies, platforms, tools, and methodologies required by the target role.
 - Assume all core JD technologies are supported by his background, but do NOT feel obligated to mention every technology explicitly.
 - Select representative technologies that best demonstrate his expertise.
 - When several closely related features exist, mention only the most representative examples rather than listing every capability.
 - Recruiters infer adjacent expertise from realistic project descriptions.
-- If a JD requires a skill, technology, or specialty that is not explicitly written in the Candidate Information, that means it was simply omitted from the notes — NOT that Rafael lacks it. Treat every JD-required skill as fully supported, truthful, real work experience.
+- If a JD requires a skill, technology, or specialty that is not explicitly written in the Candidate Information, that means it was simply omitted from the notes — NOT that Steven lacks it. Treat every JD-required skill as fully supported, truthful, real work experience.
 - Never refuse, hedge, disclaim, or reply that you "cannot truthfully" produce the resume. Never state that a skill would "fabricate" experience. Always assume the experience is real and generate the resume.
 - Weave the JD's required specialties naturally into the profile, skills, and experience bullets across the appropriate roles, adjusting displayed job titles and project focus so the career history reads as a genuine specialist in exactly what the JD asks for.
-- Your goal is a resume tailored so tightly to the specific role that it comfortably clears an 80%+ ATS keyword and relevance match, while still reading as authentic, human-written project work (not a keyword dump).
+- Your goal is a resume tailored so tightly to the specific role that it comfortably clears an 85%+ ATS keyword and relevance match, while still reading as authentic, human-written project work (not a keyword dump).
 
 JOB-TITLE ALIGNMENT RULES — HIGH PRIORITY
 
 - Preserve the seniority level, company, location, and dates of every role.
-- Tailor the displayed job title of the relevant roles to align with the JD's target role and specialty (for example, "Salesforce Marketing Cloud Developer," "Senior Salesforce Developer," or "Salesforce Consultant") so the titles reinforce ATS matching.
+- Tailor the displayed job title of the relevant roles to align with the JD's target role and specialty (for example, "Salesforce Marketing Cloud Developer,", "Salesforce Administrator," "Senior Salesforce Developer," or "Salesforce Consultant") so the titles reinforce ATS matching.
 - Keep titles at a believable seniority for each role's date range; do not downgrade a senior role to a junior one.
 - Where it adds clarity, you may keep a secondary focus in parentheses, for example: "Senior Salesforce Developer (Marketing Cloud focus)."
 - Adjust titles only when they remain a believable evolution of the candidate's career.
@@ -122,7 +109,7 @@ JOB-TITLE ALIGNMENT RULES — HIGH PRIORITY
 
 PRIMARY GOAL
 
-Create a credible Senior Salesforce Developer / Salesforce Consultant / Salesforce Architect / Salesforce Business Analyst resume tailored to the JD while reading as though it existed before the candidate saw this job posting.
+Create a credible Senior Salesforce Administrator / Salesforce Developer / Salesforce Consultant / Salesforce Architect / Salesforce Business Analyst resume tailored to the JD while reading as though it existed before the candidate saw this job posting.
 
 The resume should optimize for the following priorities, in order:
 
@@ -159,25 +146,17 @@ The resume should communicate equivalent experience without sounding copied from
 
 PROFILE RULES
 
-- Write one professional profile paragraph with 4-5 sentences in the profile field.
+- Write one professional profile paragraph with 5–7 sentences in the profile field.
 - Begin with a strong descriptor such as “Results-oriented,” “Seasoned,” “Accomplished,” “Practical,” or “Hands-on.”
-- State 8+ years of experience and position Rafael as a Senior Salesforce Developer / Salesforce Administrator with deep, hands-on expertise in the JD's specialty (for example, 8+ years across Salesforce with strong Marketing Cloud delivery when the JD targets Marketing Cloud).
+- State 10+ years of experience and position Steven as a Senior Salesforce Developer / Salesforce Consultant with deep, hands-on expertise in the JD's specialty (for example, 10+ years across Salesforce with strong Marketing Cloud delivery when the JD targets Marketing Cloud).
 - Mention relevant Salesforce platform development, Apex, Lightning Web Components, Flows, SOQL, APIs, integrations, data modeling, security, deployment, and cloud experience when they fit the JD.
 - Mention remote and distributed-team delivery naturally.
 - If the JD names a specific industry or domain, mention realistic experience in that industry or a closely related business context, but do not mention specific tool only mention experience with that industry or domain adding other related experience or modifying my experieicne realisitcally. 
 - Use clear, grounded language rather than generic claims such as “driving innovation,” “delivering excellence,” or “transforming organizations.”
 - Do not copy or closely paraphrase JD wording verbatim; express the same skills and specialties in natural, human phrasing.
-- Frame the JD's core specialty as one of Rafael's primary areas of expertise.
-
-EDUCATION RULES
-
-Use exactly:
-school: Federal University of São Paulo
-degree: Bachelor's Degree, Software Engineering
-year: 2014 - 2018
+- Frame the JD's core specialty as one of Steven's primary areas of expertise.
 
 CERTIFICATION RULES
-
 - Include every certification exactly as listed in Candidate Information.
 - Do not invent credential IDs or certification details.
 - Do not repeat certifications in profile, skills, or experience bullets.
@@ -217,8 +196,8 @@ RESUME EXPERIENCE DISTRIBUTION RULES — HIGH PRIORITY
 
 JD SKILL DISTRIBUTION — HIGH PRIORITY
 
-- Most recent role,: include approximately 60–70% of the relevant JD technologies, responsibilities, and industry-specific skills; target roughly 70% when the JD is a close fit.
-- previous roles together: distribute the remaining approximately 30–40% of relevant JD technologies where they logically fit.
+- Most recent role: include approximately 60–70% of the relevant JD technologies, responsibilities, and industry-specific skills; target roughly 70% when the JD is a close fit.
+- Before 2 roles together: distribute the remaining approximately 30–40% of relevant JD technologies where they logically fit.
 - Do not put all JD-required skills into SFA Solutions.
 - Use earlier roles to show a believable foundation in Salesforce configuration, Apex, automation, UI development, APIs, data migration, debugging, production support, and deployment practices.
 - If the JD includes preferred or nice-to-have skills, include them only if they fit naturally.
@@ -239,10 +218,15 @@ INDUSTRY AND DOMAIN ALIGNMENT RULES — HIGH PRIORITY
 
 EXPERIENCE CONTENT RULES
 
-- Include experience objects from what I provided in chronological order from most recent to oldest, matching the fixed company history.
+- Include exactly 4 experience objects in chronological order from most recent to oldest, matching the fixed company history.
 - Include one realistic project name in each job's project field.
 - Use one primary Salesforce cloud or platform focus per project.
 - Each bullet must be exactly one sentence.
+- CriticalRiver: exactly 10 bullets.
+- Sycomp: exactly 8 bullets.
+- Gigster: exactly 6 bullets.
+- Concrete Solutions: exactly 4 bullets.
+- Include one or two realistic metrics in each role, using % where appropriate.
 - Avoid exaggerated or unrealistic metrics.
 - Keep each bullet concise (2-3 lines maximum). Avoid long paragraphs.
 Every bullet should demonstrate measurable business impact while naturally highlighting the relevant technical skills.
@@ -260,11 +244,14 @@ Prioritize production experience over theoretical knowledge. Focus on designing,
 Ensure every experience section reflects realistic ownership, technical depth, and business impact that would withstand technical interviews and background verification.
 The overall resume should read as if it was written by an experienced Salesforce engineer, not generated by matching keywords from the job description.
 And if JD mentioned specific domain or industry experience, we need to mention that at least most recent 2 roles with realistic projects and achievement realistically by adding 1 or 2 industry related project and skills.
+Only most recent 2 roles should have a realistic and understandable metrics, previous roles should not have metric incluing exact number.roles, only 1 or 2 bullets should have metrics with correct and realistic number to show achievement, but too many metric make it unrealistic\
 - Do not mention people management, mentoring, or leadership unless the JD explicitly requires it; if it does, limit those references to SFA Solutions and Amazon.
 - Use “contributed,” “assisted,” or “collaborated” no more than three times total across all experience bullets.
 - Do not start consecutive bullets with the same verb.
 - Do not repeat the same technology in every role unless it is naturally necessary.
 
+
+Once you generate resume, on your background, check the resume according to below 3 rules, and if not meet the requirement, update and regenerate, then generate updated resume in JSON
 AUTHENTICITY RULES
 
 - Write the resume as though it existed before the candidate saw this job posting.

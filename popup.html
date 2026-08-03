@@ -11,50 +11,43 @@
       <div class="brand">
         <img src="icons/j-icon.svg" alt="J icon" class="brand-icon" />
         <h1>Resume GPT Builder</h1>
+        <p class="hype">LETS GET TEH JOBS!!! 💪</p>
       </div>
-      <p class="hype">LETS GET TEH JOBS!!! 💪💪💪💪💪</p>
 
-      <label class="field">
-        <span>Profile</span>
-        <select id="profileSelect"></select>
-      </label>
-      <p class="hint">
-        Resume profiles only. <code>CoverLetter</code> runs automatically after the resume is saved
-        (edit in <code>prompts/cover-letter.js</code>, or add a custom profile named CoverLetter).
-      </p>
-
-      <div class="row row-inline">
-        <button type="button" id="deleteProfile" class="secondary danger" hidden>
-          Delete selected profile
+      <div class="toolbar">
+        <label class="field">
+          <span>Profile</span>
+          <select id="profileSelect"></select>
+        </label>
+        <label class="field">
+          <span>Template</span>
+          <select id="templateSelect"></select>
+        </label>
+        <button type="button" id="deleteProfile" class="secondary danger compact" hidden title="Delete selected profile">
+          Delete
         </button>
       </div>
 
       <section class="section">
-        <h2 class="section-title">Job details</h2>
         <div class="grid-2">
           <label class="field">
             <span>Job title</span>
-            <input id="jobTitle" type="text" placeholder="e.g. Senior Software Engineer" autocomplete="off" />
+            <input id="jobTitle" type="text" placeholder="Senior Software Engineer" autocomplete="off" />
           </label>
           <label class="field">
-            <span>Company name</span>
-            <input id="companyName" type="text" placeholder="e.g. Acme Inc." autocomplete="off" />
+            <span>Company</span>
+            <input id="companyName" type="text" placeholder="Acme Inc." autocomplete="off" />
           </label>
         </div>
-        <label class="field">
-          <span>JD link</span>
-          <input id="jdLink" type="url" placeholder="https://..." autocomplete="off" />
-        </label>
-        <div class="row row-inline">
-          <button type="button" id="copySheetRow" class="secondary">
-            Copy row for spreadsheet
+        <div class="row-split">
+          <label class="field grow">
+            <span>JD link</span>
+            <input id="jdLink" type="url" placeholder="https://..." autocomplete="off" />
+          </label>
+          <button type="button" id="copySheetRow" class="secondary compact" title="Copy sheet row">
+            Copy row
           </button>
         </div>
-        <p class="hint">
-          Copies tab-separated
-          <code>JOB URL | JOB TITLE | COMPANY NAME | Date</code>
-          — select an empty row’s first cell in Sheets, then paste.
-        </p>
       </section>
 
       <label class="field">
@@ -62,26 +55,18 @@
         <textarea
           id="jdText"
           placeholder="Paste the job description here..."
-          rows="6"
+          rows="3"
         ></textarea>
       </label>
 
-      <div class="row row-inline">
-        <button type="button" id="pasteJd" class="secondary">Paste from clipboard</button>
-      </div>
-      <div class="row">
+      <div class="row row-2">
+        <button type="button" id="pasteJd" class="secondary">Paste JD</button>
         <button type="button" id="copyPrompt">Generate JSON in ChatGPT</button>
       </div>
-      <p class="hint">
-        Sends the resume prompt to your open ChatGPT tab (starts a new chat). When ChatGPT finishes,
-        copy its JSON reply into the <strong>Resume JSON</strong> box below. If no ChatGPT tab is open,
-        the prompt is copied to your clipboard instead.
-      </p>
 
-      <section class="section">
-        <h2 class="section-title">Output directory</h2>
-        <label class="field">
-          <span>Folder under Downloads</span>
+      <div class="row-split">
+        <label class="field grow">
+          <span>Output folder (under Downloads)</span>
           <input
             id="outputDir"
             type="text"
@@ -89,91 +74,69 @@
             autocomplete="off"
           />
         </label>
-        <p class="hint">
-          Files save to
-          <code>Downloads / [this folder] / [company name - job title] /</code>
-          as <code>jd.txt</code>, resume JSON/HTML/PDF, and Cover Letter.pdf.
-        </p>
-      </section>
+      </div>
 
       <section class="section" id="spreadsheetSection" hidden>
-        <h2 class="section-title">Google Spreadsheet</h2>
         <label class="field">
           <span>Spreadsheet link</span>
           <input
             id="spreadsheetUrl"
             type="url"
-            placeholder="https://docs.google.com/spreadsheets/d/.../edit?usp=sharing"
+            placeholder="https://docs.google.com/spreadsheets/d/.../edit"
             autocomplete="off"
           />
         </label>
-        <label class="field">
-          <span>Apps Script Web App URL</span>
-          <input
-            id="sheetsWebAppUrl"
-            type="url"
-            placeholder="https://script.google.com/macros/s/.../exec"
-            autocomplete="off"
-          />
-        </label>
-        <p class="hint">
-          One-time setup: open the sheet → Extensions → Apps Script → paste
-          <code>apps-script/Code.gs</code> → Deploy as Web app (Anyone) → paste the Web App URL here.
-          Appends: <code>JOB URL, JOB TITLE, COMPANY NAME, Application Date</code>
-        </p>
-        <div class="row row-inline">
-          <button type="button" id="copyAppsScript" class="secondary">Copy Apps Script</button>
+        <div class="row-split">
+          <label class="field grow">
+            <span>Apps Script Web App URL</span>
+            <input
+              id="sheetsWebAppUrl"
+              type="url"
+              placeholder="https://script.google.com/macros/s/.../exec"
+              autocomplete="off"
+            />
+          </label>
+          <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
         </div>
       </section>
 
-      <section class="section">
-        <h2 class="section-title">Resume JSON</h2>
-        <label class="field">
-          <span>Paste the JSON result from ChatGPT</span>
-          <textarea
-            id="manualJsonText"
-            class="prompt-input"
-            placeholder='Paste the full JSON object here, starting with { and ending with }'
-            rows="8"
-          ></textarea>
-        </label>
-        <div class="row row-inline">
-          <button type="button" id="pasteJsonFromClipboard" class="secondary">
-            Paste JSON from clipboard
-          </button>
-        </div>
-        <div class="row">
-          <button type="button" id="saveFromJson">Render resume &amp; cover letter</button>
-        </div>
-        <p class="hint">
-          Renders and saves <code>jd.txt</code> and the resume PDF locally. The cover letter is
-          generated automatically if a ChatGPT tab is open.
-        </p>
-      </section>
+      <label class="field">
+        <span>Resume JSON <em class="kbd">Ctrl+Shift+V</em></span>
+        <textarea
+          id="manualJsonText"
+          class="prompt-input"
+          placeholder='Paste JSON { ... } — then Ctrl+Enter to render'
+          rows="4"
+        ></textarea>
+      </label>
 
-      <div class="row">
-        <button type="button" id="reset">Refresh / Reset</button>
+      <div class="row row-2">
+        <button type="button" id="pasteJsonFromClipboard" class="secondary">Paste JSON</button>
+        <button type="button" id="saveFromJson">Render resume &amp; cover letter</button>
+      </div>
+
+      <div class="row row-2">
+        <button type="button" id="reset" class="secondary">Refresh / Reset</button>
+        <button type="button" class="panel-toggle secondary" id="toggleAddProfile" aria-expanded="false">
+          + Add profile
+        </button>
       </div>
 
       <section class="panel" id="addProfilePanel">
-        <button type="button" class="panel-toggle" id="toggleAddProfile" aria-expanded="false">
-          + Add new profile
-        </button>
         <div class="panel-body" id="addProfileBody" hidden>
           <label class="field">
             <span>Profile name</span>
             <input id="newProfileName" type="text" placeholder="e.g. Jane Doe" autocomplete="off" />
           </label>
           <label class="field">
-            <span>Prompt content</span>
+            <span>Prompt (must include {JD})</span>
             <textarea
               id="newProfilePrompt"
               class="prompt-input"
-              placeholder="Paste the full independent resume prompt. Include {JD} where the job description should be inserted."
-              rows="10"
+              placeholder="Paste the full resume prompt. Include {JD}."
+              rows="5"
             ></textarea>
           </label>
-          <p class="hint">Must include <code>{JD}</code> placeholder for the job description.</p>
           <div class="row">
             <button type="button" id="saveProfile">Save profile</button>
           </div>

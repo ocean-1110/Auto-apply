@@ -10,6 +10,7 @@ export const BUILTIN_PROFILES = [
     id: "steven-avon",
     label: "Steven Avon (Salesforce)",
     promptTemplate: stevenAvonPrompt,
+    templateId: "times-classic",
     builtin: true,
     kind: "resume"
   },
@@ -17,6 +18,7 @@ export const BUILTIN_PROFILES = [
     id: "charlyton",
     label: "Charlyton Santana",
     promptTemplate: charlytonPrompt,
+    templateId: "classic-blue",
     builtin: true,
     kind: "resume"
   },
