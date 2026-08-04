@@ -1,12 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Resume GPT Builder",
-  "description": "Generate tailored resumes by automating open ChatGPT tab.",
-  "version": "1.1.0",
-  "permissions": ["storage", "downloads", "clipboardRead", "scripting", "tabs", "activeTab", "debugger"],
+  "description": "Generate tailored resumes and cover letters via the OpenAI API, then render PDFs.",
+  "version": "1.2.0",
+  "permissions": ["storage", "downloads", "clipboardRead", "tabs", "debugger"],
   "host_permissions": [
-    "https://chatgpt.com/*",
-    "https://chat.openai.com/*",
+    "https://api.openai.com/*",
     "https://script.google.com/*",
     "https://script.googleusercontent.com/*"
   ],
@@ -14,13 +13,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "icons": {
     "16": "icons/j-icon.svg",
     "32": "icons/j-icon.svg",

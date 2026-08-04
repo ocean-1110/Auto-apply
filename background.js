@@ -1,14 +1,19 @@
 import { appendJobToSpreadsheet } from "./sheets.js";
-import { buildCoverLetterPrompt } from "./profiles.js";
+import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson } from "./resume-json.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
+import {
+  chatCompletion,
+  DEFAULT_OPENAI_MODEL,
+  RESUME_JSON_SYSTEM_PROMPT
+} from "./openai.js";
 
 let isRunning = false;
 let keepAliveTimer = null;
 
 function startKeepAlive() {
   stopKeepAlive();
-  // MV3 service workers can sleep during long ChatGPT waits; ping storage periodically.
+  // MV3 service workers can sleep during long OpenAI waits; ping storage periodically.
   keepAliveTimer = setInterval(() => {
     chrome.storage.local.set({ generation_heartbeat: Date.now() }).catch(() => {});
   }, 15000);
@@ -47,29 +52,17 @@ chrome.runtime.onStartup.addListener(() => {
   });
 });
 
-function isChatGptUrl(url) {
-  return (
-    typeof url === "string" &&
-    (url.startsWith("https://chatgpt.com/") || url.startsWith("https://chat.openai.com/"))
-  );
-}
-
-async function getOpenChatGptTab() {
-  const tabs = await chrome.tabs.query({});
-  const chatTabs = tabs.filter((tab) => isChatGptUrl(tab.url) && typeof tab.id === "number");
-  if (!chatTabs.length) return null;
-
-  // Prefer the ChatGPT tab the user is actually looking at, then the most
-  // recently used one, so the prompt lands in the expected tab.
-  chatTabs.sort((a, b) => {
-    if (!!b.active !== !!a.active) return (b.active ? 1 : 0) - (a.active ? 1 : 0);
-    return (b.lastAccessed || 0) - (a.lastAccessed || 0);
-  });
-  return chatTabs[0];
-}
-
 async function setStatus(status) {
   await chrome.storage.local.set({ generation_status: status });
+}
+
+async function getOpenAiSettings() {
+  const data = await chrome.storage.local.get(["openai_api_key"]);
+  const apiKey = String(data.openai_api_key || "").trim();
+  if (!apiKey) {
+    throw new Error("OpenAI API key is missing. Add it in the extension popup.");
+  }
+  return { apiKey, model: DEFAULT_OPENAI_MODEL };
 }
 
 async function downloadDataUrl(url, filename) {
@@ -425,6 +418,8 @@ async function autoDownloadResumeFiles(rawText, resumeData, jobMeta = {}) {
   }
 
   await downloadTextFile(jdTxt, "text/plain", joinDownloadPath(jobDir, "jd.txt"));
+  // Temporary: also save OpenAI resume JSON for inspection / iteration.
+  await downloadTextFile(rawText, "application/json", joinDownloadPath(jobDir, "resume.json"));
   await downloadBase64File(pdfBase64, "application/pdf", joinDownloadPath(jobDir, "Steven_Resume.pdf"));
 
   return jobDir;
@@ -433,7 +428,7 @@ async function autoDownloadResumeFiles(rawText, resumeData, jobMeta = {}) {
 function coverLetterTextToParagraphs(raw) {
   let s = String(raw || "");
 
-  // If ChatGPT returned HTML anyway, convert block boundaries to newlines, then strip tags.
+  // If the model returned HTML anyway, convert block boundaries to newlines, then strip tags.
   if (/<\/?[a-z][^>]*>/i.test(s)) {
     s = s
       .replace(/<\s*br\s*\/?>/gi, "\n")
@@ -562,432 +557,33 @@ async function autoDownloadCoverLetterPdf(rawText, jobDir, contact = {}) {
   await downloadBase64File(pdfBase64, "application/pdf", joinDownloadPath(jobDir, "Cover Letter.pdf"));
 }
 
-async function focusTabForInput(tabId) {
-  // ChatGPT's ProseMirror composer only accepts execCommand/paste insertion
-  // when its tab is the active, focused tab. Bring it to the foreground first.
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab && typeof tab.windowId === "number") {
-      await chrome.windows.update(tab.windowId, { focused: true });
-    }
-    await chrome.tabs.update(tabId, { active: true });
-    // Give the page a moment to regain focus before we type into it.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  } catch {
-    // Best-effort focusing; injection below still attempts insertion.
-  }
-}
 
-async function chatgptSendPrompt(tabId, prompt, startNewChat) {
-  await focusTabForInput(tabId);
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    args: [prompt, startNewChat],
-    func: async (fullPrompt, shouldStartNewChat) => {
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-      const clickIfExists = (selectors) => {
-        for (const selector of selectors) {
-          if (selector.startsWith("text:")) {
-            const wanted = selector.slice(5).toLowerCase();
-            const btn = Array.from(document.querySelectorAll("button")).find((b) =>
-              (b.textContent || "").toLowerCase().includes(wanted)
-            );
-            if (btn) {
-              btn.click();
-              return true;
-            }
-            continue;
-          }
-          const el = document.querySelector(selector);
-          if (el instanceof HTMLElement) {
-            el.click();
-            return true;
-          }
-        }
-        return false;
-      };
-
-      const findInput = () => {
-        const selectors = [
-          "#prompt-textarea",
-          "textarea[placeholder*='Message']",
-          "textarea",
-          "div[contenteditable='true'][id*='prompt']",
-          "div[contenteditable='true']"
-        ];
-        for (const selector of selectors) {
-          const el = document.querySelector(selector);
-          if (el && el instanceof HTMLElement) return el;
-        }
-        return null;
-      };
-
-      const setInputValue = (el, text) => {
-        if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-          el.focus();
-          const prototype =
-            el instanceof HTMLTextAreaElement
-              ? HTMLTextAreaElement.prototype
-              : HTMLInputElement.prototype;
-          const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
-          if (descriptor && typeof descriptor.set === "function") {
-            descriptor.set.call(el, text);
-          } else {
-            el.value = text;
-          }
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-          return;
-        }
-        if (el.isContentEditable) {
-          el.focus();
-          const selection = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents(el);
-          range.deleteContents();
-          range.collapse(true);
-          if (selection) {
-            selection.removeAllRanges();
-            selection.addRange(range);
-          }
-
-          // 1) Preferred: simulate a paste. ProseMirror (ChatGPT's editor)
-          //    handles clipboard paste reliably, including multi-line text.
-          let inserted = false;
-          try {
-            const dt = new DataTransfer();
-            dt.setData("text/plain", text);
-            const pasteEvent = new ClipboardEvent("paste", {
-              bubbles: true,
-              cancelable: true,
-              clipboardData: dt
-            });
-            el.dispatchEvent(pasteEvent);
-            inserted = (el.innerText || el.textContent || "").trim().length > 0;
-          } catch {
-            inserted = false;
-          }
-
-          // 2) Fallback: execCommand insertText (works when tab is focused).
-          if (!inserted) {
-            try {
-              inserted = document.execCommand("insertText", false, text);
-            } catch {
-              inserted = false;
-            }
-          }
-
-          // 3) Last resort: build paragraphs directly so text at least appears.
-          if (!inserted && !(el.innerText || el.textContent || "").trim()) {
-            el.innerHTML = "";
-            for (const line of String(text).split("\n")) {
-              const p = document.createElement("p");
-              p.textContent = line;
-              el.appendChild(p);
-            }
-          }
-
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-      };
-
-      const inputHasText = (el) => {
-        if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-          return (el.value || "").trim().length > 0;
-        }
-        return (el.innerText || el.textContent || "").trim().length > 0;
-      };
-
-      const clickSendButton = () => {
-        const selectors = [
-          "button[data-testid='send-button']",
-          "button[data-testid='composer-send-button']",
-          "#composer-submit-button",
-          "button[aria-label*='Send']",
-          "button[aria-label*='send']"
-        ];
-        for (const selector of selectors) {
-          const btn = document.querySelector(selector);
-          if (btn instanceof HTMLButtonElement && !btn.disabled) {
-            btn.click();
-            return true;
-          }
-        }
-        const btnByText = Array.from(document.querySelectorAll("button")).find((b) => {
-          const text = (b.textContent || "").trim().toLowerCase();
-          return text === "send" && b instanceof HTMLButtonElement && !b.disabled;
-        });
-        if (btnByText instanceof HTMLButtonElement) {
-          btnByText.click();
-          return true;
-        }
-        return false;
-      };
-
-      const sendMessage = (el) => {
-        if (clickSendButton()) return true;
-        el.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            key: "Enter",
-            code: "Enter",
-            bubbles: true,
-            cancelable: true
-          })
-        );
-        return clickSendButton();
-      };
-
-      const getAssistantBlocks = () =>
-        Array.from(document.querySelectorAll("[data-message-author-role='assistant']"));
-
-      const scorePayload = (text) => {
-        const t = String(text || "");
-        let score = t.length;
-        if (t.includes('"experience"')) score += 100000;
-        if (t.includes('"certifications"')) score += 50000;
-        if (t.includes('"profile"')) score += 25000;
-        return score;
-      };
-
-      const readAssistantBlock = (block) => {
-        if (!block) return "";
-        const candidates = [];
-        for (const pre of block.querySelectorAll("pre")) {
-          const text = (pre.innerText || pre.textContent || "").trim();
-          if (text) candidates.push(text);
-        }
-        for (const code of block.querySelectorAll("pre code")) {
-          const text = (code.innerText || code.textContent || "").trim();
-          if (text) candidates.push(text);
-        }
-        if (candidates.length) {
-          candidates.sort((a, b) => scorePayload(b) - scorePayload(a));
-          return candidates[0];
-        }
-        return (block.innerText || block.textContent || "").trim();
-      };
-
-      if (shouldStartNewChat) {
-        clickIfExists(["button[data-testid='new-chat-button']", "text:new chat"]);
-        await sleep(800);
-      }
-
-      const blocks = getAssistantBlocks();
-      const blocksBefore = blocks.length;
-      const latestBefore = blocks.length ? readAssistantBlock(blocks[blocks.length - 1]) : "";
-
-      let input = null;
-      for (let i = 0; i < 30; i += 1) {
-        input = findInput();
-        if (input) break;
-        await sleep(500);
-      }
-      if (!input) {
-        throw new Error("Cannot find ChatGPT message input box.");
-      }
-
-      let filled = false;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        setInputValue(input, fullPrompt);
-        await sleep(300);
-        input = findInput() || input;
-        if (inputHasText(input)) {
-          filled = true;
-          break;
-        }
-      }
-      if (!filled) {
-        throw new Error(
-          "Prompt text did not appear in the ChatGPT input. Keep the ChatGPT tab visible and try again."
-        );
-      }
-
-      // Wait briefly for ChatGPT to enable the send button after typing.
-      let sent = false;
-      for (let i = 0; i < 20; i += 1) {
-        sent = sendMessage(input);
-        if (sent) break;
-        await sleep(200);
-      }
-      if (!sent) {
-        throw new Error("Prompt was typed but the Send button could not be triggered.");
-      }
-
-      return { blocksBefore, latestBefore };
-    }
-  });
-
-  if (!results?.length) throw new Error("No response from content script.");
-  if (results[0].result === undefined && results[0].error) {
-    throw new Error(String(results[0].error.message || results[0].error));
-  }
-  return results[0].result || { blocksBefore: 0, latestBefore: "" };
-}
-
-async function chatgptPollState(tabId) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const isGenerating = () => {
-        const stopBtn =
-          document.querySelector("button[data-testid='stop-button']") ||
-          document.querySelector("button[aria-label='Stop streaming']") ||
-          document.querySelector("button[aria-label='Stop generating']") ||
-          document.querySelector("button[aria-label*='Stop generating']") ||
-          document.querySelector("button[aria-label*='Stop streaming']");
-        if (stopBtn) return true;
-        return Array.from(document.querySelectorAll("button")).some((b) => {
-          const label = `${b.getAttribute("aria-label") || ""} ${(b.textContent || "")}`.toLowerCase();
-          return label.includes("stop generating") || label.includes("stop streaming");
-        });
-      };
-
-      const scorePayload = (text) => {
-        const t = String(text || "");
-        let score = t.length;
-        if (t.includes('"experience"')) score += 100000;
-        if (t.includes('"certifications"')) score += 50000;
-        if (t.includes('"profile"')) score += 25000;
-        if (/^\s*\{/.test(t) && t.includes("}")) score += 20000;
-        if (/<!doctype html|<html[\s>]/i.test(t)) score += 10000;
-        return score;
-      };
-
-      const readAssistantBlock = (block) => {
-        if (!block) return "";
-        const candidates = [];
-        for (const pre of block.querySelectorAll("pre")) {
-          const text = (pre.innerText || pre.textContent || "").trim();
-          if (text) candidates.push(text);
-        }
-        for (const code of block.querySelectorAll("pre code")) {
-          const text = (code.innerText || code.textContent || "").trim();
-          if (text) candidates.push(text);
-        }
-        if (candidates.length) {
-          candidates.sort((a, b) => scorePayload(b) - scorePayload(a));
-          return candidates[0];
-        }
-        return (block.innerText || block.textContent || "").trim();
-      };
-
-      const blocks = Array.from(
-        document.querySelectorAll("[data-message-author-role='assistant']")
-      );
-      if (blocks.length) {
-        blocks[blocks.length - 1].scrollIntoView({ block: "end", inline: "nearest" });
-      }
-      window.scrollTo(0, document.body.scrollHeight);
-
-      const latest = blocks.length ? readAssistantBlock(blocks[blocks.length - 1]) : "";
-      return {
-        blockCount: blocks.length,
-        latest,
-        generating: isGenerating()
-      };
-    }
-  });
-
-  if (!results?.length) throw new Error("No response from content script.");
-  if (results[0].result === undefined && results[0].error) {
-    throw new Error(String(results[0].error.message || results[0].error));
-  }
-  return results[0].result || { blockCount: 0, latest: "", generating: false };
-}
-
-function looksSettledAssistantText(text) {
-  const t = String(text || "").trim();
-  if (!t) return false;
-  if (/<!doctype html|<html[\s>]/i.test(t) && /<\/html>/i.test(t)) return true;
-  if (!(t.includes('"experience"') && t.includes('"certifications"'))) {
-    // Cover letters / plain HTML may not be JSON.
-    if (/<!doctype html|<html[\s>]/i.test(t)) return /<\/html>/i.test(t);
-    // Non-JSON replies: settled if reasonably long and closed.
-    return t.length > 200;
-  }
-  const end = t.lastIndexOf("}");
-  if (end < 0) return false;
-  const after = t.slice(end + 1).replace(/```/g, "").trim();
-  return after.length === 0;
-}
-
-async function automateChatGpt(tabId, prompt, options = {}) {
-  const startNewChat = options.newChat !== false;
-  const label = options.statusLabel || "Waiting for ChatGPT response...";
-
-  const { blocksBefore, latestBefore } = await chatgptSendPrompt(tabId, prompt, startNewChat);
-
-  const timeoutMs = 6 * 60 * 1000;
-  const start = Date.now();
-  let lastText = "";
-  let sawGeneration = false;
-  let stableHits = 0;
-  let lastLen = 0;
-
-  while (Date.now() - start < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const state = await chatgptPollState(tabId);
-    if (state.generating) sawGeneration = true;
-    if (state.latest) lastText = state.latest;
-
-    const elapsedSec = Math.round((Date.now() - start) / 1000);
-    if (elapsedSec > 0 && elapsedSec % 6 === 0) {
-      await setStatus(
-        `${label} (${elapsedSec}s, ${lastText.length || 0} chars${state.generating ? ", streaming" : ""})`
-      );
-    }
-
-    // Never treat the pre-send assistant message as the new reply.
-    const isFreshText = Boolean(lastText) && lastText !== (latestBefore || "");
-    const isNewBlock = state.blockCount > blocksBefore;
-    if (!isFreshText && !isNewBlock) continue;
-    if (!isFreshText) continue;
-
-    if (state.generating) {
-      stableHits = 0;
-      lastLen = lastText.length;
-      continue;
-    }
-
-    // Require either seen streaming, or enough time + a new assistant block.
-    if (!(sawGeneration || (isNewBlock && Date.now() - start > 8000))) continue;
-
-    if (lastText.length > lastLen) {
-      lastLen = lastText.length;
-      stableHits = 0;
-      continue;
-    }
-
-    stableHits += 1;
-    if (stableHits >= 2 && looksSettledAssistantText(lastText)) {
-      return lastText;
-    }
-    if (stableHits >= 5 && sawGeneration) {
-      return lastText;
-    }
-  }
-
-  throw new Error("Timed out waiting for ChatGPT response.");
-}
-
-async function saveResumeAndCoverLetter(tabId, output, resumeData, jobMeta, { runCoverLetter = true } = {}) {
+async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, model, runCoverLetter = true } = {}) {
   await setStatus("Rendering resume from JSON, then saving jd.txt + PDF...");
   const savedDir = await autoDownloadResumeFiles(output, resumeData, jobMeta);
 
-  let status = `Saved resume to Downloads / ${savedDir} (jd.txt + Steven_Resume.pdf)`;
+  let status = `Saved resume to Downloads / ${savedDir} (jd.txt + resume.json + Steven_Resume.pdf)`;
 
-  if (runCoverLetter && typeof tabId === "number") {
+  if (runCoverLetter) {
     try {
-      await setStatus("Resume saved. Sending CoverLetter prompt and waiting for response...");
+      await setStatus("Resume saved. Generating cover letter via OpenAI...");
       const coverPrompt = await buildCoverLetterPrompt({
         jdText: jobMeta.jdText || "",
         jobTitle: jobMeta.jobTitle || "",
         companyName: jobMeta.companyName || ""
       });
-      const coverOutput = await automateChatGpt(tabId, coverPrompt, {
-        newChat: true,
-        statusLabel: "Waiting for cover letter from ChatGPT..."
+      const coverOutput = await chatCompletion({
+        apiKey,
+        model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You write professional cover letters as plain text only. No markdown fences, no HTML, no subject line."
+          },
+          { role: "user", content: coverPrompt }
+        ],
+        jsonMode: false
       });
       if (!coverOutput) throw new Error("Empty cover letter response.");
 
@@ -1000,12 +596,10 @@ async function saveResumeAndCoverLetter(tabId, output, resumeData, jobMeta, { ru
         phone: resumeData?.phone,
         linkedin: resumeData?.linkedin
       });
-      status = `Saved to Downloads / ${savedDir} (jd.txt + Steven_Resume.pdf + Cover Letter.pdf)`;
+      status = `Saved to Downloads / ${savedDir} (jd.txt + resume.json + Steven_Resume.pdf + Cover Letter.pdf)`;
     } catch (coverErr) {
       status = `${status}, but cover letter failed: ${String(coverErr?.message || coverErr)}`;
     }
-  } else if (runCoverLetter) {
-    status = `${status}. Cover letter skipped: open a ChatGPT tab to auto-generate it.`;
   }
 
   if (jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) {
@@ -1027,18 +621,44 @@ async function saveResumeAndCoverLetter(tabId, output, resumeData, jobMeta, { ru
   return { savedDir, status };
 }
 
-async function runGenerationPipeline({ jobMeta, jsonText }) {
-  // Strict manual path: parse the pasted JSON, render + save, then cover letter.
+async function runGenerationPipeline({ profileId, jobMeta }) {
+  const { apiKey, model } = await getOpenAiSettings();
+
+  await setStatus("Building resume prompt...");
+  const resumePrompt = await buildPrompt(profileId, jobMeta.jdText || "", {
+    jobTitle: jobMeta.jobTitle || "",
+    companyName: jobMeta.companyName || ""
+  });
+
+  await setStatus("Calling OpenAI for resume JSON...");
+  const jsonText = await chatCompletion({
+    apiKey,
+    model,
+    messages: [
+      { role: "system", content: RESUME_JSON_SYSTEM_PROMPT },
+      { role: "user", content: resumePrompt },
+      {
+        role: "user",
+        content:
+          "Reminder: return the COMPLETE resume JSON now. Skills items must be long and dense. Experience must include all required jobs with full long-form bullet counts (each bullet ~170–240 characters). Do not shorten or omit sections."
+      }
+    ],
+    jsonMode: true,
+    maxTokens: 16384
+  });
+
   const data = extractResumeJson(jsonText);
   if (!data) {
     throw new Error(
-      "Pasted text is not valid resume JSON. Copy the full JSON object (starting with { and ending with })."
+      "OpenAI response is not valid resume JSON. Try again or check the profile prompt."
     );
   }
   const rawText = JSON.stringify(data, null, 2);
-  const tab = await getOpenChatGptTab();
   await chrome.storage.local.set({ last_response: rawText });
-  return saveResumeAndCoverLetter(tab?.id, rawText, data, jobMeta || {}, {
+
+  return saveResumeAndCoverLetter(rawText, data, jobMeta || {}, {
+    apiKey,
+    model,
     runCoverLetter: true
   });
 }
@@ -1047,13 +667,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "reset_generation_state") {
     (async () => {
       try {
-        // Always unlock — previous runs can leave storage stuck after reload/crash.
         isRunning = false;
         stopKeepAlive();
-        const tab = await getOpenChatGptTab();
-        if (tab?.id) {
-          await chrome.tabs.reload(tab.id);
-        }
         await chrome.storage.local.set({
           generation_status: "Reset complete. Ready for next run.",
           generation_running: false,
@@ -1071,33 +686,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "send_prompt") {
-    (async () => {
-      try {
-        const tab = await getOpenChatGptTab();
-        if (!tab || typeof tab.id !== "number") {
-          safeSendResponse(sendResponse, {
-            ok: false,
-            error: "Open ChatGPT in a browser tab first."
-          });
-          return;
-        }
-        await chatgptSendPrompt(tab.id, message.prompt || "", true);
-        try {
-          await chrome.tabs.update(tab.id, { active: true });
-        } catch {
-          // focusing the tab is best-effort
-        }
-        safeSendResponse(sendResponse, { ok: true });
-      } catch (err) {
-        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
-      }
-    })();
-
-    return true;
-  }
-
-  if (message?.type !== "save_from_json") {
+  if (message?.type !== "generate_resume") {
     return undefined;
   }
 
@@ -1109,16 +698,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   isRunning = true;
   startKeepAlive();
   chrome.storage.local.set({ generation_running: true });
-  setStatus("Rendering resume from pasted JSON...");
+  setStatus("Starting OpenAI resume generation...");
 
-  // Acknowledge immediately so the popup does not sit on a closed message port for minutes.
   safeSendResponse(sendResponse, { ok: true, started: true });
 
   (async () => {
     try {
       const result = await runGenerationPipeline({
-        jobMeta: message.jobMeta || {},
-        jsonText: message.jsonText || ""
+        profileId: message.profileId,
+        jobMeta: message.jobMeta || {}
       });
       await chrome.storage.local.set({ generation_running: false });
       await setStatus(result.status);

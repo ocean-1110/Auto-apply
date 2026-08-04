@@ -1,7 +1,6 @@
 import {
   DEFAULT_PROFILE_ID,
   getResumeProfiles,
-  buildPrompt,
   addCustomProfile,
   deleteCustomProfile
 } from "./profiles.js";
@@ -56,17 +55,15 @@ const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
 const jdLinkEl = document.getElementById("jdLink");
 const jdTextEl = document.getElementById("jdText");
+const openaiApiKeyEl = document.getElementById("openaiApiKey");
 const outputDirEl = document.getElementById("outputDir");
 const spreadsheetUrlEl = document.getElementById("spreadsheetUrl");
 const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
 const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
-const copyPromptBtn = document.getElementById("copyPrompt");
+const generateResumeBtn = document.getElementById("generateResume");
 const resetBtn = document.getElementById("reset");
-const manualJsonTextEl = document.getElementById("manualJsonText");
-const pasteJsonFromClipboardBtn = document.getElementById("pasteJsonFromClipboard");
-const saveFromJsonBtn = document.getElementById("saveFromJson");
 const toggleAddProfileBtn = document.getElementById("toggleAddProfile");
 const addProfileBody = document.getElementById("addProfileBody");
 const newProfileNameEl = document.getElementById("newProfileName");
@@ -155,6 +152,7 @@ async function persistJobFields() {
     last_company_name: companyNameEl.value,
     last_jd_link: jdLinkEl.value,
     last_jd_text: jdTextEl.value,
+    openai_api_key: openaiApiKeyEl.value.trim(),
     output_dir: outputDirEl.value.trim() || DEFAULT_OUTPUT_DIR,
     spreadsheet_url: spreadsheetUrlEl.value.trim(),
     sheets_web_app_url: sheetsWebAppUrlEl.value.trim()
@@ -169,6 +167,7 @@ async function loadSettings() {
     "last_company_name",
     "last_jd_link",
     "last_jd_text",
+    "openai_api_key",
     "output_dir",
     "spreadsheet_url",
     "sheets_web_app_url",
@@ -182,6 +181,7 @@ async function loadSettings() {
   companyNameEl.value = data.last_company_name || "";
   jdLinkEl.value = data.last_jd_link || "";
   jdTextEl.value = data.last_jd_text || "";
+  openaiApiKeyEl.value = data.openai_api_key || "";
   outputDirEl.value = data.output_dir || DEFAULT_OUTPUT_DIR;
   spreadsheetUrlEl.value = data.spreadsheet_url || "";
   sheetsWebAppUrlEl.value = data.sheets_web_app_url || "";
@@ -245,10 +245,16 @@ async function collectJobMetaOrShowError() {
   const companyName = (companyNameEl.value || "").trim();
   const jdLink = (jdLinkEl.value || "").trim();
   const jd = (jdTextEl.value || "").trim();
+  const apiKey = (openaiApiKeyEl.value || "").trim();
   const outputDir = (outputDirEl.value || "").trim() || DEFAULT_OUTPUT_DIR;
   const spreadsheetUrl = (spreadsheetUrlEl.value || "").trim();
   const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
 
+  if (!apiKey) {
+    setStatus("Enter your OpenAI API key first.");
+    openaiApiKeyEl.focus();
+    return null;
+  }
   if (!jobTitle) {
     setStatus("Enter a job title first.");
     jobTitleEl.focus();
@@ -285,6 +291,7 @@ async function collectJobMetaOrShowError() {
     last_company_name: companyName,
     last_jd_link: jdLink,
     last_jd_text: jd,
+    openai_api_key: apiKey,
     output_dir: outputDir,
     spreadsheet_url: spreadsheetUrl,
     sheets_web_app_url: sheetsWebAppUrl
@@ -306,90 +313,25 @@ async function collectJobMetaOrShowError() {
 }
 
 function setBusy(busy) {
-  if (saveFromJsonBtn) saveFromJsonBtn.disabled = busy;
+  if (generateResumeBtn) generateResumeBtn.disabled = busy;
 }
 
-async function copyResumePrompt() {
-  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
-  const jd = (jdTextEl.value || "").trim();
-  const jobTitle = (jobTitleEl.value || "").trim();
-  const companyName = (companyNameEl.value || "").trim();
-
-  if (!jd) {
-    setStatus("Paste a job description into the JD field first.");
-    jdTextEl.focus();
-    return;
-  }
-
-  let prompt = "";
-  try {
-    prompt = await buildPrompt(profileId, jd, { jobTitle, companyName });
-  } catch (err) {
-    setStatus(String(err.message || err));
-    return;
-  }
-
-  await persistJobFields();
-  setStatus("Sending prompt to ChatGPT...");
-
-  try {
-    const res = await chrome.runtime.sendMessage({ type: "send_prompt", prompt });
-    if (res?.ok) {
-      setStatus("Prompt sent to ChatGPT. Wait for the JSON, then paste it into the Resume JSON box below.");
-      return;
-    }
-    // No ChatGPT tab (or send failed) — fall back to clipboard.
-    await navigator.clipboard.writeText(prompt);
-    setStatus(
-      `${res?.error || "Could not send to ChatGPT."} Prompt copied to clipboard — paste it into ChatGPT manually.`
-    );
-  } catch (err) {
-    try {
-      await navigator.clipboard.writeText(prompt);
-      setStatus("Prompt copied to clipboard — paste it into ChatGPT manually.");
-    } catch {
-      setStatus(`Failed to send or copy prompt: ${String(err.message || err)}`);
-    }
-  }
-}
-
-async function pasteJsonFromClipboard() {
-  try {
-    const text = await readClipboardText();
-    if (!text) {
-      setStatus("Clipboard is empty.");
-      return;
-    }
-    manualJsonTextEl.value = text;
-    setStatus("JSON pasted from clipboard. Click 'Render resume & cover letter'.");
-  } catch {
-    setStatus("Clipboard read failed. Paste the JSON into the box manually.");
-  }
-}
-
-async function saveFromPastedJson() {
-  const jsonText = (manualJsonTextEl.value || "").trim();
-  if (!jsonText) {
-    setStatus("Paste the resume JSON into the box first.");
-    manualJsonTextEl.focus();
-    return;
-  }
-
+async function generateResumeAndCoverLetter() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
-  setStatus("Rendering resume from pasted JSON...");
+  setStatus("Starting OpenAI resume generation...");
   setBusy(true);
   try {
     const res = await chrome.runtime.sendMessage({
-      type: "save_from_json",
-      jsonText,
+      type: "generate_resume",
+      profileId: collected.profileId,
       jobMeta: collected.jobMeta
     });
     if (!res?.ok) {
-      throw new Error(res?.error || "Failed to start save from JSON.");
+      throw new Error(res?.error || "Failed to start generation.");
     }
-    setStatus("Running: rendering PDF and saving files from pasted JSON...");
+    setStatus("Running: calling OpenAI, then rendering PDFs...");
   } catch (err) {
     setStatus(`Generation failed: ${String(err.message || err)}`);
     setBusy(false);
@@ -466,6 +408,7 @@ for (const el of [
   companyNameEl,
   jdLinkEl,
   jdTextEl,
+  openaiApiKeyEl,
   outputDirEl,
   spreadsheetUrlEl,
   sheetsWebAppUrlEl
@@ -485,24 +428,16 @@ toggleAddProfileBtn.addEventListener("click", () => {
 pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
 copyAppsScriptBtn.addEventListener("click", copyAppsScript);
 copySheetRowBtn.addEventListener("click", copySheetRow);
-copyPromptBtn.addEventListener("click", copyResumePrompt);
-pasteJsonFromClipboardBtn.addEventListener("click", pasteJsonFromClipboard);
-saveFromJsonBtn.addEventListener("click", saveFromPastedJson);
+generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
 resetBtn.addEventListener("click", resetWorkflow);
 saveProfileBtn.addEventListener("click", saveNewProfile);
 deleteProfileBtn.addEventListener("click", removeSelectedProfile);
 
-// Popup shortcuts: Ctrl+Shift+V paste JSON; Ctrl+Enter render.
 document.addEventListener("keydown", (e) => {
   const key = String(e.key || "").toLowerCase();
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === "v") {
-    e.preventDefault();
-    pasteJsonFromClipboard().catch(() => {});
-    return;
-  }
   if ((e.ctrlKey || e.metaKey) && key === "enter") {
     e.preventDefault();
-    saveFromPastedJson().catch(() => {});
+    generateResumeAndCoverLetter().catch(() => {});
   }
 });
 

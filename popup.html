@@ -59,10 +59,19 @@
         ></textarea>
       </label>
 
-      <div class="row row-2">
+      <div class="row">
         <button type="button" id="pasteJd" class="secondary">Paste JD</button>
-        <button type="button" id="copyPrompt">Generate JSON in ChatGPT</button>
       </div>
+
+      <label class="field">
+        <span>OpenAI API key</span>
+        <input
+          id="openaiApiKey"
+          type="password"
+          placeholder="sk-..."
+          autocomplete="off"
+        />
+      </label>
 
       <div class="row-split">
         <label class="field grow">
@@ -100,19 +109,8 @@
         </div>
       </section>
 
-      <label class="field">
-        <span>Resume JSON <em class="kbd">Ctrl+Shift+V</em></span>
-        <textarea
-          id="manualJsonText"
-          class="prompt-input"
-          placeholder='Paste JSON { ... } — then Ctrl+Enter to render'
-          rows="4"
-        ></textarea>
-      </label>
-
-      <div class="row row-2">
-        <button type="button" id="pasteJsonFromClipboard" class="secondary">Paste JSON</button>
-        <button type="button" id="saveFromJson">Render resume &amp; cover letter</button>
+      <div class="row">
+        <button type="button" id="generateResume">Generate resume &amp; cover letter</button>
       </div>
 
       <div class="row row-2">
