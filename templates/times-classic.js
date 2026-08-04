@@ -2,6 +2,7 @@ import {
   contactLine,
   escapeHtml,
   renderCerts,
+  renderEducationBlock,
   renderJobsStacked,
   renderSkills,
   wrapHtmlDocument
@@ -91,6 +92,15 @@ const CSS = `
       font-style: italic;
     }
 
+    p.education {
+      margin: 0 0 2.6px;
+      line-height: 1.2;
+    }
+
+    p.education br {
+      line-height: 1.15;
+    }
+
     p {
       margin: 0 0 2.6px;
       white-space: pre-wrap;
@@ -171,9 +181,7 @@ export const timesClassicTemplate = {
 
     <section>
       <h2>Education</h2>
-      <p><strong>${escapeHtml(edu.school || "")}</strong><br>
-      ${escapeHtml(edu.degree || "")}<br>
-      ${escapeHtml(edu.year || "")}</p>
+      ${renderEducationBlock(edu)}
     </section>
 
     <section>

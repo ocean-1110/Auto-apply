@@ -2,6 +2,7 @@ import {
   contactLine,
   escapeHtml,
   renderCerts,
+  renderEducationBlock,
   renderJobsFlex,
   renderSkills,
   wrapHtmlDocument
@@ -150,9 +151,7 @@ export const classicBlueTemplate = {
 
     <section>
       <h2>Education</h2>
-      <p><strong>${escapeHtml(edu.school || "")}</strong><br>
-      ${escapeHtml(edu.degree || "")}<br>
-      ${escapeHtml(edu.year || "")}</p>
+      ${renderEducationBlock(edu)}
     </section>
 
     <section>

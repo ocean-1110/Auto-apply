@@ -95,7 +95,7 @@ ${bullets}
     .join("\n");
 }
 
-/** Stacked header: company dates, then title location (Times-style). */
+/** Stacked header: company dates, then title | location (Times-style). */
 export function renderJobsStacked(jobs) {
   return (jobs || [])
     .map((job) => {
@@ -109,9 +109,11 @@ export function renderJobsStacked(jobs) {
         .map((b) => `<li>${escapeHtml(b)}</li>`)
         .join("\n");
 
+      const roleLine = [title, location].filter(Boolean).join(" | ");
+
       return `<article class="job">
   <h3 class="role-company">${company} ${dates}</h3>
-  <p class="role-meta">${title}${location ? ` ${location}` : ""}</p>
+  <p class="role-meta">${roleLine}</p>
   ${project ? `<p class="project">${project}</p>` : ""}
   <ul>
 ${bullets}
@@ -119,6 +121,21 @@ ${bullets}
 </article>`;
     })
     .join("\n");
+}
+
+/** School on one line; degree and year on one ATS-friendly line. */
+export function renderEducationBlock(edu = {}) {
+  const school = escapeHtml(edu.school || "");
+  const degree = String(edu.degree || "").trim();
+  const year = String(edu.year || "").trim();
+  const degreeYear = [degree, year].filter(Boolean).join(" - ");
+
+  if (!school && !degreeYear) return "";
+
+  const lines = [];
+  if (school) lines.push(`<strong>${school}</strong>`);
+  if (degreeYear) lines.push(escapeHtml(degreeYear));
+  return `<p class="education">${lines.join("<br>\n")}</p>`;
 }
 
 export function wrapHtmlDocument({ title, css, body }) {

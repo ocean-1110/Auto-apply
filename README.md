@@ -17,10 +17,12 @@ This extension injects a selected profile's resume prompt + JD into your already
 
 ## Setup
 
-1. Open `chrome://extensions`
-2. Enable **Developer mode**
-3. Click **Load unpacked**
-4. Select this extension folder
+1. Copy `.env.example` to `.env` and set `OPENAI_API_KEY=sk-...`
+2. Open `chrome://extensions`
+3. Enable **Developer mode**
+4. Click **Load unpacked**
+5. Select this extension folder
+6. After changing `.env`, click **Reload** on the extension card
 
 ## Use
 

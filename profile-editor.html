@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Profile editor — Resume GPT Builder</title>
+    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="profile-editor.css" />
+  </head>
+  <body class="editor-page">
+    <main class="editor">
+      <header class="editor-header">
+        <div class="brand">
+          <img src="icons/j-icon.svg" alt="" class="brand-icon" />
+          <div>
+            <h1 id="pageTitle">Edit profile</h1>
+            <p class="subtitle">Common application answers + resume prompt for autofill</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="resetBuiltinPrompt" class="secondary compact" hidden>
+            Reset prompt to default
+          </button>
+          <button type="button" id="cancelBtn" class="secondary compact">Close</button>
+          <button type="button" id="saveBtn" class="compact primary">Save</button>
+        </div>
+      </header>
+
+      <p id="status" class="editor-status" role="status"></p>
+
+      <section class="card">
+        <h2 class="section-title">Profile</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Profile name</span>
+            <input id="profileLabel" type="text" placeholder="e.g. Steven Avon" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Type</span>
+            <select id="profileKind">
+              <option value="resume">Resume</option>
+              <option value="coverLetter">Cover letter</option>
+            </select>
+          </label>
+        </div>
+        <p id="builtinHint" class="hint" hidden>
+          Built-in profile: name is fixed. You can override the prompt and edit application answers.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Personal information</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>First name</span>
+            <input id="firstName" type="text" autocomplete="given-name" />
+          </label>
+          <label class="field">
+            <span>Last name</span>
+            <input id="lastName" type="text" autocomplete="family-name" />
+          </label>
+          <label class="field">
+            <span>Middle name</span>
+            <input id="middleName" type="text" autocomplete="additional-name" />
+          </label>
+          <label class="field">
+            <span>Preferred name</span>
+            <input id="preferredName" type="text" />
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="email" type="email" autocomplete="email" />
+          </label>
+          <label class="field">
+            <span>Phone</span>
+            <input id="phone" type="tel" autocomplete="tel" />
+          </label>
+          <label class="field">
+            <span>Country</span>
+            <input id="country" type="text" autocomplete="country-name" />
+          </label>
+          <label class="field">
+            <span>State</span>
+            <select id="state"></select>
+          </label>
+          <label class="field span-2">
+            <span>Address line 1</span>
+            <input id="addressLine1" type="text" autocomplete="address-line1" />
+          </label>
+          <label class="field span-2">
+            <span>Address line 2</span>
+            <input id="addressLine2" type="text" autocomplete="address-line2" />
+          </label>
+          <label class="field">
+            <span>City</span>
+            <input id="city" type="text" autocomplete="address-level2" />
+          </label>
+          <label class="field">
+            <span>ZIP code</span>
+            <input id="zipCode" type="text" autocomplete="postal-code" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Work eligibility &amp; legal</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Legally authorized to work in the US?</span>
+            <select id="workAuthorized"></select>
+          </label>
+          <label class="field">
+            <span>Need visa sponsorship now or in future?</span>
+            <select id="needsSponsorship"></select>
+          </label>
+          <label class="field">
+            <span>Willing to relocate?</span>
+            <select id="willingToRelocate"></select>
+          </label>
+          <label class="field">
+            <span>Are you over 18?</span>
+            <select id="over18"></select>
+          </label>
+          <label class="field">
+            <span>Ever convicted of a felony?</span>
+            <select id="felonyConviction"></select>
+          </label>
+          <label class="field span-2">
+            <span>Felony explanation (if yes)</span>
+            <textarea id="felonyExplanation" rows="2"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Experience &amp; links</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Total years of experience</span>
+            <input id="yearsExperience" type="text" placeholder="e.g. 10" />
+          </label>
+          <label class="field span-2">
+            <span>Relevant experience (short summary)</span>
+            <textarea id="relevantExperience" rows="3"></textarea>
+          </label>
+          <label class="field">
+            <span>LinkedIn URL</span>
+            <input id="linkedinUrl" type="url" placeholder="https://www.linkedin.com/in/..." />
+          </label>
+          <label class="field">
+            <span>Portfolio URL</span>
+            <input id="portfolioUrl" type="url" placeholder="https://..." />
+          </label>
+          <label class="field">
+            <span>GitHub URL</span>
+            <input id="githubUrl" type="url" placeholder="https://github.com/..." />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Education</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Highest degree</span>
+            <select id="highestDegree"></select>
+          </label>
+          <label class="field">
+            <span>School name</span>
+            <input id="schoolName" type="text" />
+          </label>
+          <label class="field">
+            <span>Field of study</span>
+            <input id="fieldOfStudy" type="text" />
+          </label>
+          <label class="field">
+            <span>Graduation date</span>
+            <input id="graduationDate" type="month" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Template answers</h2>
+        <div class="grid-2">
+          <label class="field span-2">
+            <span>Why are you interested in this role? (default)</span>
+            <textarea id="whyInterested" rows="3"></textarea>
+          </label>
+          <label class="field">
+            <span>Salary expectations</span>
+            <input id="salaryExpectation" type="text" placeholder="e.g. $140,000" />
+          </label>
+          <label class="field">
+            <span>Earliest start date</span>
+            <input id="earliestStartDate" type="date" />
+          </label>
+          <label class="field">
+            <span>Willing to take a background check?</span>
+            <select id="backgroundCheckConsent"></select>
+          </label>
+          <label class="field">
+            <span>Willing to take a drug test?</span>
+            <select id="drugTestConsent"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">EEO / voluntary self-identification</h2>
+        <p class="hint">Optional. Used only when an application asks; leave blank to skip.</p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Gender</span>
+            <select id="gender"></select>
+          </label>
+          <label class="field">
+            <span>Race / ethnicity</span>
+            <select id="raceEthnicity"></select>
+          </label>
+          <label class="field">
+            <span>Veteran status</span>
+            <select id="veteranStatus"></select>
+          </label>
+          <label class="field">
+            <span>Disability status</span>
+            <select id="disabilityStatus"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Resume prompt</h2>
+        <p class="hint">Must include <code>{JD}</code>. Optional: <code>{JOB_TITLE}</code>, <code>{COMPANY}</code>.</p>
+        <label class="field">
+          <span>Prompt template</span>
+          <textarea id="promptTemplate" class="prompt-input" rows="16" spellcheck="false"></textarea>
+        </label>
+      </section>
+
+      <footer class="editor-footer">
+        <button type="button" id="cancelBtnBottom" class="secondary">Close</button>
+        <button type="button" id="saveBtnBottom">Save profile</button>
+      </footer>
+    </main>
+    <script type="module" src="profile-editor.js"></script>
+  </body>
+</html>

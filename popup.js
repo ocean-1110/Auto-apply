@@ -1,13 +1,17 @@
 import {
   DEFAULT_PROFILE_ID,
   getResumeProfiles,
-  addCustomProfile,
   deleteCustomProfile
 } from "./profiles.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { extractSpreadsheetId, buildSheetRowTsv } from "./sheets.js";
-
-const DEFAULT_OUTPUT_DIR = "Resume Applications";
+import {
+  saveOutputDirectoryHandle,
+  getOutputDirectoryName,
+  flushPendingOutputToSelectedDirectory,
+  getLastSaveMeta,
+  browseLastSavedJobDirectory
+} from "./fs-output.js";
 
 const APPS_SCRIPT_SOURCE = `/**
  * Resume GPT Builder — paste into Extensions → Apps Script on your spreadsheet,
@@ -55,20 +59,22 @@ const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
 const jdLinkEl = document.getElementById("jdLink");
 const jdTextEl = document.getElementById("jdText");
-const openaiApiKeyEl = document.getElementById("openaiApiKey");
-const outputDirEl = document.getElementById("outputDir");
+const outputDirLabelEl = document.getElementById("outputDirLabel");
+const selectOutputDirBtn = document.getElementById("selectOutputDir");
 const spreadsheetUrlEl = document.getElementById("spreadsheetUrl");
 const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
 const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const generateResumeBtn = document.getElementById("generateResume");
+const autofillBtn = document.getElementById("autofillBtn");
 const resetBtn = document.getElementById("reset");
-const toggleAddProfileBtn = document.getElementById("toggleAddProfile");
-const addProfileBody = document.getElementById("addProfileBody");
-const newProfileNameEl = document.getElementById("newProfileName");
-const newProfilePromptEl = document.getElementById("newProfilePrompt");
-const saveProfileBtn = document.getElementById("saveProfile");
+const editProfileBtn = document.getElementById("editProfile");
+const addProfileBtn = document.getElementById("addProfile");
+const closePanelBtn = document.getElementById("closePanel");
+const saveBannerEl = document.getElementById("saveBanner");
+const saveBannerPathEl = document.getElementById("saveBannerPath");
+const openSavedFolderBtn = document.getElementById("openSavedFolder");
 
 let profilesCache = [];
 let templatesCache = [];
@@ -152,11 +158,110 @@ async function persistJobFields() {
     last_company_name: companyNameEl.value,
     last_jd_link: jdLinkEl.value,
     last_jd_text: jdTextEl.value,
-    openai_api_key: openaiApiKeyEl.value.trim(),
-    output_dir: outputDirEl.value.trim() || DEFAULT_OUTPUT_DIR,
     spreadsheet_url: spreadsheetUrlEl.value.trim(),
     sheets_web_app_url: sheetsWebAppUrlEl.value.trim()
   });
+}
+
+async function refreshOutputDirLabel() {
+  const name = await getOutputDirectoryName();
+  outputDirLabelEl.value = name || "";
+  outputDirLabelEl.placeholder = name ? name : "No folder selected";
+}
+
+async function selectOutputDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") {
+    setStatus("Folder picker is not supported in this Chrome build.");
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({
+      id: "resume-bot-output",
+      mode: "readwrite",
+      startIn: "documents"
+    });
+    const name = await saveOutputDirectoryHandle(handle);
+    outputDirLabelEl.value = name;
+    setStatus(`Output folder set: ${name}`);
+  } catch (err) {
+    if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
+      setStatus("Folder selection canceled.");
+      return;
+    }
+    setStatus(`Could not select folder: ${String(err.message || err)}`);
+  }
+}
+
+function showSaveBanner(pathLabel) {
+  if (!saveBannerEl || !saveBannerPathEl) return;
+  saveBannerPathEl.textContent = pathLabel || "Files saved successfully.";
+  saveBannerEl.hidden = false;
+}
+
+function hideSaveBanner() {
+  if (saveBannerEl) saveBannerEl.hidden = true;
+}
+
+async function refreshSaveBannerFromStorage() {
+  const meta = await getLastSaveMeta();
+  if (meta?.pathLabel) {
+    showSaveBanner(meta.pathLabel);
+  }
+}
+
+async function openSavedFolder() {
+  setStatus("Opening saved folder...");
+  try {
+    const meta = await getLastSaveMeta();
+    if (!meta) {
+      setStatus("Nothing saved yet.");
+      return;
+    }
+
+    if (meta.method === "fs") {
+      await browseLastSavedJobDirectory();
+      setStatus(`Opened folder: ${meta.pathLabel}`);
+      return;
+    }
+
+    const res = await chrome.runtime.sendMessage({
+      type: "open_saved_folder",
+      meta
+    });
+    if (!res?.ok) {
+      throw new Error(res?.error || "Could not open folder.");
+    }
+    setStatus(`Opened folder: ${meta.pathLabel}`);
+  } catch (err) {
+    // FS picker may throw AbortError if user closes it after viewing — treat as ok.
+    if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
+      setStatus("Folder browser closed.");
+      return;
+    }
+    setStatus(`Open folder failed: ${String(err.message || err)}`);
+  }
+}
+
+async function tryFlushPendingOutput() {
+  try {
+    const result = await flushPendingOutputToSelectedDirectory();
+    if (result?.ok) {
+      const pathLabel = result.pathLabel || "selected folder";
+      setStatus(`Saved files to ${pathLabel}`);
+      showSaveBanner(pathLabel);
+      await chrome.storage.local.set({
+        generation_status: `Saved files to ${pathLabel}`
+      });
+      chrome.runtime
+        .sendMessage({ type: "show_save_notification", pathLabel })
+        .catch(() => {});
+      return result;
+    }
+    return result;
+  } catch (err) {
+    setStatus(`Save to folder failed: ${String(err.message || err)}`);
+    return { ok: false, error: String(err.message || err) };
+  }
 }
 
 async function loadSettings() {
@@ -167,12 +272,11 @@ async function loadSettings() {
     "last_company_name",
     "last_jd_link",
     "last_jd_text",
-    "openai_api_key",
-    "output_dir",
     "spreadsheet_url",
     "sheets_web_app_url",
     "generation_status",
-    "generation_running"
+    "generation_running",
+    "pending_fs_write"
   ]);
 
   await refreshProfiles(data.selected_profile_id || DEFAULT_PROFILE_ID);
@@ -181,12 +285,16 @@ async function loadSettings() {
   companyNameEl.value = data.last_company_name || "";
   jdLinkEl.value = data.last_jd_link || "";
   jdTextEl.value = data.last_jd_text || "";
-  openaiApiKeyEl.value = data.openai_api_key || "";
-  outputDirEl.value = data.output_dir || DEFAULT_OUTPUT_DIR;
   spreadsheetUrlEl.value = data.spreadsheet_url || "";
   sheetsWebAppUrlEl.value = data.sheets_web_app_url || "";
+  await refreshOutputDirLabel();
   setStatus(data.generation_status || "");
   setBusy(Boolean(data.generation_running));
+  await refreshSaveBannerFromStorage();
+
+  if (data.pending_fs_write) {
+    await tryFlushPendingOutput();
+  }
 }
 
 async function readClipboardText() {
@@ -245,16 +353,9 @@ async function collectJobMetaOrShowError() {
   const companyName = (companyNameEl.value || "").trim();
   const jdLink = (jdLinkEl.value || "").trim();
   const jd = (jdTextEl.value || "").trim();
-  const apiKey = (openaiApiKeyEl.value || "").trim();
-  const outputDir = (outputDirEl.value || "").trim() || DEFAULT_OUTPUT_DIR;
   const spreadsheetUrl = (spreadsheetUrlEl.value || "").trim();
   const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
 
-  if (!apiKey) {
-    setStatus("Enter your OpenAI API key first.");
-    openaiApiKeyEl.focus();
-    return null;
-  }
   if (!jobTitle) {
     setStatus("Enter a job title first.");
     jobTitleEl.focus();
@@ -284,6 +385,8 @@ async function collectJobMetaOrShowError() {
     }
   }
 
+  const outputFolderName = (await getOutputDirectoryName()) || "";
+
   await chrome.storage.local.set({
     selected_profile_id: profileId,
     selected_template_id: templateId,
@@ -291,8 +394,6 @@ async function collectJobMetaOrShowError() {
     last_company_name: companyName,
     last_jd_link: jdLink,
     last_jd_text: jd,
-    openai_api_key: apiKey,
-    output_dir: outputDir,
     spreadsheet_url: spreadsheetUrl,
     sheets_web_app_url: sheetsWebAppUrl
   });
@@ -304,7 +405,7 @@ async function collectJobMetaOrShowError() {
       companyName,
       jdLink,
       jdText: jd,
-      outputDir,
+      outputDir: outputFolderName,
       spreadsheetUrl,
       sheetsWebAppUrl,
       templateId
@@ -314,13 +415,14 @@ async function collectJobMetaOrShowError() {
 
 function setBusy(busy) {
   if (generateResumeBtn) generateResumeBtn.disabled = busy;
+  if (autofillBtn) autofillBtn.disabled = busy;
 }
 
 async function generateResumeAndCoverLetter() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
-  setStatus("Starting OpenAI resume generation...");
+  setStatus("Starting resume generation...");
   setBusy(true);
   try {
     const res = await chrome.runtime.sendMessage({
@@ -331,9 +433,35 @@ async function generateResumeAndCoverLetter() {
     if (!res?.ok) {
       throw new Error(res?.error || "Failed to start generation.");
     }
-    setStatus("Running: calling OpenAI, then rendering PDFs...");
+    setStatus("Running: calling OpenAI, then saving PDFs...");
   } catch (err) {
     setStatus(`Generation failed: ${String(err.message || err)}`);
+    setBusy(false);
+  }
+}
+
+async function runAutofillOnCurrentPage() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  if (!profileId) {
+    setStatus("Select a profile first.");
+    return;
+  }
+
+  setStatus("Autofilling current application page...");
+  setBusy(true);
+  try {
+    await chrome.storage.local.set({ selected_profile_id: profileId });
+    const res = await chrome.runtime.sendMessage({
+      type: "autofill_current_page",
+      profileId
+    });
+    if (!res?.ok) {
+      throw new Error(res?.error || "Autofill failed.");
+    }
+    setStatus(res.status || `Autofilled ${res.filledCount || 0} field(s).`);
+  } catch (err) {
+    setStatus(`Autofill failed: ${String(err.message || err)}`);
+  } finally {
     setBusy(false);
   }
 }
@@ -351,25 +479,22 @@ async function resetWorkflow() {
   }
 }
 
-async function saveNewProfile() {
-  const label = newProfileNameEl.value;
-  const promptTemplate = newProfilePromptEl.value;
-
-  saveProfileBtn.disabled = true;
-  try {
-    const profile = await addCustomProfile({ label, promptTemplate });
-    newProfileNameEl.value = "";
-    newProfilePromptEl.value = "";
-    await chrome.storage.local.set({ selected_profile_id: profile.id });
-    await refreshProfiles(profile.id);
-    addProfileBody.hidden = true;
-    toggleAddProfileBtn.setAttribute("aria-expanded", "false");
-    setStatus(`Profile saved: ${profile.label}`);
-  } catch (err) {
-    setStatus(String(err.message || err));
-  } finally {
-    saveProfileBtn.disabled = false;
+async function openProfileEditor({ mode = "edit", profileId = null } = {}) {
+  const url = new URL(chrome.runtime.getURL("profile-editor.html"));
+  url.searchParams.set("mode", mode);
+  if (mode === "edit" && profileId) {
+    url.searchParams.set("profileId", profileId);
   }
+  await chrome.tabs.create({ url: url.toString() });
+}
+
+async function editSelectedProfile() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  await openProfileEditor({ mode: "edit", profileId });
+}
+
+async function addNewProfile() {
+  await openProfileEditor({ mode: "new" });
 }
 
 async function removeSelectedProfile() {
@@ -403,35 +528,61 @@ templateSelectEl.addEventListener("change", () => {
   saveSelectedTemplate(templateSelectEl.value).catch(() => {});
 });
 
-for (const el of [
-  jobTitleEl,
-  companyNameEl,
-  jdLinkEl,
-  jdTextEl,
-  openaiApiKeyEl,
-  outputDirEl,
-  spreadsheetUrlEl,
-  sheetsWebAppUrlEl
-]) {
+for (const el of [jobTitleEl, companyNameEl, jdLinkEl, jdTextEl, spreadsheetUrlEl, sheetsWebAppUrlEl]) {
   el.addEventListener("change", () => {
     persistJobFields().catch(() => {});
   });
 }
 
-toggleAddProfileBtn.addEventListener("click", () => {
-  const open = addProfileBody.hidden;
-  addProfileBody.hidden = !open;
-  toggleAddProfileBtn.setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) newProfileNameEl.focus();
+selectOutputDirBtn.addEventListener("click", () => {
+  selectOutputDirectory().catch((err) => setStatus(String(err.message || err)));
 });
 
 pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
 copyAppsScriptBtn.addEventListener("click", copyAppsScript);
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
+autofillBtn.addEventListener("click", () => {
+  runAutofillOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
+});
 resetBtn.addEventListener("click", resetWorkflow);
-saveProfileBtn.addEventListener("click", saveNewProfile);
+editProfileBtn.addEventListener("click", () => {
+  editSelectedProfile().catch((err) => setStatus(String(err.message || err)));
+});
+addProfileBtn.addEventListener("click", () => {
+  addNewProfile().catch((err) => setStatus(String(err.message || err)));
+});
 deleteProfileBtn.addEventListener("click", removeSelectedProfile);
+closePanelBtn?.addEventListener("click", () => {
+  window.close();
+});
+openSavedFolderBtn?.addEventListener("click", () => {
+  openSavedFolder().catch((err) => setStatus(String(err.message || err)));
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "flush_pending_output") {
+    tryFlushPendingOutput()
+      .then((result) => sendResponse(result || { ok: false }))
+      .catch((err) => sendResponse({ ok: false, error: String(err.message || err) }));
+    return true;
+  }
+
+  if (message?.type === "open_saved_folder_fs") {
+    browseLastSavedJobDirectory()
+      .then((result) => sendResponse(result || { ok: true }))
+      .catch((err) => {
+        if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
+          sendResponse({ ok: true, aborted: true });
+          return;
+        }
+        sendResponse({ ok: false, error: String(err.message || err) });
+      });
+    return true;
+  }
+
+  return undefined;
+});
 
 document.addEventListener("keydown", (e) => {
   const key = String(e.key || "").toLowerCase();
@@ -443,9 +594,22 @@ document.addEventListener("keydown", (e) => {
 
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`));
 setInterval(async () => {
-  const data = await chrome.storage.local.get(["generation_status", "generation_running"]);
+  const data = await chrome.storage.local.get([
+    "generation_status",
+    "generation_running",
+    "pending_fs_write",
+    "last_save_ready",
+    "last_save_meta"
+  ]);
   if (typeof data.generation_status === "string") {
     setStatus(data.generation_status);
   }
   setBusy(Boolean(data.generation_running));
+  if (data.pending_fs_write) {
+    await tryFlushPendingOutput();
+  }
+  if (data.last_save_ready && data.last_save_meta?.pathLabel) {
+    showSaveBanner(data.last_save_meta.pathLabel);
+    await chrome.storage.local.remove("last_save_ready");
+  }
 }, 1200);

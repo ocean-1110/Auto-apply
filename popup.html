@@ -12,6 +12,9 @@
         <img src="icons/j-icon.svg" alt="J icon" class="brand-icon" />
         <h1>Resume GPT Builder</h1>
         <p class="hype">LETS GET TEH JOBS!!! 💪</p>
+        <button type="button" id="closePanel" class="secondary compact close-btn" title="Close">
+          Close
+        </button>
       </div>
 
       <div class="toolbar">
@@ -63,27 +66,22 @@
         <button type="button" id="pasteJd" class="secondary">Paste JD</button>
       </div>
 
-      <label class="field">
-        <span>OpenAI API key</span>
-        <input
-          id="openaiApiKey"
-          type="password"
-          placeholder="sk-..."
-          autocomplete="off"
-        />
-      </label>
-
       <div class="row-split">
         <label class="field grow">
-          <span>Output folder (under Downloads)</span>
+          <span>Output folder</span>
           <input
-            id="outputDir"
+            id="outputDirLabel"
             type="text"
-            placeholder="Resume Applications"
+            placeholder="No folder selected"
             autocomplete="off"
+            readonly
           />
         </label>
+        <button type="button" id="selectOutputDir" class="secondary compact" title="Choose a folder on your PC">
+          Select folder
+        </button>
       </div>
+      <p class="hint">Files save to: selected folder / {job_title}-{company}-{name}/</p>
 
       <section class="section" id="spreadsheetSection" hidden>
         <label class="field">
@@ -109,36 +107,26 @@
         </div>
       </section>
 
-      <div class="row">
+      <div class="row row-2">
         <button type="button" id="generateResume">Generate resume &amp; cover letter</button>
+        <button type="button" id="autofillBtn">Autofill</button>
       </div>
 
       <div class="row row-2">
         <button type="button" id="reset" class="secondary">Refresh / Reset</button>
-        <button type="button" class="panel-toggle secondary" id="toggleAddProfile" aria-expanded="false">
-          + Add profile
-        </button>
+        <button type="button" id="editProfile" class="secondary">Edit profile info</button>
       </div>
 
-      <section class="panel" id="addProfilePanel">
-        <div class="panel-body" id="addProfileBody" hidden>
-          <label class="field">
-            <span>Profile name</span>
-            <input id="newProfileName" type="text" placeholder="e.g. Jane Doe" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span>Prompt (must include {JD})</span>
-            <textarea
-              id="newProfilePrompt"
-              class="prompt-input"
-              placeholder="Paste the full resume prompt. Include {JD}."
-              rows="5"
-            ></textarea>
-          </label>
-          <div class="row">
-            <button type="button" id="saveProfile">Save profile</button>
-          </div>
+      <div class="row">
+        <button type="button" id="addProfile" class="secondary">+ Add profile</button>
+      </div>
+
+      <section id="saveBanner" class="save-banner" hidden>
+        <div class="save-banner-text">
+          <strong>Files saved</strong>
+          <span id="saveBannerPath"></span>
         </div>
+        <button type="button" id="openSavedFolder" class="compact">Open folder</button>
       </section>
 
       <p id="status"></p>

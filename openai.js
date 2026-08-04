@@ -16,8 +16,9 @@ export async function chatCompletion({
 }) {
   const key = String(apiKey || "").trim();
   if (!key) {
-    throw new Error("OpenAI API key is missing. Add it in the extension popup.");
-  }
+    throw new Error(
+      "OpenAI API key is missing. Add OPENAI_API_KEY to the extension .env file, then reload the extension."
+    );  }
   if (!Array.isArray(messages) || !messages.length) {
     throw new Error("OpenAI messages are required.");
   }
