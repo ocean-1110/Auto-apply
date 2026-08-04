@@ -17,6 +17,8 @@ import {
   clearPendingOutputFiles,
   setLastSaveMeta
 } from "./fs-output.js";
+import { setLastGeneratedDocs, pickUploadDocsFromBundle, getLastGeneratedDocs } from "./upload-assets.js";
+import { generateHumanizedApplicationAnswers } from "./ai-answers.js";
 
 // Service worker entry (v1.3.5)
 let isRunning = false;
@@ -216,15 +218,21 @@ async function getCurrentApplicationTab() {
 
 /**
  * Autofill the currently open application page using the selected profile's answers.
+ * Also injects last generated resume / cover letter PDFs into matching file inputs.
+ * Unmatched question fields are answered via OpenAI (generate + humanize).
  */
 async function startAutofillOnCurrentPage(profileId) {
   const applicantInfo = await getApplicantInfo(profileId);
   const hasAnyValue = Object.values(applicantInfo).some((v) => String(v || "").trim());
-  if (!hasAnyValue) {
+  const docs = await getLastGeneratedDocs();
+  const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
+
+  if (!hasAnyValue && !hasUploadDocs) {
     return {
       ok: false,
       skipped: true,
-      error: "No applicant info saved. Open Edit profile info and fill common application fields."
+      error:
+        "No applicant info or generated PDFs found. Edit profile info and/or generate a resume first."
     };
   }
 
@@ -246,14 +254,115 @@ async function startAutofillOnCurrentPage(profileId) {
   await ensureAutofillScript(tab.id);
   const result = await chrome.tabs.sendMessage(tab.id, {
     type: "autofill_application",
-    applicantInfo
+    applicantInfo,
+    uploadFiles: {
+      resume: docs?.resume || null,
+      coverLetter: docs?.coverLetter || null
+    }
   });
+
+  let aiFilledCount = 0;
+  const unmatched = Array.isArray(result?.unmatchedQuestions) ? result.unmatchedQuestions : [];
+
+  if (unmatched.length) {
+    await setStatus(`Generating human-style answers for ${unmatched.length} extra question(s)...`);
+    try {
+      const { apiKey, model } = await getOpenAiSettings();
+      const stored = await chrome.storage.local.get([
+        "last_job_title",
+        "last_company_name",
+        "last_jd_text",
+        "last_response"
+      ]);
+      const answers = await generateHumanizedApplicationAnswers({
+        apiKey,
+        model,
+        questions: unmatched,
+        applicantInfo,
+        jobMeta: {
+          jobTitle: stored.last_job_title || "",
+          companyName: stored.last_company_name || "",
+          jdText: stored.last_jd_text || ""
+        },
+        resumeText: stored.last_response || ""
+      });
+
+      if (answers.length) {
+        await setStatus(`Humanizing complete. Filling ${answers.length} AI answer(s)...`);
+        const aiResult = await chrome.tabs.sendMessage(tab.id, {
+          type: "autofill_ai_answers",
+          answers
+        });
+        aiFilledCount = Number(aiResult?.filledCount || 0);
+      }
+    } catch (aiErr) {
+      // Keep profile/file autofill success even if AI Q&A fails.
+      return {
+        ok: Boolean(result?.ok),
+        tabId: tab.id,
+        tabUrl: tab.url || "",
+        ...result,
+        aiFilledCount: 0,
+        aiError: String(aiErr?.message || aiErr)
+      };
+    }
+  }
+
   return {
     ok: Boolean(result?.ok),
     tabId: tab.id,
     tabUrl: tab.url || "",
-    ...result
+    ...result,
+    aiFilledCount
   };
+}
+
+/**
+ * Answer a single pasted application question using JD + resume + profile.
+ * Used when autofill cannot detect/fill a field on the page.
+ */
+async function answerManualApplicationQuestion(profileId, questionText) {
+  const question = String(questionText || "").trim();
+  if (!question) {
+    return { ok: false, error: "Paste a form question first." };
+  }
+  if (!profileId) {
+    return { ok: false, error: "Select a profile first." };
+  }
+
+  const applicantInfo = await getApplicantInfo(profileId);
+  const { apiKey, model } = await getOpenAiSettings();
+  const stored = await chrome.storage.local.get([
+    "last_job_title",
+    "last_company_name",
+    "last_jd_text",
+    "last_response"
+  ]);
+
+  const answers = await generateHumanizedApplicationAnswers({
+    apiKey,
+    model,
+    questions: [
+      {
+        id: "manual_q1",
+        label: question.slice(0, 1000),
+        multiline: question.length > 80 || /\?/.test(question)
+      }
+    ],
+    applicantInfo,
+    jobMeta: {
+      jobTitle: stored.last_job_title || "",
+      companyName: stored.last_company_name || "",
+      jdText: stored.last_jd_text || ""
+    },
+    resumeText: stored.last_response || ""
+  });
+
+  const answer = String(answers[0]?.answer || "").trim();
+  if (!answer) {
+    return { ok: false, error: "OpenAI returned an empty answer." };
+  }
+  return { ok: true, answer };
 }
 
 const pendingDownloadPaths = new Map(); // downloadId -> relative path under Downloads
@@ -646,7 +755,6 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
 
   const files = [
     { name: "jd.txt", mimeType: "text/plain", encoding: "utf8", content: jdTxt },
-    { name: "resume.json", mimeType: "application/json", encoding: "utf8", content: String(rawText || "") },
     {
       name: `${resumeFileBase}_Resume.html`,
       mimeType: "text/html",
@@ -728,8 +836,8 @@ async function showSaveNotification(pathLabel) {
       iconUrl: chrome.runtime.getURL("icons/j-icon.svg"),
       title: "Resume files saved",
       message: pathLabel || "Files saved successfully.",
-      priority: 2,
-      requireInteraction: true,
+      priority: 1,
+      requireInteraction: false,
       buttons: [{ title: "Open folder" }]
     });
   } catch {
@@ -770,43 +878,59 @@ async function notifyPanelToFlushOutput() {
 }
 
 /**
- * Prefer writing into the user-selected PC directory.
- * Falls back to Chrome Downloads/{job_title}-{company}-{name}/.
+ * Silent save into the user-selected PC folder only (File System Access API).
+ * Does NOT use chrome.downloads — that triggers Save As dialogs when Chrome
+ * is set to "Ask where to save each file".
  */
 async function commitOutputBundle(folderName, files) {
+  try {
+    await setLastGeneratedDocs(pickUploadDocsFromBundle(folderName, files));
+  } catch {
+    // Upload cache should not block saving.
+  }
+
   const hasHandle = Boolean(await getOutputDirectoryHandle());
   const rootLabel = (await getOutputDirectoryName()) || "";
 
-  if (hasHandle) {
-    await setPendingOutputFiles({ folderName, files });
-    await setStatus(`Writing files to ${rootLabel || "selected folder"} / ${folderName} ...`);
+  if (!hasHandle) {
+    throw new Error(
+      'No output folder selected. Click "Select folder" in the extension, then generate again.'
+    );
+  }
+
+  await setPendingOutputFiles({ folderName, files });
+  await setStatus(`Saving to ${rootLabel || "selected folder"} / ${folderName} ...`);
+
+  // Ensure the panel is open so it can write with the directory handle (silent).
+  try {
+    await openPanelWindow();
+  } catch {
+    /* panel may already be open */
+  }
+  await new Promise((r) => setTimeout(r, 350));
+
+  let lastError = "";
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
     const flushResult = await notifyPanelToFlushOutput();
     if (flushResult?.ok) {
       const pathLabel = flushResult.pathLabel || `${rootLabel} / ${folderName}`;
       await showSaveNotification(pathLabel);
       return pathLabel;
     }
-
-    // Panel may reopen / catch pending_fs_write on its interval.
-    await new Promise((r) => setTimeout(r, 1500));
-    const stillPending = (await chrome.storage.local.get("pending_fs_write")).pending_fs_write;
-    if (!stillPending) {
-      const pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
-      await showSaveNotification(pathLabel);
-      return pathLabel;
-    }
-    if (flushResult?.error) {
-      await setStatus(`Folder write pending/failed (${flushResult.error}). Falling back to Downloads...`);
-    } else {
-      await setStatus("Panel did not finish folder write. Falling back to Downloads...");
-    }
+    lastError = flushResult?.error || "Panel did not confirm the save.";
+    await new Promise((r) => setTimeout(r, 400 * attempt));
   }
 
-  await clearPendingOutputFiles().catch(() => {});
-  await setStatus(`Saving to Downloads / ${folderName} ...`);
-  const saved = await saveBundleViaDownloads(folderName, files);
-  await showSaveNotification(saved.pathLabel);
-  return saved.pathLabel;
+  const stillPending = (await chrome.storage.local.get("pending_fs_write")).pending_fs_write;
+  if (!stillPending) {
+    const pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
+    await showSaveNotification(pathLabel);
+    return pathLabel;
+  }
+
+  throw new Error(
+    `Could not save into the selected folder (${lastError}). Keep the extension window open and try again.`
+  );
 }
 
 async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, model, runCoverLetter = true } = {}) {
@@ -857,7 +981,7 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
   const savedDir = await commitOutputBundle(folderName, files);
   let status = `Saved to ${savedDir} (${resumeFileBase}_Resume.pdf${
     runCoverLetter ? " + Cover_Letter.pdf" : ""
-  } + jd.txt + resume.json + HTML)`;
+  } + jd.txt + HTML)`;
 
   if (jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) {
     await setStatus("Appending row to Google Sheet...");
@@ -1126,12 +1250,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: err });
           return;
         }
-        const msg = `Autofilled ${result.filledCount || 0} field(s) on the current page.`;
+        const msg =
+          `Autofilled ${result.filledCount || 0} field(s)` +
+          (result.uploadedCount ? `, uploaded ${result.uploadedCount} file(s)` : "") +
+          (result.aiFilledCount ? `, AI-answered ${result.aiFilledCount} question(s)` : "") +
+          (result.aiError ? ` (AI answers failed: ${result.aiError})` : "") +
+          " on the current page.";
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
         await setStatus(`Autofill failed: ${error}`);
+        safeSendResponse(sendResponse, { ok: false, error });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "answer_application_question") {
+    (async () => {
+      try {
+        await setStatus("Generating brief humanized answer...");
+        const result = await answerManualApplicationQuestion(
+          message.profileId,
+          message.question
+        );
+        if (!result.ok) {
+          await setStatus(`AI answer failed: ${result.error}`);
+          safeSendResponse(sendResponse, { ok: false, error: result.error });
+          return;
+        }
+        await setStatus("AI answer ready — copy it into the form.");
+        safeSendResponse(sendResponse, { ok: true, answer: result.answer });
+      } catch (err) {
+        const error = String(err?.message || err);
+        await setStatus(`AI answer failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
       }
     })();

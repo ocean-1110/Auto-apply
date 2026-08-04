@@ -112,6 +112,37 @@
         <button type="button" id="autofillBtn">Autofill</button>
       </div>
 
+      <section class="section ai-qa-section">
+        <label class="field">
+          <span>Missed form question</span>
+          <textarea
+            id="manualQuestion"
+            placeholder="Paste a question the autofill skipped..."
+            rows="3"
+          ></textarea>
+        </label>
+        <div class="row">
+          <button type="button" id="generateAiAnswerBtn" class="secondary">
+            Get brief AI answer
+          </button>
+        </div>
+        <label class="field">
+          <span>AI answer</span>
+          <textarea
+            id="manualAnswer"
+            placeholder="Answer appears here — copy into the form"
+            rows="3"
+            readonly
+          ></textarea>
+        </label>
+        <div class="row">
+          <button type="button" id="copyAiAnswerBtn" class="secondary" disabled>
+            Copy answer
+          </button>
+        </div>
+        <p class="hint">Uses JD + resume + profile. 1–2 sentence humanized answer.</p>
+      </section>
+
       <div class="row row-2">
         <button type="button" id="reset" class="secondary">Refresh / Reset</button>
         <button type="button" id="editProfile" class="secondary">Edit profile info</button>

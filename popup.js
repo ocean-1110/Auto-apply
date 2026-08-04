@@ -68,6 +68,10 @@ const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
+const manualQuestionEl = document.getElementById("manualQuestion");
+const manualAnswerEl = document.getElementById("manualAnswer");
+const generateAiAnswerBtn = document.getElementById("generateAiAnswerBtn");
+const copyAiAnswerBtn = document.getElementById("copyAiAnswerBtn");
 const resetBtn = document.getElementById("reset");
 const editProfileBtn = document.getElementById("editProfile");
 const addProfileBtn = document.getElementById("addProfile");
@@ -386,6 +390,11 @@ async function collectJobMetaOrShowError() {
   }
 
   const outputFolderName = (await getOutputDirectoryName()) || "";
+  if (!outputFolderName) {
+    setStatus('Select an output folder first (Select folder), then generate.');
+    selectOutputDirBtn?.focus();
+    return null;
+  }
 
   await chrome.storage.local.set({
     selected_profile_id: profileId,
@@ -416,6 +425,11 @@ async function collectJobMetaOrShowError() {
 function setBusy(busy) {
   if (generateResumeBtn) generateResumeBtn.disabled = busy;
   if (autofillBtn) autofillBtn.disabled = busy;
+  if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
+}
+
+function setCopyAnswerEnabled(enabled) {
+  if (copyAiAnswerBtn) copyAiAnswerBtn.disabled = !enabled;
 }
 
 async function generateResumeAndCoverLetter() {
@@ -463,6 +477,64 @@ async function runAutofillOnCurrentPage() {
     setStatus(`Autofill failed: ${String(err.message || err)}`);
   } finally {
     setBusy(false);
+  }
+}
+
+async function generateManualAiAnswer() {
+  const question = String(manualQuestionEl?.value || "").trim();
+  if (!question) {
+    setStatus("Paste a form question first.");
+    return;
+  }
+
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  if (!profileId) {
+    setStatus("Select a profile first.");
+    return;
+  }
+
+  // Persist JD fields so the service worker uses the latest text.
+  await persistJobFields().catch(() => {});
+
+  if (manualAnswerEl) manualAnswerEl.value = "";
+  setCopyAnswerEnabled(false);
+  setStatus("Generating brief humanized answer...");
+  setBusy(true);
+  try {
+    await chrome.storage.local.set({ selected_profile_id: profileId });
+    const res = await chrome.runtime.sendMessage({
+      type: "answer_application_question",
+      profileId,
+      question
+    });
+    if (!res?.ok) {
+      throw new Error(res?.error || "Failed to generate answer.");
+    }
+    const answer = String(res.answer || "").trim();
+    if (!answer) {
+      throw new Error("OpenAI returned an empty answer.");
+    }
+    if (manualAnswerEl) manualAnswerEl.value = answer;
+    setCopyAnswerEnabled(true);
+    setStatus("AI answer ready — copy it into the form.");
+  } catch (err) {
+    setStatus(`AI answer failed: ${String(err.message || err)}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function copyManualAiAnswer() {
+  const answer = String(manualAnswerEl?.value || "").trim();
+  if (!answer) {
+    setStatus("No answer to copy yet.");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(answer);
+    setStatus("Answer copied to clipboard.");
+  } catch (err) {
+    setStatus(`Copy failed: ${String(err.message || err)}`);
   }
 }
 
@@ -544,6 +616,12 @@ copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
 autofillBtn.addEventListener("click", () => {
   runAutofillOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
+});
+generateAiAnswerBtn?.addEventListener("click", () => {
+  generateManualAiAnswer().catch((err) => setStatus(String(err.message || err)));
+});
+copyAiAnswerBtn?.addEventListener("click", () => {
+  copyManualAiAnswer().catch((err) => setStatus(String(err.message || err)));
 });
 resetBtn.addEventListener("click", resetWorkflow);
 editProfileBtn.addEventListener("click", () => {
