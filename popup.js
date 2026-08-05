@@ -79,12 +79,58 @@ const closePanelBtn = document.getElementById("closePanel");
 const saveBannerEl = document.getElementById("saveBanner");
 const saveBannerPathEl = document.getElementById("saveBannerPath");
 const openSavedFolderBtn = document.getElementById("openSavedFolder");
+const genProgressEl = document.getElementById("genProgress");
+const genProgressStateEl = document.getElementById("genProgressState");
+const genProgressDetailEl = document.getElementById("genProgressDetail");
 
 let profilesCache = [];
 let templatesCache = [];
+let wasGenerationRunning = false;
 
-function setStatus(message) {
+function setStatus(message, kind = "") {
   statusEl.textContent = message;
+  statusEl.classList.remove("is-running", "is-done", "is-error");
+  if (kind === "running" || kind === "done" || kind === "error") {
+    statusEl.classList.add(`is-${kind}`);
+  }
+}
+
+function updateGenerationProgress({ running, statusText }) {
+  if (!genProgressEl) return;
+
+  const text = String(statusText || "").trim();
+  const failed = /fail/i.test(text);
+
+  if (running) {
+    genProgressEl.hidden = false;
+    genProgressEl.classList.remove("is-done", "is-error");
+    if (genProgressStateEl) genProgressStateEl.textContent = "In progress";
+    if (genProgressDetailEl) genProgressDetailEl.textContent = text || "Working...";
+    setStatus(text || "Generating...", "running");
+    return;
+  }
+
+  // Show Done / Failed after a run (or when status already says saved/failed).
+  if (wasGenerationRunning || /\bsaved\b/i.test(text) || failed) {
+    if (!text && !wasGenerationRunning) {
+      genProgressEl.hidden = true;
+      return;
+    }
+    genProgressEl.hidden = false;
+    genProgressEl.classList.toggle("is-error", failed);
+    genProgressEl.classList.toggle("is-done", !failed);
+    if (genProgressStateEl) {
+      genProgressStateEl.textContent = failed ? "Failed" : "Done";
+    }
+    if (genProgressDetailEl) {
+      genProgressDetailEl.textContent =
+        text || (failed ? "Generation failed." : "Files are ready.");
+    }
+    setStatus(text || (failed ? "Generation failed." : "Done."), failed ? "error" : "done");
+    return;
+  }
+
+  if (text) setStatus(text);
 }
 
 function populateTemplateSelect(selectedId) {
@@ -214,35 +260,52 @@ async function refreshSaveBannerFromStorage() {
 }
 
 async function openSavedFolder() {
-  setStatus("Opening saved folder...");
+  setStatus("Opening saved folder in File Explorer...", "running");
   try {
     const meta = await getLastSaveMeta();
     if (!meta) {
-      setStatus("Nothing saved yet.");
+      setStatus("Nothing saved yet.", "error");
       return;
     }
 
-    if (meta.method === "fs") {
-      await browseLastSavedJobDirectory();
-      setStatus(`Opened folder: ${meta.pathLabel}`);
+    // Prefer Explorer reveal via chrome.downloads.show when we already have an id.
+    if (meta.downloadId != null && meta.method === "downloads") {
+      const res = await chrome.runtime.sendMessage({
+        type: "open_saved_folder",
+        meta
+      });
+      if (!res?.ok) {
+        throw new Error(res?.error || "Could not open folder.");
+      }
+      setStatus(`Opened folder: ${meta.pathLabel}`, "done");
       return;
     }
 
-    const res = await chrome.runtime.sendMessage({
-      type: "open_saved_folder",
-      meta
-    });
-    if (!res?.ok) {
-      throw new Error(res?.error || "Could not open folder.");
+    // FS saves (and downloads-show fallback): copy job files into Downloads and reveal.
+    const result = await browseLastSavedJobDirectory();
+    if (result?.method === "file-picker") {
+      setStatus(
+        result.aborted
+          ? "File browser closed."
+          : `Showing files in saved folder${result.folderName ? ` (${result.folderName})` : ""}.`,
+        "done"
+      );
+      return;
     }
-    setStatus(`Opened folder: ${meta.pathLabel}`);
+    const label =
+      result?.folderName != null
+        ? `Downloads / ${result.folderName}`
+        : meta.pathLabel || "Downloads";
+    setStatus(
+      `Opened ${label} — resume & cover letter should be visible in File Explorer.`,
+      "done"
+    );
   } catch (err) {
-    // FS picker may throw AbortError if user closes it after viewing — treat as ok.
     if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
       setStatus("Folder browser closed.");
       return;
     }
-    setStatus(`Open folder failed: ${String(err.message || err)}`);
+    setStatus(`Open folder failed: ${String(err.message || err)}`, "error");
   }
 }
 
@@ -251,10 +314,10 @@ async function tryFlushPendingOutput() {
     const result = await flushPendingOutputToSelectedDirectory();
     if (result?.ok) {
       const pathLabel = result.pathLabel || "selected folder";
-      setStatus(`Saved files to ${pathLabel}`);
+      setStatus(`Done — saved files to ${pathLabel}`, "done");
       showSaveBanner(pathLabel);
       await chrome.storage.local.set({
-        generation_status: `Saved files to ${pathLabel}`
+        generation_status: `Done — saved files to ${pathLabel}`
       });
       chrome.runtime
         .sendMessage({ type: "show_save_notification", pathLabel })
@@ -436,7 +499,11 @@ async function generateResumeAndCoverLetter() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
-  setStatus("Starting resume generation...");
+  wasGenerationRunning = true;
+  updateGenerationProgress({
+    running: true,
+    statusText: "Starting resume generation..."
+  });
   setBusy(true);
   try {
     const res = await chrome.runtime.sendMessage({
@@ -447,9 +514,16 @@ async function generateResumeAndCoverLetter() {
     if (!res?.ok) {
       throw new Error(res?.error || "Failed to start generation.");
     }
-    setStatus("Running: calling OpenAI, then saving PDFs...");
+    updateGenerationProgress({
+      running: true,
+      statusText: "Calling OpenAI for resume JSON..."
+    });
   } catch (err) {
-    setStatus(`Generation failed: ${String(err.message || err)}`);
+    updateGenerationProgress({
+      running: false,
+      statusText: `Generation failed: ${String(err.message || err)}`
+    });
+    wasGenerationRunning = false;
     setBusy(false);
   }
 }
@@ -670,7 +744,7 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`));
+loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));
 setInterval(async () => {
   const data = await chrome.storage.local.get([
     "generation_status",
@@ -679,10 +753,20 @@ setInterval(async () => {
     "last_save_ready",
     "last_save_meta"
   ]);
-  if (typeof data.generation_status === "string") {
-    setStatus(data.generation_status);
+
+  const running = Boolean(data.generation_running);
+  const statusText =
+    typeof data.generation_status === "string" ? data.generation_status : "";
+
+  updateGenerationProgress({ running, statusText });
+  setBusy(running);
+
+  if (wasGenerationRunning && !running) {
+    wasGenerationRunning = false;
+  } else if (running) {
+    wasGenerationRunning = true;
   }
-  setBusy(Boolean(data.generation_running));
+
   if (data.pending_fs_write) {
     await tryFlushPendingOutput();
   }
@@ -690,4 +774,4 @@ setInterval(async () => {
     showSaveBanner(data.last_save_meta.pathLabel);
     await chrome.storage.local.remove("last_save_ready");
   }
-}, 1200);
+}, 600);

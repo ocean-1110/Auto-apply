@@ -287,6 +287,105 @@ button:disabled {
   font-weight: 700;
 }
 
+#status.is-running {
+  color: #fbbf24;
+}
+
+#status.is-done {
+  color: #86efac;
+}
+
+#status.is-error {
+  color: #fca5a5;
+}
+
+.gen-progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 8px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid #854d0e;
+  border-radius: 8px;
+  background: #1c1917;
+}
+
+.gen-progress[hidden] {
+  display: none;
+}
+
+.gen-progress.is-done {
+  border-color: #166534;
+  background: #052e16;
+}
+
+.gen-progress.is-error {
+  border-color: #7f1d1d;
+  background: #450a0a;
+}
+
+.gen-progress-indicator {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: #fbbf24;
+  box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.55);
+  animation: gen-pulse 1.2s ease-out infinite;
+  flex: 0 0 auto;
+}
+
+.gen-progress.is-done .gen-progress-indicator {
+  background: #22c55e;
+  box-shadow: none;
+  animation: none;
+}
+
+.gen-progress.is-error .gen-progress-indicator {
+  background: #ef4444;
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes gen-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(251, 191, 36, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+  }
+}
+
+.gen-progress-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-progress-copy strong {
+  color: #fde68a;
+  font-size: 12px;
+}
+
+.gen-progress.is-done .gen-progress-copy strong {
+  color: #86efac;
+}
+
+.gen-progress.is-error .gen-progress-copy strong {
+  color: #fca5a5;
+}
+
+.gen-progress-copy span {
+  color: #e7e5e4;
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
 .save-banner {
   display: flex;
   align-items: center;

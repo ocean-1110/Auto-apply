@@ -1153,6 +1153,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   }
   const rawText = JSON.stringify(data, null, 2);
   await chrome.storage.local.set({ last_response: rawText });
+  await setStatus("Resume JSON ready. Rendering PDF + cover letter...");
 
   const saved = await saveResumeAndCoverLetter(rawText, data, jobMeta || {}, {
     apiKey,

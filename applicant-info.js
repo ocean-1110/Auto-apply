@@ -101,10 +101,111 @@ export const VETERAN_OPTIONS = [
 
 export const DISABILITY_OPTIONS = [
   { value: "", label: "Prefer not to say" },
-  { value: "yes", label: "Yes, I have a disability" },
-  { value: "no", label: "No, I do not have a disability" },
-  { value: "decline", label: "I do not wish to answer" }
+  { value: "yes", label: "Yes, I have a disability, or have had one in the past" },
+  {
+    value: "no",
+    label: "No, I do not have a disability and have not had one in the past"
+  },
+  { value: "decline", label: "I do not want to answer" }
 ];
+
+export const ENGLISH_LEVEL_OPTIONS = [
+  { value: "", label: "—" },
+  { value: "A1", label: "A1" },
+  { value: "A2", label: "A2" },
+  { value: "B1", label: "B1" },
+  { value: "B2", label: "B2" },
+  { value: "C1", label: "C1" },
+  { value: "C2", label: "C2" },
+  { value: "native", label: "Native / bilingual" }
+];
+
+export const HISPANIC_OPTIONS = [
+  { value: "", label: "Prefer not to say" },
+  { value: "yes", label: "Yes" },
+  { value: "no", label: "No" }
+];
+
+/**
+ * Human-readable labels + synonyms for stored enum values.
+ * Autofill uses these to match dropdown option text (case-insensitive).
+ */
+export const APPLICANT_VALUE_LABELS = {
+  workAuthorized: { yes: ["Yes"], no: ["No"] },
+  needsSponsorship: { yes: ["Yes"], no: ["No"] },
+  willingToRelocate: { yes: ["Yes"], no: ["No"] },
+  over18: { yes: ["Yes"], no: ["No"] },
+  felonyConviction: { yes: ["Yes"], no: ["No"] },
+  backgroundCheckConsent: { yes: ["Yes"], no: ["No"] },
+  drugTestConsent: { yes: ["Yes"], no: ["No"] },
+  postEmploymentRestrictions: { yes: ["Yes"], no: ["No"] },
+  hispanicLatino: { yes: ["Yes"], no: ["No"] },
+  gender: {
+    female: ["Female", "Woman", "F"],
+    male: ["Male", "Man", "M"],
+    non_binary: ["Non-binary", "Nonbinary", "Non binary"],
+    other: ["Other", "Self-describe", "Self describe"]
+  },
+  raceEthnicity: {
+    american_indian: ["American Indian or Alaska Native", "American Indian", "Alaska Native"],
+    asian: ["Asian"],
+    black: ["Black or African American", "Black", "African American"],
+    hispanic: ["Hispanic or Latino", "Hispanic", "Latino", "Latinx", "Spanish Origin"],
+    native_hawaiian: [
+      "Native Hawaiian or Other Pacific Islander",
+      "Native Hawaiian",
+      "Pacific Islander"
+    ],
+    white: ["White", "Caucasian"],
+    two_or_more: ["Two or more races", "Two or more", "Multiracial"]
+  },
+  veteranStatus: {
+    not_veteran: [
+      "I am not a protected veteran",
+      "No, I am not a veteran or active member",
+      "I am not a veteran",
+      "Not a veteran",
+      "No"
+    ],
+    protected_veteran: [
+      "I identify as a protected veteran",
+      "Yes, I am a veteran",
+      "Protected veteran",
+      "Yes"
+    ],
+    decline: ["I decline to self-identify", "Prefer not to say", "I do not wish to answer"]
+  },
+  disabilityStatus: {
+    yes: [
+      "Yes, I have a disability, or have had one in the past",
+      "Yes, I have a disability",
+      "Yes"
+    ],
+    no: [
+      "No, I do not have a disability and have not had one in the past",
+      "No, I do not have a disability",
+      "No"
+    ],
+    decline: ["I do not want to answer", "I do not wish to answer", "Prefer not to say"]
+  },
+  englishLevel: {
+    A1: ["A1"],
+    A2: ["A2"],
+    B1: ["B1"],
+    B2: ["B2"],
+    C1: ["C1", "C1 Advanced", "Advanced"],
+    C2: ["C2", "C2 Proficiency", "Proficient"],
+    native: ["Native", "Native / bilingual", "Bilingual", "Fluent"]
+  },
+  highestDegree: {
+    high_school: ["High School", "High School Diploma", "GED"],
+    associate: ["Associate", "Associate's", "Associates"],
+    bachelor: ["Bachelor", "Bachelor's", "Bachelors", "BS", "BA", "B.S.", "B.A."],
+    master: ["Master", "Master's", "Masters", "MS", "MA", "M.S.", "M.A.", "MBA"],
+    doctorate: ["Doctorate", "PhD", "Ph.D.", "Doctoral"],
+    other: ["Other"]
+  }
+};
 
 /** Empty applicant info shape used for forms and autofill. */
 export function createEmptyApplicantInfo() {
@@ -122,10 +223,12 @@ export function createEmptyApplicantInfo() {
     city: "",
     state: "",
     zipCode: "",
+    cityCountryOfResidence: "",
 
     // Work eligibility
     workAuthorized: "",
     needsSponsorship: "",
+    postEmploymentRestrictions: "",
     willingToRelocate: "",
     over18: "",
     felonyConviction: "",
@@ -134,6 +237,7 @@ export function createEmptyApplicantInfo() {
     // Experience / links
     yearsExperience: "",
     relevantExperience: "",
+    englishLevel: "",
     linkedinUrl: "",
     portfolioUrl: "",
     githubUrl: "",
@@ -153,10 +257,30 @@ export function createEmptyApplicantInfo() {
 
     // EEO (voluntary)
     gender: "",
+    hispanicLatino: "",
     raceEthnicity: "",
     veteranStatus: "",
     disabilityStatus: ""
   };
+}
+
+/** Expand a stored field value into candidate strings for dropdown matching. */
+export function expandApplicantValueCandidates(key, value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return [];
+  const out = [raw];
+  const map = APPLICANT_VALUE_LABELS[key];
+  if (map && map[raw]) {
+    for (const label of map[raw]) {
+      if (label && !out.includes(label)) out.push(label);
+    }
+  }
+  // Always try Title Case for short yes/no style answers.
+  if (/^(yes|no)$/i.test(raw)) {
+    const titled = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+    if (!out.includes(titled)) out.push(titled);
+  }
+  return out;
 }
 
 export async function getAllApplicantInfo() {

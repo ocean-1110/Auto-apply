@@ -99,6 +99,14 @@
             <span>ZIP code</span>
             <input id="zipCode" type="text" autocomplete="postal-code" />
           </label>
+          <label class="field span-2">
+            <span>City, Country of residence</span>
+            <input
+              id="cityCountryOfResidence"
+              type="text"
+              placeholder="e.g. Brick, New Jersey, United States"
+            />
+          </label>
         </div>
       </section>
 
@@ -112,6 +120,13 @@
           <label class="field">
             <span>Need visa sponsorship now or in future?</span>
             <select id="needsSponsorship"></select>
+          </label>
+          <label class="field span-2">
+            <span>
+              Subject to non-solicitation, non-competition, or similar post-employment
+              restrictions?
+            </span>
+            <select id="postEmploymentRestrictions"></select>
           </label>
           <label class="field">
             <span>Willing to relocate?</span>
@@ -138,6 +153,10 @@
           <label class="field">
             <span>Total years of experience</span>
             <input id="yearsExperience" type="text" placeholder="e.g. 10" />
+          </label>
+          <label class="field">
+            <span>English level</span>
+            <select id="englishLevel"></select>
           </label>
           <label class="field span-2">
             <span>Relevant experience (short summary)</span>
@@ -215,7 +234,11 @@
             <select id="gender"></select>
           </label>
           <label class="field">
-            <span>Race / ethnicity</span>
+            <span>Are you Hispanic/Latino?</span>
+            <select id="hispanicLatino"></select>
+          </label>
+          <label class="field">
+            <span>Race</span>
             <select id="raceEthnicity"></select>
           </label>
           <label class="field">

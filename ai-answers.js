@@ -33,17 +33,25 @@ function compactApplicantContext(applicantInfo = {}) {
     "city",
     "state",
     "country",
+    "cityCountryOfResidence",
     "yearsExperience",
     "relevantExperience",
+    "englishLevel",
     "highestDegree",
     "schoolName",
     "fieldOfStudy",
     "workAuthorized",
     "needsSponsorship",
+    "postEmploymentRestrictions",
     "salaryExpectation",
     "earliestStartDate",
     "whyInterested",
-    "linkedinUrl"
+    "linkedinUrl",
+    "gender",
+    "hispanicLatino",
+    "raceEthnicity",
+    "veteranStatus",
+    "disabilityStatus"
   ];
   const out = {};
   for (const key of keys) {
@@ -92,6 +100,7 @@ export async function generateHumanizedApplicationAnswers({
           "You answer US job-application form questions for a real candidate. " +
           "Return ONLY valid JSON: {\"answers\":[{\"id\":\"...\",\"answer\":\"...\"}]}. " +
           "Keep each answer to 1-2 sentences max (a short phrase for tiny fields). " +
+          "For yes/no style answers use Title Case exactly: \"Yes\" or \"No\" (never lowercase). " +
           "If the question requires a specific opening phrase, begin the answer with that phrase exactly. " +
           "Ground answers in the candidate resume and profile; prefer real roles, employers, tools, and skills from the resume. " +
           "Do not invent employers, degrees, visas, or tools that contradict the resume/profile. " +

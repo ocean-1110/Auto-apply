@@ -177,8 +177,15 @@ export async function getLastJobDirectoryHandle() {
 }
 
 /**
- * Open the last saved job folder in the system/browser folder UI when possible.
- * For File System Access saves: re-opens the folder picker at that directory.
+ * Open the last saved job folder in the OS file manager when possible.
+ *
+ * Why not showDirectoryPicker?
+ * That API opens Chrome's "Select folder" dialog (for picking a directory),
+ * not File Explorer — so resume/cover-letter files are easy to miss.
+ *
+ * Fix: re-download the job files from the stored DirectoryHandle into
+ * Chrome's Downloads/{jobFolder}/ (silent), then chrome.downloads.show()
+ * which opens Explorer on that folder with the files visible.
  */
 export async function browseLastSavedJobDirectory() {
   const jobDir = await getLastJobDirectoryHandle();
@@ -189,26 +196,120 @@ export async function browseLastSavedJobDirectory() {
   if (!allowed) {
     throw new Error("Permission denied. Select your output folder again.");
   }
-  if (typeof window.showDirectoryPicker !== "function") {
-    throw new Error("Folder browser is not available in this Chrome build.");
+
+  const folderName =
+    String(jobDir.name || "resume-bot")
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "resume-bot";
+
+  let lastDownloadId = null;
+  const openedNames = [];
+
+  try {
+    for await (const entry of jobDir.values()) {
+      if (entry.kind !== "file") continue;
+      const name = String(entry.name || "");
+      if (!/\.(pdf|html|txt)$/i.test(name)) continue;
+
+      const file = await entry.getFile();
+      const url = URL.createObjectURL(file);
+      try {
+        const downloadId = await chrome.downloads.download({
+          url,
+          filename: `${folderName}/${name}`,
+          conflictAction: "uniquify",
+          saveAs: false
+        });
+        if (downloadId != null) {
+          lastDownloadId = downloadId;
+          openedNames.push(name);
+        }
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    }
+  } catch (downloadErr) {
+    // If Chrome is set to "Ask where to save", downloads may fail/abort.
+    // Fall back to a file picker rooted at the real job folder (shows PDFs).
+    if (typeof window.showOpenFilePicker === "function") {
+      try {
+        await window.showOpenFilePicker({
+          multiple: true,
+          startIn: jobDir,
+          types: [
+            {
+              description: "Resume files",
+              accept: {
+                "application/pdf": [".pdf"],
+                "text/html": [".html"],
+                "text/plain": [".txt"]
+              }
+            }
+          ]
+        });
+        return { ok: true, method: "file-picker", folderName };
+      } catch (pickerErr) {
+        if (
+          pickerErr &&
+          (pickerErr.name === "AbortError" ||
+            String(pickerErr.message || "").includes("abort"))
+        ) {
+          return { ok: true, method: "file-picker", aborted: true, folderName };
+        }
+        throw downloadErr;
+      }
+    }
+    throw downloadErr;
   }
-  // Opens the folder picker rooted at the last job directory so you can see the files.
-  await window.showDirectoryPicker({
-    id: "resume-bot-open-saved",
-    mode: "read",
-    startIn: jobDir
-  });
-  return { ok: true, method: "fs" };
+
+  if (lastDownloadId == null) {
+    // No downloadable files — still try file picker on the real folder.
+    if (typeof window.showOpenFilePicker === "function") {
+      await window.showOpenFilePicker({
+        multiple: true,
+        startIn: jobDir
+      });
+      return { ok: true, method: "file-picker", folderName };
+    }
+    throw new Error("No resume/cover letter files found in the saved folder.");
+  }
+
+  // Reveal the last file in File Explorer (shows the folder + files).
+  try {
+    chrome.downloads.show(Number(lastDownloadId));
+  } catch (err) {
+    throw new Error(String(err?.message || err) || "Could not open Downloads folder.");
+  }
+
+  await setLastSaveMeta(
+    {
+      ...(await getLastSaveMeta()),
+      downloadId: lastDownloadId,
+      revealFolder: `Downloads / ${folderName}`,
+      files: openedNames
+    },
+    { announce: false }
+  );
+
+  return {
+    ok: true,
+    method: "downloads-show",
+    downloadId: lastDownloadId,
+    folderName,
+    files: openedNames
+  };
 }
 
-export async function setLastSaveMeta(meta) {
-  await chrome.storage.local.set({
+export async function setLastSaveMeta(meta, { announce = true } = {}) {
+  const payload = {
     [LAST_SAVE_META_KEY]: {
       ...meta,
       at: Date.now()
-    },
-    last_save_ready: true
-  });
+    }
+  };
+  if (announce) payload.last_save_ready = true;
+  await chrome.storage.local.set(payload);
 }
 
 export async function getLastSaveMeta() {

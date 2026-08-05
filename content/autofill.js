@@ -1,6 +1,7 @@
 /**
  * Generic application-form autofill (content script).
  * Fills text, textarea, select, checkbox, and radio controls from applicant info.
+ * For dropdowns/comboboxes: never types "yes"/"no" — opens the list and picks a matching option.
  */
 (() => {
   if (window.__resumeBotAutofillInstalled) return;
@@ -13,12 +14,18 @@
     preferredName: ["preferred name", "preferred first name", "nickname", "what should we call you"],
     email: ["email", "e-mail", "email address", "work email"],
     phone: ["phone", "phone number", "mobile", "mobile phone", "cell", "telephone", "tel"],
-    country: ["country", "country/region", "country of residence"],
+    country: ["country", "country/region"],
     addressLine1: ["address", "address line 1", "street address", "address 1", "home address"],
     addressLine2: ["address line 2", "address 2", "apartment", "suite", "unit", "apt"],
     city: ["city", "town"],
     state: ["state", "province", "state/province", "region"],
     zipCode: ["zip", "zip code", "postal", "postal code", "zip/postal"],
+    cityCountryOfResidence: [
+      "city, country of residence",
+      "city country of residence",
+      "city and country of residence",
+      "country of residence"
+    ],
 
     workAuthorized: [
       "authorized to work",
@@ -35,6 +42,18 @@
       "need sponsorship",
       "will you now or in the future require"
     ],
+    postEmploymentRestrictions: [
+      "non-solicitation",
+      "non solicitation",
+      "non-competition",
+      "non competition",
+      "non-compete",
+      "non compete",
+      "post-employment",
+      "post employment",
+      "restrictive covenant",
+      "subject to any contract"
+    ],
     willingToRelocate: ["relocate", "willing to relocate", "relocation"],
     over18: ["over 18", "at least 18", "18 years of age", "age of majority"],
     felonyConviction: ["felony", "criminal conviction", "convicted of a crime", "criminal record"],
@@ -42,6 +61,13 @@
 
     yearsExperience: ["years of experience", "total experience", "years experience", "how many years"],
     relevantExperience: ["relevant experience", "describe your experience"],
+    englishLevel: [
+      "english level",
+      "english proficiency",
+      "level of english",
+      "language proficiency",
+      "fluency in english"
+    ],
     linkedinUrl: ["linkedin", "linkedin url", "linkedin profile"],
     portfolioUrl: ["portfolio", "website", "personal website", "portfolio url"],
     githubUrl: ["github", "github url", "github profile"],
@@ -73,9 +99,129 @@
     drugTestConsent: ["drug test", "drug screen", "drug screening"],
 
     gender: ["gender", "gender identity", "sex"],
-    raceEthnicity: ["race", "ethnicity", "race/ethnicity", "racial"],
-    veteranStatus: ["veteran", "military status", "protected veteran"],
-    disabilityStatus: ["disability", "disabled"]
+    hispanicLatino: [
+      "hispanic/latino",
+      "hispanic or latino",
+      "are you hispanic",
+      "hispanic latino",
+      "latinx"
+    ],
+    raceEthnicity: [
+      "identify your race",
+      "please identify your race",
+      "racial/ethnic background",
+      "race/ethnicity",
+      "race ethnicity",
+      "racial background",
+      "ethnicity",
+      "race"
+    ],
+    veteranStatus: ["veteran", "military status", "protected veteran", "armed forces"],
+    disabilityStatus: ["disability", "disabled", "chronic condition"]
+  };
+
+  /** Fields whose answers should be chosen from a dropdown/list, not typed as free text. */
+  const SELECT_LIKE_KEYS = new Set([
+    "workAuthorized",
+    "needsSponsorship",
+    "postEmploymentRestrictions",
+    "willingToRelocate",
+    "over18",
+    "felonyConviction",
+    "backgroundCheckConsent",
+    "drugTestConsent",
+    "gender",
+    "hispanicLatino",
+    "raceEthnicity",
+    "veteranStatus",
+    "disabilityStatus",
+    "englishLevel",
+    "highestDegree",
+    "state"
+  ]);
+
+  const VALUE_LABELS = {
+    workAuthorized: { yes: ["Yes"], no: ["No"] },
+    needsSponsorship: { yes: ["Yes"], no: ["No"] },
+    willingToRelocate: { yes: ["Yes"], no: ["No"] },
+    over18: { yes: ["Yes"], no: ["No"] },
+    felonyConviction: { yes: ["Yes"], no: ["No"] },
+    backgroundCheckConsent: { yes: ["Yes"], no: ["No"] },
+    drugTestConsent: { yes: ["Yes"], no: ["No"] },
+    postEmploymentRestrictions: { yes: ["Yes"], no: ["No"] },
+    hispanicLatino: { yes: ["Yes"], no: ["No"] },
+    gender: {
+      female: ["Female", "Woman", "F"],
+      male: ["Male", "Man", "M"],
+      non_binary: ["Non-binary", "Nonbinary", "Non binary"],
+      other: ["Other", "Self-describe", "Self describe"]
+    },
+    raceEthnicity: {
+      american_indian: ["American Indian or Alaska Native", "American Indian", "Alaska Native"],
+      asian: ["Asian"],
+      black: ["Black or African American", "Black", "African American"],
+      hispanic: [
+        "Hispanic or Latino",
+        "Hispanic, Latinx or of Spanish Origin",
+        "Hispanic",
+        "Latino",
+        "Latinx",
+        "Spanish Origin"
+      ],
+      native_hawaiian: [
+        "Native Hawaiian or Other Pacific Islander",
+        "Native Hawaiian",
+        "Pacific Islander"
+      ],
+      white: ["White", "Caucasian"],
+      two_or_more: ["Two or more races", "Two or more", "Multiracial"]
+    },
+    veteranStatus: {
+      not_veteran: [
+        "I am not a protected veteran",
+        "No, I am not a veteran or active member",
+        "I am not a veteran",
+        "Not a veteran",
+        "No"
+      ],
+      protected_veteran: [
+        "I identify as a protected veteran",
+        "Yes, I am a veteran",
+        "Protected veteran",
+        "Yes"
+      ],
+      decline: ["I decline to self-identify", "Prefer not to say", "I do not wish to answer"]
+    },
+    disabilityStatus: {
+      yes: [
+        "Yes, I have a disability, or have had one in the past",
+        "Yes, I have a disability",
+        "Yes"
+      ],
+      no: [
+        "No, I do not have a disability and have not had one in the past",
+        "No, I do not have a disability",
+        "No"
+      ],
+      decline: ["I do not want to answer", "I do not wish to answer", "Prefer not to say"]
+    },
+    englishLevel: {
+      A1: ["A1"],
+      A2: ["A2"],
+      B1: ["B1"],
+      B2: ["B2"],
+      C1: ["C1", "C1 Advanced", "Advanced"],
+      C2: ["C2", "C2 Proficiency", "Proficient"],
+      native: ["Native", "Native / bilingual", "Bilingual", "Fluent"]
+    },
+    highestDegree: {
+      high_school: ["High School", "High School Diploma", "GED"],
+      associate: ["Associate", "Associate's", "Associates"],
+      bachelor: ["Bachelor", "Bachelor's", "Bachelors", "BS", "BA"],
+      master: ["Master", "Master's", "Masters", "MS", "MA", "MBA"],
+      doctorate: ["Doctorate", "PhD", "Ph.D.", "Doctoral"],
+      other: ["Other"]
+    }
   };
 
   const YES_VALUES = new Set(["yes", "y", "true", "1"]);
@@ -87,6 +233,23 @@
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function expandValueCandidates(key, value) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return [];
+    const out = [raw];
+    const map = VALUE_LABELS[key];
+    if (map && map[raw]) {
+      for (const label of map[raw]) {
+        if (label && !out.includes(label)) out.push(label);
+      }
+    }
+    if (/^(yes|no)$/i.test(raw)) {
+      const titled = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+      if (!out.includes(titled)) out.push(titled);
+    }
+    return out;
   }
 
   function setNativeValue(el, value) {
@@ -134,6 +297,17 @@
     if (prev && /LABEL|SPAN|DIV|P|LEGEND/i.test(prev.tagName)) {
       parts.push(prev.textContent || "");
     }
+    // Walk up a few parents for ATS question wrappers (Ashby / Greenhouse).
+    let parent = el.parentElement;
+    for (let i = 0; i < 4 && parent; i += 1) {
+      const heading = parent.querySelector(
+        ":scope > label, :scope > legend, :scope > p, :scope > span, :scope > div > label"
+      );
+      if (heading && heading !== el) parts.push(heading.textContent || "");
+      const q = parent.getAttribute?.("data-question") || parent.getAttribute?.("aria-label");
+      if (q) parts.push(q);
+      parent = parent.parentElement;
+    }
     const fieldset = el.closest("fieldset");
     if (fieldset) {
       const legend = fieldset.querySelector("legend");
@@ -158,7 +332,6 @@
     }
     const wrapping = el.closest("label");
     if (wrapping) {
-      // Prefer label text excluding the control's own value/placeholder noise.
       const clone = wrapping.cloneNode(true);
       clone.querySelectorAll("input, textarea, select, button").forEach((n) => n.remove());
       candidates.push(cleanLabelText(clone.textContent));
@@ -178,7 +351,6 @@
       candidates.push(cleanLabelText(prev.textContent));
     }
 
-    // Pick the longest meaningful candidate (question prompts are usually longest).
     let best = "";
     for (const c of candidates) {
       if (!c) continue;
@@ -187,7 +359,6 @@
     }
     if (best) return best.slice(0, 1000);
 
-    // Fallback to normalized match blob (still useful for detection).
     return cleanLabelText(labelTextForControl(el)).slice(0, 1000);
   }
 
@@ -213,24 +384,49 @@
     return YES_VALUES.has(v) || NO_VALUES.has(v);
   }
 
+  /**
+   * Match a dropdown option against a desired answer.
+   * For yes/no, prefer options that start with Yes/No — never use naive substring
+   * matching (avoids "no" matching "Non-binary" / "non-hispanic").
+   */
   function optionMatches(optionText, desired) {
     const opt = normalize(optionText);
     const want = normalize(desired);
     if (!opt || !want) return false;
     if (opt === want) return true;
-    if (opt.includes(want) || want.includes(opt)) return true;
+
     if (isYesNoValue(want)) {
       const yes = YES_VALUES.has(want);
-      if (yes && (opt === "yes" || opt.startsWith("yes ") || opt === "y")) return true;
-      if (!yes && (opt === "no" || opt.startsWith("no ") || opt === "n")) return true;
+      if (yes) {
+        return opt === "yes" || opt === "y" || opt.startsWith("yes ") || opt.startsWith("yes,");
+      }
+      return opt === "no" || opt === "n" || opt.startsWith("no ") || opt.startsWith("no,");
+    }
+
+    if (opt.includes(want) || want.includes(opt)) return true;
+
+    // Token overlap for longer labels (e.g. disability / veteran phrasing).
+    const wantTokens = want.split(" ").filter((t) => t.length > 2);
+    if (wantTokens.length >= 3) {
+      const hit = wantTokens.filter((t) => opt.includes(t)).length;
+      if (hit / wantTokens.length >= 0.6) return true;
     }
     return false;
   }
 
-  function fillSelect(select, value) {
+  function optionMatchesAny(optionText, candidates) {
+    return candidates.some((c) => optionMatches(optionText, c));
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function fillSelect(select, value, key = null) {
     if (value == null || value === "") return false;
+    const candidates = key ? expandValueCandidates(key, value) : [String(value)];
     const match = [...select.options].find((o) =>
-      optionMatches(o.textContent || o.value, value)
+      optionMatchesAny(o.textContent || o.value, candidates)
     );
     if (!match) return false;
     select.value = match.value;
@@ -239,8 +435,226 @@
     return true;
   }
 
-  function fillCheckboxOrRadio(el, value) {
+  /** Greenhouse / Ashby / generic React-Select control detection. */
+  function getReactSelectRoot(el) {
+    if (!el) return null;
+    return (
+      el.closest(".select__control") ||
+      el.closest("[class*='select__control']") ||
+      el.closest(".select__container") ||
+      el.closest("[class*='react-select']") ||
+      null
+    );
+  }
+
+  function isReactSelectInput(el) {
+    if (!el) return false;
+    if (el.classList?.contains("select__input")) return true;
+    if (/^react-select-\d+-input$/i.test(el.id || "")) return true;
+    if (el.closest?.(".select__input-container, [class*='select__input']")) return true;
+    return Boolean(getReactSelectRoot(el));
+  }
+
+  function looksLikeCombobox(el) {
+    if (!el) return false;
+    if (isReactSelectInput(el)) return true;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (role === "combobox" || role === "listbox") return true;
+    if (el.getAttribute("aria-haspopup") === "listbox") return true;
+    if (el.getAttribute("aria-haspopup") === "true" && el.getAttribute("aria-autocomplete")) {
+      return true;
+    }
+    if (el.getAttribute("aria-autocomplete") === "list") return true;
+    if (el.getAttribute("aria-expanded") != null && role === "combobox") return true;
+    return Boolean(
+      el.closest?.(
+        '[role="combobox"], .select__control, [class*="select__control"], [class*="dropdown"]'
+      )
+    );
+  }
+
+  function collectVisibleOptions(root = document) {
+    const selectors = [
+      ".select__option",
+      "[class*='select__option']",
+      '[id*="react-select-"][id*="-option-"]',
+      '[role="option"]',
+      '[role="menuitem"]',
+      '[role="menuitemradio"]',
+      '[role="treeitem"]',
+      "li[data-value]",
+      ".select-option"
+    ];
+    const nodes = [];
+    for (const sel of selectors) {
+      try {
+        nodes.push(...root.querySelectorAll(sel));
+      } catch {
+        /* ignore */
+      }
+    }
+    const seen = new Set();
+    const out = [];
+    for (const node of nodes) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      // Skip disabled / placeholder options.
+      if (node.getAttribute("aria-disabled") === "true") continue;
+      if (node.classList?.contains("select__option--is-disabled")) continue;
+      const text = cleanLabelText(node.textContent);
+      if (!text || text.length > 300) continue;
+      if (/^select\.\.\.?$/i.test(text)) continue;
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      out.push(node);
+    }
+    return out;
+  }
+
+  function clickOptionNode(node) {
+    if (!node) return false;
+    const clickable =
+      node.closest("[role='option'], .select__option, [class*='select__option'], li, button") ||
+      node;
+    // React-Select listens to mousedown more reliably than click alone.
+    clickable.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window })
+    );
+    clickable.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
+    );
+    clickable.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
+    );
+    clickable.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
+    );
+    return true;
+  }
+
+  function openReactSelect(el) {
+    const control =
+      getReactSelectRoot(el) ||
+      el.closest?.("[class*='select__control']") ||
+      el.closest?.('[role="combobox"]') ||
+      el;
+    const indicator =
+      control.querySelector?.(
+        ".select__dropdown-indicator, [class*='select__dropdown-indicator'], button[aria-label*='flyout'], button[aria-label*='Toggle']"
+      ) || null;
+
+    const target = indicator || control;
+    target.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
+    );
+    target.dispatchEvent(
+      new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
+    );
+    target.click?.();
+
+    // Focus the real search input so filtering / keyboard works.
+    const input =
+      (el.tagName === "INPUT" ? el : null) ||
+      control.querySelector?.("input.select__input, input[role='combobox'], input") ||
+      el;
+    try {
+      input.focus?.();
+    } catch {
+      /* ignore */
+    }
+    return input;
+  }
+
+  function setReactSelectFilter(input, text) {
+    if (!input || input.tagName !== "INPUT") return;
+    setNativeValue(input, text);
+    // React-Select also watches InputEvent / keyup.
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: text.slice(-1) || "a" }));
+    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: text.slice(-1) || "a" }));
+  }
+
+  function clearReactSelectFilter(input) {
+    if (!input || input.tagName !== "INPUT") return;
+    setNativeValue(input, "");
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "", inputType: "deleteContentBackward" }));
+  }
+
+  async function waitForOptions(attempts = 8, delayMs = 80) {
+    for (let i = 0; i < attempts; i += 1) {
+      const options = collectVisibleOptions(document);
+      if (options.length) return options;
+      await sleep(delayMs);
+    }
+    return [];
+  }
+
+  async function fillCustomDropdown(el, value, key = null) {
+    if (value == null || String(value).trim() === "") return false;
+    const candidates = key ? expandValueCandidates(key, value) : [String(value).trim()];
+    const reactSelect = isReactSelectInput(el);
+
+    // Prefer already-open menu options.
+    let options = collectVisibleOptions(document);
+    let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+    if (match) return clickOptionNode(match);
+
+    const input = openReactSelect(el);
+    options = await waitForOptions(reactSelect ? 10 : 6, reactSelect ? 100 : 80);
+    match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+    if (match) {
+      const ok = clickOptionNode(match);
+      if (reactSelect) clearReactSelectFilter(input);
+      return ok;
+    }
+
+    // Filter the menu (Greenhouse React-Select), then pick — never leave typed text as the answer.
+    const filterText =
+      candidates.find((c) => String(c).trim().length >= 1 && !isYesNoValue(c)) ||
+      candidates.find((c) => /^(Yes|No)$/i.test(String(c).trim())) ||
+      candidates[0];
+
+    if (input && input.tagName === "INPUT") {
+      setReactSelectFilter(input, filterText);
+      options = await waitForOptions(reactSelect ? 10 : 6, 100);
+      match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+      if (match) {
+        const ok = clickOptionNode(match);
+        clearReactSelectFilter(input);
+        return ok;
+      }
+
+      // Keyboard fallback: highlight first filtered option and confirm.
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", code: "ArrowDown" })
+      );
+      await sleep(60);
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" })
+      );
+      await sleep(80);
+
+      // Did a value chip / single-value appear?
+      const root = getReactSelectRoot(el) || el.closest?.(".select__control")?.parentElement;
+      const selected = root?.querySelector?.(
+        ".select__single-value, .select__multi-value__label, [class*='select__single-value']"
+      );
+      if (selected && optionMatchesAny(selected.textContent, candidates)) {
+        clearReactSelectFilter(input);
+        return true;
+      }
+
+      // Never leave free-text in a React-Select / combobox.
+      clearReactSelectFilter(input);
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" }));
+    }
+
+    return false;
+  }
+
+  function fillCheckboxOrRadio(el, value, key = null) {
     if (value == null || value === "") return false;
+    const candidates = key ? expandValueCandidates(key, value) : [String(value)];
     const wantYes = YES_VALUES.has(normalize(value));
     const label = labelTextForControl(el);
     const optionSide = normalize(el.value || "") || label;
@@ -248,18 +662,22 @@
     if (el.type === "checkbox") {
       const shouldCheck = isYesNoValue(value)
         ? wantYes
-        : optionMatches(optionSide, value) || optionMatches(label, value);
+        : optionMatchesAny(optionSide, candidates) || optionMatchesAny(label, candidates);
       if (el.checked !== shouldCheck) el.click();
       return true;
     }
 
     if (el.type === "radio") {
       const matchesOption =
-        optionMatches(el.value, value) || optionMatches(optionSide, value);
+        optionMatchesAny(el.value, candidates) || optionMatchesAny(optionSide, candidates);
       const yesNoOnGroup =
         isYesNoValue(value) &&
-        ((wantYes && (optionSide.includes("yes") || optionSide === "y")) ||
-          (!wantYes && (optionSide.includes("no") || optionSide === "n")));
+        ((wantYes && (optionSide.startsWith("yes") || optionSide === "y")) ||
+          (!wantYes &&
+            (optionSide === "no" ||
+              optionSide.startsWith("no ") ||
+              optionSide.startsWith("no,") ||
+              optionSide === "n")));
       if (matchesOption || yesNoOnGroup) {
         if (!el.checked) el.click();
         return true;
@@ -268,22 +686,49 @@
     return false;
   }
 
-  function fillControl(el, value) {
+  async function fillControl(el, value, key = null) {
     if (value == null || String(value).trim() === "") return false;
     if (el.disabled || el.readOnly) return false;
     const tag = el.tagName.toLowerCase();
-    if (tag === "select") return fillSelect(el, value);
-    if (tag === "textarea") {
-      setNativeValue(el, String(value));
-      return true;
-    }
+
+    if (tag === "select") return fillSelect(el, value, key);
+
     if (tag === "input") {
       const type = (el.type || "text").toLowerCase();
-      if (type === "checkbox" || type === "radio") return fillCheckboxOrRadio(el, value);
+      if (type === "checkbox" || type === "radio") return fillCheckboxOrRadio(el, value, key);
       if (["hidden", "file", "submit", "button", "image", "reset"].includes(type)) return false;
+
+      // React-Select / combobox: ONLY pick from the option list — never type an answer.
+      if (isReactSelectInput(el) || looksLikeCombobox(el)) {
+        return fillCustomDropdown(el, value, key);
+      }
+
+      // Known select-like profile fields: try list first; never leave lowercase yes/no typed in.
+      if (SELECT_LIKE_KEYS.has(key) || isYesNoValue(value)) {
+        const ok = await fillCustomDropdown(el, value, key);
+        if (ok) return true;
+        if (isYesNoValue(value) || SELECT_LIKE_KEYS.has(key)) return false;
+      }
+
       setNativeValue(el, String(value));
       return true;
     }
+
+    if (tag === "textarea") {
+      if (SELECT_LIKE_KEYS.has(key) || isYesNoValue(value) || looksLikeCombobox(el)) {
+        const ok = await fillCustomDropdown(el, value, key);
+        if (ok) return true;
+        if (isYesNoValue(value) || SELECT_LIKE_KEYS.has(key) || looksLikeCombobox(el)) return false;
+      }
+      setNativeValue(el, String(value));
+      return true;
+    }
+
+    // Non-input combobox buttons / divs / react-select controls
+    if (looksLikeCombobox(el) || isReactSelectInput(el) || el.getAttribute("role") === "combobox") {
+      return fillCustomDropdown(el, value, key);
+    }
+
     return false;
   }
 
@@ -318,7 +763,6 @@
       input.files = dt.files;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
-      // Some ATS listen for drop-style events.
       input.dispatchEvent(
         new CustomEvent("file-upload-success", { bubbles: true, detail: { fileName: file.name } })
       );
@@ -331,7 +775,6 @@
   function collectFileInputs() {
     return [...document.querySelectorAll('input[type="file"]')].filter((el) => {
       if (el.disabled) return false;
-      // Include visually hidden inputs — many ATS hide the real file control.
       return true;
     });
   }
@@ -399,7 +842,6 @@
     const t = String(label || "").trim();
     if (t.length < 12) return false;
     if (t.length > 1200) return false;
-    // Prefer question-like or open-ended prompts (works on raw or normalized text).
     if (/[?]/.test(t)) return true;
     if (
       /^(tell|describe|explain|share|what|why|how|please|list|provide|summarize|walk)\b/i.test(t)
@@ -422,11 +864,24 @@
 
   function shouldSkipAiField(el, label) {
     const type = (el.type || "text").toLowerCase();
-    if (["password", "email", "tel", "url", "number", "date", "month", "week", "time", "color", "range"].includes(type)) {
+    if (
+      ["password", "email", "tel", "url", "number", "date", "month", "week", "time", "color", "range"].includes(
+        type
+      )
+    ) {
       return true;
     }
+    // Never send React-Select / Greenhouse dropdowns to AI text fill.
+    if (isReactSelectInput(el) || looksLikeCombobox(el)) return true;
+    if (el.getAttribute("role") === "combobox") return true;
+    if (el.getAttribute("aria-autocomplete") === "list") return true;
+    if (el.classList?.contains("select__input")) return true;
+    if (/^react-select-/i.test(el.id || "")) return true;
+
     const blob = normalize(
-      [label, el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("placeholder")].join(" ")
+      [label, el.name, el.id, el.getAttribute("autocomplete"), el.getAttribute("placeholder")].join(
+        " "
+      )
     );
     if (
       /\b(password|otp|captcha|ssn|social security|credit card|card number|cvv|routing|account number|search)\b/.test(
@@ -435,10 +890,35 @@
     ) {
       return true;
     }
-    // Skip fields that already have content.
     if (String(el.value || "").trim()) return true;
     return false;
   }
+
+  const SKIP_AI_KNOWN_KEYS = new Set([
+    "firstName",
+    "lastName",
+    "email",
+    "phone",
+    "zipCode",
+    "city",
+    "state",
+    "country",
+    "cityCountryOfResidence",
+    "workAuthorized",
+    "needsSponsorship",
+    "postEmploymentRestrictions",
+    "gender",
+    "hispanicLatino",
+    "raceEthnicity",
+    "veteranStatus",
+    "disabilityStatus",
+    "englishLevel",
+    "over18",
+    "willingToRelocate",
+    "felonyConviction",
+    "backgroundCheckConsent",
+    "drugTestConsent"
+  ]);
 
   function collectUnmatchedQuestions(applicantInfo = {}) {
     const questions = [];
@@ -450,6 +930,9 @@
     });
 
     for (const el of nodes) {
+      // Hard skip Greenhouse / React-Select — never AI-fill dropdown search inputs.
+      if (isReactSelectInput(el) || looksLikeCombobox(el)) continue;
+
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (el.disabled || el.readOnly) continue;
@@ -463,26 +946,8 @@
       const key = matchApplicantKey(labelNorm);
       if (key) {
         const known = applicantInfo[key];
-        // Known mapping exists — even if empty, don't send to AI (profile should fill it).
         if (known != null && String(known).trim()) continue;
-        // Empty known field: still skip AI for identity/legal fields.
-        if (
-          [
-            "firstName",
-            "lastName",
-            "email",
-            "phone",
-            "zipCode",
-            "city",
-            "state",
-            "country",
-            "workAuthorized",
-            "needsSponsorship"
-          ].includes(key)
-        ) {
-          continue;
-        }
-        // For empty optional known text like whyInterested, allow AI if question-like or multiline.
+        if (SKIP_AI_KNOWN_KEYS.has(key) || SELECT_LIKE_KEYS.has(key)) continue;
         const questionLike =
           looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
         if (
@@ -496,7 +961,6 @@
       } else {
         const questionLike =
           looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
-        // Unmatched textareas are strong AI candidates (custom app questions).
         if (!questionLike && !multiline) continue;
         if (multiline && !questionLike && String(questionLabel || labelNorm).trim().length < 12) {
           continue;
@@ -520,31 +984,56 @@
     return questions;
   }
 
-  function fillAiAnswers(answers = []) {
+  async function fillAiAnswers(answers = []) {
     const filled = [];
     for (const row of answers) {
       const id = String(row?.id || "").trim();
-      const answer = String(row?.answer || "").trim();
+      let answer = String(row?.answer || "").trim();
       if (!id || !answer) continue;
       const el = document.querySelector(`[data-resume-bot-qid="${CSS.escape(id)}"]`);
       if (!el) continue;
-      if (fillControl(el, answer)) {
+      // Combobox / React-Select must never receive free-text AI answers.
+      if (isReactSelectInput(el) || looksLikeCombobox(el)) {
+        el.removeAttribute("data-resume-bot-qid");
+        continue;
+      }
+      if (/^(yes|no)([.,!]|$)/i.test(answer)) {
+        answer = answer.charAt(0).toUpperCase() + answer.slice(1);
+      }
+      if (await fillControl(el, answer, null)) {
         filled.push({ id, label: labelTextForControl(el), preview: answer.slice(0, 80) });
       }
     }
     return { filledCount: filled.length, filled };
   }
 
-  function autofillApplication(applicantInfo = {}, uploadFiles = {}) {
-    const filled = [];
-    const controls = [...document.querySelectorAll("input, textarea, select")].filter((el) => {
+  function collectFillableControls() {
+    const nodes = [
+      ...document.querySelectorAll(
+        'input, textarea, select, [role="combobox"], [aria-haspopup="listbox"], .select__control, [class*="select__control"]'
+      )
+    ];
+    return nodes.filter((el) => {
       const type = (el.type || "").toLowerCase();
-      if (type === "file") return false; // handled separately
+      if (type === "file") return false;
       if (type === "hidden" || type === "submit" || type === "button") return false;
+      // Prefer the inner input over the outer .select__control wrapper when both match.
+      if (
+        el.classList?.contains("select__control") ||
+        /select__control/.test(el.className || "")
+      ) {
+        const inner = el.querySelector("input.select__input, input[role='combobox'], input");
+        if (inner) return false;
+      }
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") return false;
       return true;
     });
+  }
+
+  async function autofillApplication(applicantInfo = {}, uploadFiles = {}) {
+    const filled = [];
+    const controls = collectFillableControls();
 
     for (const el of controls) {
       const label = labelTextForControl(el);
@@ -552,7 +1041,7 @@
       if (!key) continue;
       const value = applicantInfo[key];
       if (value == null || String(value).trim() === "") continue;
-      if (fillControl(el, value)) filled.push({ key, label });
+      if (await fillControl(el, value, key)) filled.push({ key, label });
     }
 
     const uploadResult = uploadApplicationFiles(uploadFiles);
@@ -575,21 +1064,15 @@
       return false;
     }
     if (message?.type === "autofill_ai_answers") {
-      try {
-        sendResponse({ ok: true, ...fillAiAnswers(message.answers || []) });
-      } catch (err) {
-        sendResponse({ ok: false, error: String(err?.message || err) });
-      }
-      return false;
+      fillAiAnswers(message.answers || [])
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
     }
     if (message?.type !== "autofill_application") return undefined;
-    try {
-      sendResponse(
-        autofillApplication(message.applicantInfo || {}, message.uploadFiles || {})
-      );
-    } catch (err) {
-      sendResponse({ ok: false, error: String(err?.message || err) });
-    }
-    return false;
+    autofillApplication(message.applicantInfo || {}, message.uploadFiles || {})
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+    return true;
   });
 })();

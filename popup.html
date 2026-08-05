@@ -160,7 +160,15 @@
         <button type="button" id="openSavedFolder" class="compact">Open folder</button>
       </section>
 
-      <p id="status"></p>
+      <div id="genProgress" class="gen-progress" hidden>
+        <span class="gen-progress-indicator" aria-hidden="true"></span>
+        <div class="gen-progress-copy">
+          <strong id="genProgressState">In progress</strong>
+          <span id="genProgressDetail">Starting...</span>
+        </div>
+      </div>
+
+      <p id="status" role="status"></p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

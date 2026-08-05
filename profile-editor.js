@@ -16,7 +16,9 @@ import {
   GENDER_OPTIONS,
   RACE_OPTIONS,
   VETERAN_OPTIONS,
-  DISABILITY_OPTIONS
+  DISABILITY_OPTIONS,
+  ENGLISH_LEVEL_OPTIONS,
+  HISPANIC_OPTIONS
 } from "./applicant-info.js";
 
 const APPLICANT_FIELD_IDS = Object.keys(createEmptyApplicantInfo());
@@ -25,13 +27,16 @@ const SELECT_OPTIONS = {
   state: US_STATES,
   workAuthorized: YES_NO_OPTIONS,
   needsSponsorship: YES_NO_OPTIONS,
+  postEmploymentRestrictions: YES_NO_OPTIONS,
   willingToRelocate: YES_NO_OPTIONS,
   over18: YES_NO_OPTIONS,
   felonyConviction: YES_NO_OPTIONS,
   highestDegree: DEGREE_OPTIONS,
+  englishLevel: ENGLISH_LEVEL_OPTIONS,
   backgroundCheckConsent: YES_NO_OPTIONS,
   drugTestConsent: YES_NO_OPTIONS,
   gender: GENDER_OPTIONS,
+  hispanicLatino: HISPANIC_OPTIONS,
   raceEthnicity: RACE_OPTIONS,
   veteranStatus: VETERAN_OPTIONS,
   disabilityStatus: DISABILITY_OPTIONS
