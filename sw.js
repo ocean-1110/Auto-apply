@@ -25,10 +25,16 @@ let isRunning = false;
 let keepAliveTimer = null;
 let panelWindowId = null;
 
-const PANEL_WIDTH = 520;
+const PANEL_WIDTH = 1000;
 const PANEL_HEIGHT = 760;
 const PANEL_WINDOW_ID_KEY = "panel_window_id";
 const PANEL_URL = () => chrome.runtime.getURL("popup.html");
+
+// Imported CSV job queue (UI sidebar)
+const IMPORTED_JOBS_BY_ID_KEY = "imported_jobs_by_id";
+const IMPORTED_JOBS_ORDER_KEY = "imported_jobs_order";
+const IMPORTED_JOBS_SELECTED_ID_KEY = "imported_jobs_selected_id";
+const IMPORTED_JOBS_VERSION_KEY = "imported_jobs_version";
 
 async function rememberPanelWindowId(id) {
   panelWindowId = id ?? null;
@@ -140,26 +146,107 @@ function safeSendResponse(sendResponse, payload) {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+async function sendMessageToTab(tabId, message, { attempts = 3, retryDelayMs = 200 } = {}) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, retryDelayMs * (i + 1)));
+    }
+  }
+  throw lastErr || new Error("Failed to send message to tab.");
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
   isRunning = false;
   stopKeepAlive();
-  chrome.storage.local.set({
+  await chrome.storage.local.set({
     generation_running: false,
     generation_status: "Ready."
   });
+  recoverInterruptedImportedJobs().catch(() => {});
 });
 
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   isRunning = false;
   stopKeepAlive();
-  chrome.storage.local.set({
+  await chrome.storage.local.set({
     generation_running: false,
     generation_status: "Ready."
   });
+  recoverInterruptedImportedJobs().catch(() => {});
 });
 
 async function setStatus(status) {
   await chrome.storage.local.set({ generation_status: status });
+}
+
+async function getImportedJobsById() {
+  const data = await chrome.storage.local.get(IMPORTED_JOBS_BY_ID_KEY);
+  return data[IMPORTED_JOBS_BY_ID_KEY] || {};
+}
+
+async function setImportedJobsById(byId, { bumpVersion = true } = {}) {
+  const now = Date.now();
+  if (bumpVersion) {
+    await chrome.storage.local.set({
+      [IMPORTED_JOBS_BY_ID_KEY]: byId,
+      [IMPORTED_JOBS_VERSION_KEY]: now
+    });
+  } else {
+    await chrome.storage.local.set({ [IMPORTED_JOBS_BY_ID_KEY]: byId });
+  }
+}
+
+async function setImportedJobStatus(jobId, { status, statusDetail = "", markAttempt = false } = {}) {
+  if (!jobId) return;
+  const byId = await getImportedJobsById();
+  const job = byId[jobId];
+  if (!job) return;
+  const now = Date.now();
+
+  byId[jobId] = {
+    ...job,
+    status: status || job.status || "imported",
+    statusDetail: statusDetail || job.statusDetail || "",
+    updatedAt: now,
+    ...(markAttempt ? { attempts: Number(job.attempts || 0) + 1, lastAttemptAt: now } : null)
+  };
+
+  await setImportedJobsById(byId, { bumpVersion: true });
+}
+
+async function recoverInterruptedImportedJobs() {
+  const INTERUPTED_AFTER_MS = 10 * 60 * 1000; // 10 minutes
+
+  const data = await chrome.storage.local.get([IMPORTED_JOBS_BY_ID_KEY, IMPORTED_JOBS_VERSION_KEY]);
+  const byId = data[IMPORTED_JOBS_BY_ID_KEY] || {};
+  const now = Date.now();
+
+  let changed = false;
+
+  for (const [jobId, job] of Object.entries(byId)) {
+    const s = String(job?.status || "");
+    if (!["opening", "generating", "opening_form", "filling"].includes(s)) continue;
+
+    const updatedAt = Number(job?.updatedAt || job?.createdAt || 0);
+    if (!updatedAt) continue;
+    if (now - updatedAt < INTERUPTED_AFTER_MS) continue;
+
+    byId[jobId] = {
+      ...job,
+      status: "failed",
+      statusDetail: "Interrupted (service worker restarted). Retry.",
+      updatedAt: now
+    };
+    changed = true;
+  }
+
+  if (changed) {
+    await setImportedJobsById(byId, { bumpVersion: true });
+  }
 }
 
 async function getOpenAiSettings() {
@@ -173,10 +260,15 @@ async function getOpenAiSettings() {
   return { apiKey, model };
 }
 
+// Must match SCRIPT_BUILD in content/autofill.js.
+const AUTOFILL_SCRIPT_BUILD = "2026-08-05.1";
+
 async function ensureAutofillScript(tabId) {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "autofill_ping" });
-    return;
+    const pong = await chrome.tabs.sendMessage(tabId, { type: "autofill_ping" });
+    // A tab left open across an extension update still answers with the old
+    // script; re-inject so the current build handles the fill.
+    if (pong?.build === AUTOFILL_SCRIPT_BUILD) return;
   } catch {
     /* not injected yet */
   }
@@ -221,7 +313,7 @@ async function getCurrentApplicationTab() {
  * Also injects last generated resume / cover letter PDFs into matching file inputs.
  * Unmatched question fields are answered via OpenAI (generate + humanize).
  */
-async function startAutofillOnCurrentPage(profileId) {
+async function startAutofillOnCurrentPage(profileId, tabId = null) {
   const applicantInfo = await getApplicantInfo(profileId);
   const hasAnyValue = Object.values(applicantInfo).some((v) => String(v || "").trim());
   const docs = await getLastGeneratedDocs();
@@ -236,7 +328,7 @@ async function startAutofillOnCurrentPage(profileId) {
     };
   }
 
-  const tab = await getCurrentApplicationTab();
+  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : await getCurrentApplicationTab();
   if (!tab?.id) {
     return {
       ok: false,
@@ -878,6 +970,36 @@ async function notifyPanelToFlushOutput() {
 }
 
 /**
+ * Chrome will not grant folder access without a user gesture, so focus the panel
+ * and wait for the click that unlocks it. The panel writes the pending files as
+ * soon as that happens and clears pending_fs_write.
+ */
+async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 120000) {
+  try {
+    await openPanelWindow();
+  } catch {
+    /* panel may already be open */
+  }
+
+  await setStatus(
+    `Click anywhere in the extension panel to unlock ${rootLabel || "the output folder"} and finish saving ${folderName}.`
+  );
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const stillPending = (await chrome.storage.local.get("pending_fs_write")).pending_fs_write;
+    if (!stillPending) {
+      const pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
+      await showSaveNotification(pathLabel);
+      return pathLabel;
+    }
+  }
+
+  return "";
+}
+
+/**
  * Silent save into the user-selected PC folder only (File System Access API).
  * Does NOT use chrome.downloads — that triggers Save As dialogs when Chrome
  * is set to "Ask where to save each file".
@@ -917,6 +1039,15 @@ async function commitOutputBundle(folderName, files) {
       await showSaveNotification(pathLabel);
       return pathLabel;
     }
+
+    if (flushResult?.needsPermission) {
+      const pathLabel = await waitForPanelFolderUnlock(rootLabel, folderName);
+      if (pathLabel) return pathLabel;
+      lastError =
+        "Chrome needs one click in the extension panel to unlock the output folder.";
+      break;
+    }
+
     lastError = flushResult?.error || "Panel did not confirm the save.";
     await new Promise((r) => setTimeout(r, 400 * attempt));
   }
@@ -929,7 +1060,7 @@ async function commitOutputBundle(folderName, files) {
   }
 
   throw new Error(
-    `Could not save into the selected folder (${lastError}). Keep the extension window open and try again.`
+    `Could not save into the selected folder (${lastError}). The files are still queued — click "Grant access" in the extension panel to finish writing them.`
   );
 }
 
@@ -937,6 +1068,8 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
   await setStatus("Rendering resume from JSON...");
   const bundle = await buildResumeFileBundle(output, resumeData, jobMeta);
   const { folderName, resumeFileBase, files } = bundle;
+  let coverLetterCreated = false;
+  let coverLetterWarning = "";
 
   if (runCoverLetter) {
     try {
@@ -969,31 +1102,32 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
         phone: resumeData?.phone,
         linkedin: resumeData?.linkedin
       });
+      coverLetterCreated = true;
     } catch (coverErr) {
-      const savedDir = await commitOutputBundle(folderName, files);
-      return {
-        savedDir,
-        status: `Saved to ${savedDir}, but cover letter failed: ${String(coverErr?.message || coverErr)}`
-      };
+      coverLetterWarning = `, but cover letter failed: ${String(coverErr?.message || coverErr)}`;
     }
   }
 
   const savedDir = await commitOutputBundle(folderName, files);
   let status = `Saved to ${savedDir} (${resumeFileBase}_Resume.pdf${
-    runCoverLetter ? " + Cover_Letter.pdf" : ""
-  } + jd.txt + HTML)`;
+    coverLetterCreated ? " + Cover_Letter.pdf" : ""
+  } + jd.txt + HTML)${coverLetterWarning}`;
 
   if (jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) {
     await setStatus("Appending row to Google Sheet...");
     try {
-      await appendJobToSpreadsheet({
+      const sheetResult = await appendJobToSpreadsheet({
         spreadsheetUrl: jobMeta.spreadsheetUrl,
         webAppUrl: jobMeta.sheetsWebAppUrl,
+        sheetName: jobMeta.sheetName || "",
         jobTitle: jobMeta.jobTitle,
         companyName: jobMeta.companyName,
         jdLink: jobMeta.jdLink
       });
-      status = `${status} and appended to Google Sheet`;
+      const sheetLabel = sheetResult.sheetName
+        ? `"${sheetResult.sheetName}" row ${sheetResult.row}`
+        : `row ${sheetResult.row}`;
+      status = `${status} and appended to Google Sheet (${sheetLabel})`;
     } catch (sheetErr) {
       status = `${status}, but sheet append failed: ${String(sheetErr?.message || sheetErr)}`;
     }
@@ -1266,6 +1400,176 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
     })();
     return true;
+  }
+
+  if (message?.type === "apply_imported_job") {
+    const importedJobId = message.importedJobId;
+    const profileId = message.profileId;
+    const jobMeta = message.jobMeta || {};
+
+    if (!importedJobId) {
+      safeSendResponse(sendResponse, { ok: false, error: "Missing importedJobId." });
+      return false;
+    }
+    if (!profileId) {
+      safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
+      return false;
+    }
+    if (isRunning) {
+      safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+      return false;
+    }
+
+    isRunning = true;
+    startKeepAlive();
+    chrome.storage.local.set({ generation_running: true });
+
+    safeSendResponse(sendResponse, { ok: true, started: true });
+
+    (async () => {
+      try {
+        await setStatus(`Imported job: opening URL...`);
+        await setImportedJobStatus(importedJobId, {
+          status: "opening",
+          statusDetail: "Opening job URL...",
+          markAttempt: true
+        });
+
+        const url = String(jobMeta.jdLink || "").trim();
+        if (!url) {
+          throw new Error("Missing job URL (jdLink).");
+        }
+
+        const tab = await chrome.tabs.create({ url, active: true });
+        const tabId = tab?.id;
+        if (!tabId) throw new Error("Failed to open browser tab.");
+
+        await awaitTabComplete(tabId, 30000);
+
+        // Persist job fields so AI Q&A has the correct context.
+        await chrome.storage.local.set({
+          selected_profile_id: profileId,
+          selected_template_id: jobMeta.templateId || DEFAULT_TEMPLATE_ID,
+          last_job_title: jobMeta.jobTitle || "",
+          last_company_name: jobMeta.companyName || "",
+          last_jd_link: jobMeta.jdLink || "",
+          last_jd_text: jobMeta.jdText || "",
+          spreadsheet_url: jobMeta.spreadsheetUrl || "",
+          sheets_sheet_name: jobMeta.sheetName || "",
+          sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
+        });
+
+        // Generate resume + cover letter first, then autofill the resolved application form.
+        await setImportedJobStatus(importedJobId, {
+          status: "generating",
+          statusDetail: "Generating resume & cover letter..."
+        });
+        await setStatus(`Generating resume for imported job...`);
+        await runGenerationPipeline({ profileId, jobMeta });
+
+        await setImportedJobStatus(importedJobId, {
+          status: "opening_form",
+          statusDetail: "Locating application form..."
+        });
+
+        // Best-effort: probe page for fillable fields; if missing, try candidate Apply URLs.
+        let probe = null;
+        const probeTab = async () => {
+          await ensureAutofillScript(tabId);
+          const res = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
+          return res;
+        };
+
+        try {
+          probe = await probeTab();
+        } catch {
+          probe = { ok: false, isApplicationForm: false, applyUrls: [] };
+        }
+
+        const visited = new Set([tab?.url]);
+        let tries = 0;
+        while (
+          tries < 2 &&
+          probe &&
+          probe.ok !== false &&
+          !probe.isApplicationForm &&
+          !probe.blockedReason &&
+          Array.isArray(probe.applyUrls) &&
+          probe.applyUrls.length
+        ) {
+          const nextUrl = String(probe.applyUrls[0] || "").trim();
+          if (!nextUrl || visited.has(nextUrl)) break;
+          visited.add(nextUrl);
+
+          await setImportedJobStatus(importedJobId, {
+            status: "opening_form",
+            statusDetail: "Clicking through to application form..."
+          });
+
+          await chrome.tabs.update(tabId, { url: nextUrl });
+          await awaitTabComplete(tabId, 30000);
+          probe = await probeTab().catch(() => ({
+            ok: false,
+            isApplicationForm: false,
+            applyUrls: []
+          }));
+          tries += 1;
+        }
+
+        // Stop rather than typing profile answers into a listing page's search
+        // and filter inputs, or into a login / CAPTCHA wall.
+        if (probe?.blockedReason || probe?.isApplicationForm === false) {
+          const reason =
+            probe?.blockedReason ||
+            "No application form found on this page. Open the apply form, then use Autofill.";
+          await setImportedJobStatus(importedJobId, {
+            status: "needs_review",
+            statusDetail: `${reason} Resume and cover letter are saved.`
+          });
+          await setStatus(`Imported job needs review: ${reason}`);
+          return;
+        }
+
+        await setImportedJobStatus(importedJobId, {
+          status: "filling",
+          statusDetail: "Autofilling application form..."
+        });
+        await setStatus("Autofilling application form...");
+
+        const autoRes = await startAutofillOnCurrentPage(profileId, tabId);
+
+        if (autoRes?.skipped) {
+          throw new Error(autoRes.error || "Autofill skipped.");
+        }
+        if (!autoRes?.ok) {
+          throw new Error(autoRes.error || "Autofill failed.");
+        }
+
+        const filledCount = Number(autoRes.filledCount || 0);
+        const uploadedCount = Number(autoRes.uploadedCount || 0);
+        const aiFilledCount = Number(autoRes.aiFilledCount || 0);
+
+        await setImportedJobStatus(importedJobId, {
+          status: "ready_for_review",
+          statusDetail: `Autofill complete. Filled ${filledCount} field(s), uploaded ${uploadedCount} file(s), AI answered ${aiFilledCount} question(s).`
+        });
+
+        await setStatus("Imported job ready for review (no submit).");
+      } catch (err) {
+        const error = String(err?.message || err);
+        await setStatus(`Imported job failed: ${error}`);
+        await setImportedJobStatus(importedJobId, {
+          status: "failed",
+          statusDetail: error
+        });
+      } finally {
+        await chrome.storage.local.set({ generation_running: false });
+        isRunning = false;
+        stopKeepAlive();
+      }
+    })();
+
+    return false;
   }
 
   if (message?.type === "answer_application_question") {

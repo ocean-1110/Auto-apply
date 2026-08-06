@@ -48,6 +48,7 @@ const els = {
   profileLabel: document.getElementById("profileLabel"),
   profileKind: document.getElementById("profileKind"),
   builtinHint: document.getElementById("builtinHint"),
+  kindHint: document.getElementById("kindHint"),
   promptTemplate: document.getElementById("promptTemplate"),
   resetBuiltinPrompt: document.getElementById("resetBuiltinPrompt"),
   saveBtn: document.getElementById("saveBtn"),
@@ -107,6 +108,10 @@ function parseQuery() {
   return { mode, profileId };
 }
 
+function syncKindHint() {
+  els.kindHint.hidden = els.profileKind.value !== "coverLetter";
+}
+
 function applyModeChrome() {
   const isBuiltin = editorState.builtin;
   const isNew = editorState.mode === "new";
@@ -119,6 +124,7 @@ function applyModeChrome() {
   }
   els.builtinHint.hidden = !isBuiltin;
   els.resetBuiltinPrompt.hidden = !isBuiltin;
+  syncKindHint();
 }
 
 async function loadEditor() {
@@ -224,6 +230,7 @@ els.saveBtn.addEventListener("click", () => {
 els.saveBtnBottom.addEventListener("click", () => {
   saveEditor().catch(() => {});
 });
+els.profileKind.addEventListener("change", syncKindHint);
 els.cancelBtn.addEventListener("click", closeEditor);
 els.cancelBtnBottom.addEventListener("click", closeEditor);
 els.resetBuiltinPrompt.addEventListener("click", () => {

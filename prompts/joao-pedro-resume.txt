@@ -252,6 +252,7 @@ Only most recent 2 roles should have a realistic and understandable metrics, pre
 
 
 Once you generate resume, on your background, check the resume according to below 3 rules, and if not meet the requirement, update and regenerate, then generate updated resume in JSON
+
 AUTHENTICITY RULES
 
 - Write the resume as though it existed before the candidate saw this job posting.

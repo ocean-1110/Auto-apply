@@ -1,48 +1,160 @@
 /**
  * One-time setup for Google Sheets append (from the extension README):
  *
- * 1. Open your spreadsheet
+ * 1. Open your spreadsheet on the tab you want to write to
  * 2. Extensions → Apps Script
  * 3. Paste this code and Save
- * 4. Deploy → New deployment → Type: Web app
+ * 4. Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy
+ *    Or: Deploy → New deployment → Type: Web app
  *    - Execute as: Me
  *    - Who has access: Anyone
- * 5. Copy the Web App URL into the extension's "Web App URL" field
+ * 5. Copy the Web App URL into the extension
+ * 6. In the extension, paste the spreadsheet URL that includes that tab's gid
+ *    (open the tab first, then copy the browser URL), or set Sheet tab name
  *
- * After generation, the extension POSTs:
- *   spreadsheetId, jobLink, jobTitle, companyName, applicationDate
+ * After generation, the extension appends:
+ *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName, applicationDate
  *
  * Row order matches your sheet headers:
  *   A JOB URL | B JOB TITLE | C COMPANY NAME | D Application Date
+ *
+ * Rows are written on the selected tab, in the first empty cell of column A
+ * (same place you'd paste after Copy row).
  */
-function doPost(e) {
-  try {
-    const data = JSON.parse((e && e.postData && e.postData.contents) || "{}");
-    if (!data.spreadsheetId) {
-      throw new Error("spreadsheetId is required.");
+function jsonResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(
+    ContentService.MimeType.JSON
+  );
+}
+
+function listSheetOptions(spreadsheet) {
+  return spreadsheet
+    .getSheets()
+    .map(function (sheet) {
+      return sheet.getName() + " (gid=" + sheet.getSheetId() + ")";
+    })
+    .join(", ");
+}
+
+function getTargetSheet(spreadsheet, sheetGid, sheetName) {
+  var name = String(sheetName || "").trim();
+  if (name) {
+    var byName = spreadsheet.getSheetByName(name);
+    if (byName) return byName;
+    throw new Error(
+      'Sheet tab "' + name + '" was not found. Available: ' + listSheetOptions(spreadsheet)
+    );
+  }
+
+  var gid = Number(sheetGid);
+  if (sheetGid !== "" && !isNaN(gid)) {
+    var sheets = spreadsheet.getSheets();
+    for (var i = 0; i < sheets.length; i += 1) {
+      if (sheets[i].getSheetId() === gid) return sheets[i];
     }
+    throw new Error(
+      "Sheet tab was not found for gid " +
+        sheetGid +
+        ". Available: " +
+        listSheetOptions(spreadsheet)
+    );
+  }
 
-    const ss = SpreadsheetApp.openById(String(data.spreadsheetId));
-    const sheet = ss.getSheets()[0];
+  return spreadsheet.getSheets()[0];
+}
 
-    sheet.appendRow([
+function getColumnAValues(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) return [];
+  // getRange(row, column, numRows, numColumns) — NOT end-row/end-column.
+  return sheet.getRange(1, 1, lastRow, 1).getDisplayValues().map(function (row) {
+    return String(row[0] || "").trim();
+  });
+}
+
+function getJobLinks(sheet) {
+  return getColumnAValues(sheet).filter(function (value) {
+    return value !== "" && !/^job\s*(url|link)$/i.test(value);
+  });
+}
+
+/** First empty row in column A — matches pasting under the last job URL. */
+function findNextEmptyRowInColumnA(sheet) {
+  var values = getColumnAValues(sheet);
+  for (var i = values.length - 1; i >= 0; i -= 1) {
+    if (values[i] !== "") return i + 2; // 1-based next row
+  }
+  return 1;
+}
+
+function appendJobRow(sheet, data) {
+  var row = findNextEmptyRowInColumnA(sheet);
+  // IMPORTANT: 4-arg getRange is (startRow, startCol, numRows, numColumns).
+  // Writing one row of A–D must use numRows=1, numColumns=4.
+  sheet.getRange(row, 1, 1, 4).setValues([
+    [
       data.jobLink || "",
       data.jobTitle || "",
       data.companyName || "",
       data.applicationDate || ""
-    ]);
+    ]
+  ]);
+  return {
+    ok: true,
+    sheetName: sheet.getName(),
+    sheetGid: String(sheet.getSheetId()),
+    row: row
+  };
+}
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(
-      ContentService.MimeType.JSON
-    );
+function doPost(e) {
+  try {
+    var data = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+    if (!data.spreadsheetId) {
+      throw new Error("spreadsheetId is required.");
+    }
+
+    var ss = SpreadsheetApp.openById(String(data.spreadsheetId));
+    var sheet = getTargetSheet(ss, String(data.sheetGid || ""), String(data.sheetName || ""));
+
+    if (data.action === "getJobLinks") {
+      return jsonResponse({
+        ok: true,
+        jobLinks: getJobLinks(sheet),
+        sheetName: sheet.getName(),
+        sheetGid: String(sheet.getSheetId())
+      });
+    }
+
+    var lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+      return jsonResponse(appendJobRow(sheet, data));
+    } finally {
+      lock.releaseLock();
+    }
   } catch (err) {
-    return ContentService.createTextOutput(
-      JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) })
-    ).setMimeType(ContentService.MimeType.JSON);
+    return jsonResponse({ ok: false, error: String(err && err.message ? err.message : err) });
   }
 }
 
-function doGet() {
+function doGet(e) {
+  var params = (e && e.parameter) || {};
+  if (params.action === "getJobLinks") {
+    try {
+      if (!params.spreadsheetId) throw new Error("spreadsheetId is required.");
+      var ss = SpreadsheetApp.openById(String(params.spreadsheetId));
+      var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
+      return jsonResponse({
+        ok: true,
+        jobLinks: getJobLinks(sheet),
+        sheetName: sheet.getName(),
+        sheetGid: String(sheet.getSheetId())
+      });
+    } catch (err) {
+      return jsonResponse({ ok: false, error: String(err && err.message ? err.message : err) });
+    }
+  }
   return ContentService.createTextOutput(
     "Resume GPT Builder sheet append endpoint is running."
   );

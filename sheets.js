@@ -9,6 +9,58 @@ export function extractSpreadsheetId(urlOrId) {
   return "";
 }
 
+export function extractSheetGid(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+
+  const match = raw.match(/[?#&]gid=(\d+)/i);
+  return match ? match[1] : "";
+}
+
+function validateWebAppUrl(webAppUrl) {
+  const endpoint = String(webAppUrl || "").trim();
+  if (!endpoint || !/^https:\/\/script\.google\.com\//i.test(endpoint)) {
+    throw new Error(
+      "Paste the Apps Script Web App URL (Deploy → Web app). Spreadsheet share link alone cannot be written to from Chrome."
+    );
+  }
+  return endpoint;
+}
+
+async function readSheetsResponse(response) {
+  const text = await response.text();
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(parsed?.error || `Google Sheet request failed (HTTP ${response.status}).`);
+  }
+  if (!parsed) {
+    throw new Error("Google Sheet returned an invalid response. Redeploy the latest Apps Script code.");
+  }
+  if (parsed.ok === false) {
+    throw new Error(parsed.error || "Google Sheet request failed.");
+  }
+
+  return parsed;
+}
+
+async function postToSheetsWebApp(endpoint, payload) {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    redirect: "follow",
+    headers: {
+      "Content-Type": "text/plain;charset=utf-8"
+    },
+    body: JSON.stringify(payload)
+  });
+  return readSheetsResponse(response);
+}
+
 export function formatApplicationDate(date = new Date()) {
   const month = date.getMonth() + 1;
   const day = date.getDate();
@@ -36,51 +88,71 @@ export async function appendJobToSpreadsheet({
   webAppUrl,
   jobTitle,
   companyName,
-  jdLink
+  jdLink,
+  sheetName = ""
 }) {
   const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
   if (!spreadsheetId) {
     throw new Error("Invalid Google Spreadsheet link.");
   }
 
-  const endpoint = String(webAppUrl || "").trim();
-  if (!endpoint || !/^https:\/\/script\.google\.com\//i.test(endpoint)) {
+  const endpoint = validateWebAppUrl(webAppUrl);
+
+  const sheetGid = extractSheetGid(spreadsheetUrl);
+  const tabName = String(sheetName || "").trim();
+  if (!sheetGid && !tabName) {
     throw new Error(
-      "Paste the Apps Script Web App URL (Deploy → Web app). Spreadsheet share link alone cannot be written to from Chrome."
+      "Open the target sheet tab in Google Sheets, copy that browser URL (it must include gid=...), or enter the Sheet tab name."
     );
   }
 
   const payload = {
+    action: "appendJob",
     spreadsheetId,
+    sheetGid,
+    sheetName: tabName,
     jobLink: jdLink || "",
     jobTitle: jobTitle || "",
     companyName: companyName || "",
     applicationDate: formatApplicationDate()
   };
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    redirect: "follow",
-    headers: {
-      "Content-Type": "text/plain;charset=utf-8"
-    },
-    body: JSON.stringify(payload)
-  });
-
-  const text = await response.text();
-  let parsed = null;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    parsed = null;
+  const result = await postToSheetsWebApp(endpoint, payload);
+  if (!result.row) {
+    throw new Error(
+      "The Apps Script deployment is outdated. Copy the latest script, then Deploy → Manage deployments → Edit → New version."
+    );
   }
 
-  if (!response.ok) {
-    throw new Error(parsed?.error || `Sheet append failed (HTTP ${response.status}).`);
-  }
-  if (parsed && parsed.ok === false) {
-    throw new Error(parsed.error || "Sheet append failed.");
+  return {
+    spreadsheetId,
+    sheetGid: result.sheetGid || sheetGid,
+    sheetName: result.sheetName || tabName,
+    row: Number(result.row) || 0,
+    ...payload
+  };
+}
+
+export async function getExistingJobLinks({ spreadsheetUrl, webAppUrl, sheetName = "" }) {
+  const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
+  if (!spreadsheetId) {
+    throw new Error("Invalid Google Spreadsheet link.");
   }
 
-  return { spreadsheetId, ...payload };
+  const endpoint = validateWebAppUrl(webAppUrl);
+  const requestUrl = new URL(endpoint);
+  requestUrl.searchParams.set("action", "getJobLinks");
+  requestUrl.searchParams.set("spreadsheetId", spreadsheetId);
+  requestUrl.searchParams.set("sheetGid", extractSheetGid(spreadsheetUrl));
+  const tabName = String(sheetName || "").trim();
+  if (tabName) requestUrl.searchParams.set("sheetName", tabName);
+  const response = await fetch(requestUrl.toString(), { method: "GET", redirect: "follow" });
+  const result = await readSheetsResponse(response);
+
+  if (!Array.isArray(result.jobLinks)) {
+    throw new Error(
+      "The Apps Script deployment is outdated. Copy the latest script, then deploy a new Web App version."
+    );
+  }
+  return result.jobLinks.map((value) => String(value || ""));
 }

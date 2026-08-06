@@ -89,12 +89,37 @@ export async function clearOutputDirectoryHandle() {
   await chrome.storage.local.remove(OUTPUT_DIR_NAME_KEY);
 }
 
-export async function ensureDirectoryPermission(handle) {
+function hasUserActivation() {
+  try {
+    return Boolean(navigator.userActivation?.isActive);
+  } catch {
+    return false;
+  }
+}
+
+export async function queryDirectoryPermission(handle) {
+  if (!handle) return "denied";
+  try {
+    return await handle.queryPermission({ mode: "readwrite" });
+  } catch {
+    return "denied";
+  }
+}
+
+/**
+ * Chrome only allows requestPermission() while a user gesture is active, so the
+ * prompt is limited to call paths that started from a real click or key press.
+ * Background flushes just report back that a gesture is still needed.
+ */
+export async function ensureDirectoryPermission(handle, { interactive = false } = {}) {
   if (!handle) return false;
-  const opts = { mode: "readwrite" };
-  if ((await handle.queryPermission(opts)) === "granted") return true;
-  if ((await handle.requestPermission(opts)) === "granted") return true;
-  return false;
+  if ((await queryDirectoryPermission(handle)) === "granted") return true;
+  if (!interactive || !hasUserActivation()) return false;
+  try {
+    return (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -133,11 +158,20 @@ function base64ToUint8Array(base64) {
  * Write a job subfolder into the user-selected root directory.
  * Creates the folder if it does not exist.
  */
-export async function writeJobFilesToDirectory(rootHandle, folderName, files) {
+export async function writeJobFilesToDirectory(
+  rootHandle,
+  folderName,
+  files,
+  { interactive = false } = {}
+) {
   if (!rootHandle) throw new Error("No output folder selected.");
-  const allowed = await ensureDirectoryPermission(rootHandle);
+  const allowed = await ensureDirectoryPermission(rootHandle, { interactive });
   if (!allowed) {
-    throw new Error("Permission denied for the selected output folder. Select the folder again.");
+    const err = new Error(
+      "Chrome needs one click in the extension panel to unlock the output folder."
+    );
+    err.code = "NEEDS_PERMISSION";
+    throw err;
   }
 
   const safeFolder = String(folderName || "untitled")
@@ -192,7 +226,8 @@ export async function browseLastSavedJobDirectory() {
   if (!jobDir) {
     throw new Error("No saved job folder is available yet.");
   }
-  const allowed = await ensureDirectoryPermission(jobDir);
+  // Always reached from a click on "Open folder", so prompting is allowed here.
+  const allowed = await ensureDirectoryPermission(jobDir, { interactive: true });
   if (!allowed) {
     throw new Error("Permission denied. Select your output folder again.");
   }
@@ -321,7 +356,7 @@ export async function getLastSaveMeta() {
  * Flush any pending generation output into the selected directory.
  * Must run in a window context (panel/popup), not the service worker.
  */
-export async function flushPendingOutputToSelectedDirectory() {
+export async function flushPendingOutputToSelectedDirectory({ interactive = false } = {}) {
   const pending = await getPendingOutputFiles();
   if (!pending?.files?.length) {
     return { ok: false, skipped: true, error: "No pending files to save." };
@@ -336,7 +371,23 @@ export async function flushPendingOutputToSelectedDirectory() {
     };
   }
 
-  const result = await writeJobFilesToDirectory(root, pending.folderName, pending.files);
+  let result;
+  try {
+    result = await writeJobFilesToDirectory(root, pending.folderName, pending.files, {
+      interactive
+    });
+  } catch (err) {
+    if (err?.code === "NEEDS_PERMISSION") {
+      // Files stay in IndexedDB, so nothing is lost while we wait for a click.
+      return {
+        ok: false,
+        needsPermission: true,
+        folderName: pending.folderName || "",
+        error: String(err.message || err)
+      };
+    }
+    throw err;
+  }
   await clearPendingOutputFiles();
   const pathLabel = `${result.rootName}/${result.folderName}`;
   await setLastSaveMeta({

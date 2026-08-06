@@ -4,7 +4,11 @@
  * For dropdowns/comboboxes: never types "yes"/"no" — opens the list and picks a matching option.
  */
 (() => {
-  if (window.__resumeBotAutofillInstalled) return;
+  // Keyed by build, not a plain boolean: a tab that already ran an older copy of
+  // this script would otherwise block the updated one from installing.
+  const SCRIPT_BUILD = "2026-08-05.1";
+  if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
+  window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
 
   const FIELD_ALIASES = {
@@ -258,10 +262,114 @@
         ? HTMLTextAreaElement.prototype
         : HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
-    if (descriptor?.set) descriptor.set.call(el, value);
-    else el.value = value;
+    try {
+      if (descriptor?.set) descriptor.set.call(el, value);
+      else el.value = value;
+    } catch {
+      return false;
+    }
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+
+  const DATE_LIKE_TYPES = new Set(["date", "month", "week", "time", "datetime-local"]);
+
+  function toDateParts(raw) {
+    const s = String(raw || "").trim();
+
+    let m = s.match(/^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$/);
+    if (m) {
+      return { year: m[1], month: m[2].padStart(2, "0"), day: (m[3] || "01").padStart(2, "0") };
+    }
+
+    m = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/);
+    if (m) {
+      return { year: m[3], month: m[1].padStart(2, "0"), day: m[2].padStart(2, "0") };
+    }
+
+    // Only attempt free-form parsing when a 4-digit year is present, so values
+    // like "5" are not silently reinterpreted as a date by the Date constructor.
+    if (/\b\d{4}\b/.test(s)) {
+      const parsed = Date.parse(s);
+      if (!Number.isNaN(parsed)) {
+        const d = new Date(parsed);
+        return {
+          year: String(d.getFullYear()),
+          month: String(d.getMonth() + 1).padStart(2, "0"),
+          day: String(d.getDate()).padStart(2, "0")
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function withinInputRange(el, type, value) {
+    const min = el.getAttribute("min");
+    const max = el.getAttribute("max");
+    if (!min && !max) return true;
+
+    if (type === "number" || type === "range") {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return false;
+      if (min && Number.isFinite(Number(min)) && n < Number(min)) return false;
+      if (max && Number.isFinite(Number(max)) && n > Number(max)) return false;
+      return true;
+    }
+
+    // ISO date/time strings compare correctly as plain strings.
+    if (min && value < min) return false;
+    if (max && value > max) return false;
+    return true;
+  }
+
+  /**
+   * Reshape a profile answer into something the input type can actually store.
+   * Returns null when the value cannot be represented, so the caller skips the
+   * field instead of asking the browser to parse an invalid value.
+   */
+  function coerceValueForInput(el, rawValue) {
+    const type = (el.type || "text").toLowerCase();
+    const raw = String(rawValue ?? "").trim();
+    if (!raw) return null;
+
+    let out = raw;
+
+    if (DATE_LIKE_TYPES.has(type)) {
+      if (type === "time") {
+        const m = raw.match(/^(\d{1,2}):(\d{2})(:\d{2})?$/);
+        out = m ? `${m[1].padStart(2, "0")}:${m[2]}${m[3] || ""}` : null;
+      } else if (type === "week") {
+        out = /^\d{4}-W\d{2}$/i.test(raw) ? raw.toUpperCase() : null;
+      } else {
+        const parts = toDateParts(raw);
+        if (!parts) {
+          out = null;
+        } else if (type === "month") {
+          out = `${parts.year}-${parts.month}`;
+        } else if (type === "date") {
+          out = `${parts.year}-${parts.month}-${parts.day}`;
+        } else {
+          out = `${parts.year}-${parts.month}-${parts.day}T09:00`;
+        }
+      }
+    } else if (type === "number" || type === "range") {
+      const m = raw.replace(/,/g, "").match(/-?\d+(\.\d+)?/);
+      out = m ? m[0] : null;
+    } else if (type === "color") {
+      out = /^#[0-9a-f]{6}$/i.test(raw) ? raw : null;
+    } else if (type === "email") {
+      out = /\S+@\S+\.\S+/.test(raw) ? raw : null;
+    } else if (type === "url") {
+      if (/^https?:\/\/\S+$/i.test(raw)) out = raw;
+      else if (/^[\w.-]+\.[a-z]{2,}(\/\S*)?$/i.test(raw)) out = `https://${raw}`;
+      else out = null;
+    }
+
+    if (out == null) return null;
+    if (!withinInputRange(el, type, out)) return null;
+    return out;
   }
 
   function cleanLabelText(text) {
@@ -710,8 +818,11 @@
         if (isYesNoValue(value) || SELECT_LIKE_KEYS.has(key)) return false;
       }
 
-      setNativeValue(el, String(value));
-      return true;
+      const coerced = coerceValueForInput(el, value);
+      if (coerced == null) return false;
+      if (!setNativeValue(el, coerced)) return false;
+      // Inputs such as date / number silently drop values they cannot represent.
+      return Boolean(String(el.value || "").trim());
     }
 
     if (tag === "textarea") {
@@ -1058,10 +1169,133 @@
     };
   }
 
+  function collectApplyUrlCandidates() {
+    const applyUrls = [];
+    const seen = new Set();
+
+    const applyRe =
+      /\bapply\b|\bstart application\b|\bbegin application\b|\bcontinue\b|\bget started\b|\bsubmit\b|\bnext\b/i;
+
+    function pushUrl(href) {
+      const url = String(href || "").trim();
+      if (!url) return;
+      if (!/^https?:\/\//i.test(url)) return;
+      if (seen.has(url)) return;
+      seen.add(url);
+      applyUrls.push(url);
+    }
+
+    for (const a of document.querySelectorAll("a[href]")) {
+      try {
+        const text = String(a.textContent || a.getAttribute("aria-label") || "").trim();
+        if (applyRe.test(text)) pushUrl(a.href);
+      } catch {
+        /* ignore */
+      }
+      if (applyUrls.length >= 5) break;
+    }
+
+    if (applyUrls.length < 5) {
+      for (const el of document.querySelectorAll("button[formaction], input[type='submit'][formaction]")) {
+        try {
+          const href = el.getAttribute("formaction");
+          if (href) pushUrl(href);
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
+    if (applyUrls.length < 5) {
+      for (const btn of document.querySelectorAll("button, input[type='button']")) {
+        try {
+          const text = String(btn.textContent || btn.getAttribute("aria-label") || "").trim();
+          if (!applyRe.test(text)) continue;
+          const href = btn.getAttribute("data-href") || btn.getAttribute("data-url") || "";
+          if (href) pushUrl(href);
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
+    return applyUrls;
+  }
+
+  function detectPageBlocker() {
+    if (document.querySelector('input[type="password"]')) {
+      return "A sign-in form is on the page. Log in, then retry.";
+    }
+    if (
+      document.querySelector(
+        '.g-recaptcha, #g-recaptcha, [data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"]'
+      )
+    ) {
+      return "A CAPTCHA is on the page. Solve it, then retry.";
+    }
+    return "";
+  }
+
+  /**
+   * Decide whether this page is really an application form. Job search / listing
+   * pages also contain inputs (search boxes, filters), so field count alone is
+   * not enough to justify autofilling.
+   */
+  function probeApplicationForm() {
+    const controls = collectFillableControls();
+    const fillableCount = controls.length;
+
+    const hasFileInput = collectFileInputs().length > 0;
+
+    let identityFields = 0;
+    let filterFields = 0;
+    for (const el of controls) {
+      const key = matchApplicantKey(labelTextForControl(el));
+      if (!key) continue;
+      if (["firstName", "lastName", "email", "phone", "linkedinUrl", "addressLine1"].includes(key)) {
+        identityFields += 1;
+      } else {
+        filterFields += 1;
+      }
+    }
+
+    const hasApplyForm = [...document.querySelectorAll("form")].some((form) => {
+      const blob = normalize(
+        [form.getAttribute("action"), form.getAttribute("id"), form.className].join(" ")
+      );
+      return /appl(y|ication)|candidate|submission/.test(blob);
+    });
+
+    const isApplicationForm =
+      hasFileInput || identityFields >= 2 || (hasApplyForm && fillableCount >= 2);
+
+    return {
+      ok: true,
+      hasFormFields: fillableCount >= 1,
+      isApplicationForm,
+      fillableCount,
+      identityFields,
+      filterFields,
+      hasFileInput,
+      blockedReason: detectPageBlocker(),
+      applyUrls: collectApplyUrlCandidates()
+    };
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "autofill_ping") {
-      sendResponse({ ok: true });
+      sendResponse({ ok: true, build: SCRIPT_BUILD });
       return false;
+    }
+    if (message?.type === "probe_application_form") {
+      try {
+        sendResponse(probeApplicationForm());
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+      return true;
     }
     if (message?.type === "autofill_ai_answers") {
       fillAiAnswers(message.answers || [])

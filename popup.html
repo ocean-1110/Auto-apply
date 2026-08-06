@@ -17,158 +17,221 @@
         </button>
       </div>
 
-      <div class="toolbar">
-        <label class="field">
-          <span>Profile</span>
-          <select id="profileSelect"></select>
-        </label>
-        <label class="field">
-          <span>Template</span>
-          <select id="templateSelect"></select>
-        </label>
-        <button type="button" id="deleteProfile" class="secondary danger compact" hidden title="Delete selected profile">
-          Delete
-        </button>
-      </div>
+      <div class="layout">
+        <aside class="sidebar" id="jobsSidebar">
+          <div class="sidebar-modes">
+            <button type="button" id="modeManual" class="secondary compact" title="Manual single-job workflow">
+              Manual
+            </button>
+            <button type="button" id="modeImported" class="secondary compact" title="Import a CSV + apply jobs sequentially (no auto-submit)">
+              Imported
+            </button>
+          </div>
 
-      <section class="section">
-        <div class="grid-2">
+          <div class="sidebar-import">
+            <input type="file" id="csvFileInput" accept=".csv" hidden />
+            <button type="button" id="importCsvBtn" class="secondary compact">Import CSV</button>
+            <div class="job-source-filters" role="group" aria-label="Filter imported jobs by source">
+              <button type="button" id="filterAllJobs" class="secondary compact is-active">All</button>
+              <button type="button" id="filterLinkedInJobs" class="secondary compact">LinkedIn</button>
+              <button type="button" id="filterOtherJobs" class="secondary compact">Others</button>
+            </div>
+            <p id="importStatus" class="import-status" role="status"></p>
+          </div>
+
+          <div class="jobs-list" id="importedJobsList" aria-label="Imported jobs list"></div>
+        </aside>
+
+        <div class="content">
+          <div class="toolbar">
+            <label class="field">
+              <span>Profile</span>
+              <select id="profileSelect"></select>
+            </label>
+            <label class="field">
+              <span>Template</span>
+              <select id="templateSelect"></select>
+            </label>
+            <button type="button" id="deleteProfile" class="secondary danger compact" hidden title="Delete selected profile">
+              Delete
+            </button>
+          </div>
+
+          <div class="status-dock">
+            <div id="genProgress" class="gen-progress" hidden>
+              <span class="gen-progress-indicator" aria-hidden="true"></span>
+              <div class="gen-progress-copy">
+                <strong id="genProgressState">In progress</strong>
+                <span id="genProgressDetail">Starting...</span>
+              </div>
+            </div>
+
+            <section id="permBanner" class="save-banner perm-banner" hidden>
+              <div class="save-banner-text">
+                <strong>Folder access needed</strong>
+                <span id="permBannerPath"></span>
+              </div>
+              <button type="button" id="grantFolderAccess" class="compact">Grant access</button>
+            </section>
+
+            <section id="saveBanner" class="save-banner" hidden>
+              <div class="save-banner-text">
+                <strong>Files saved</strong>
+                <span id="saveBannerPath"></span>
+              </div>
+              <button type="button" id="openSavedFolder" class="compact">Open folder</button>
+            </section>
+
+            <p id="status" role="status"></p>
+          </div>
+
+          <section class="section">
+            <div class="grid-2">
+              <label class="field">
+                <span>Job title</span>
+                <input id="jobTitle" type="text" placeholder="Senior Software Engineer" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Company</span>
+                <input id="companyName" type="text" placeholder="Acme Inc." autocomplete="off" />
+              </label>
+            </div>
+            <div class="row-split">
+              <label class="field grow">
+                <span>JD link</span>
+                <input id="jdLink" type="url" placeholder="https://..." autocomplete="off" />
+              </label>
+              <button type="button" id="copySheetRow" class="secondary compact" title="Copy sheet row">
+                Copy row
+              </button>
+            </div>
+          </section>
+
           <label class="field">
-            <span>Job title</span>
-            <input id="jobTitle" type="text" placeholder="Senior Software Engineer" autocomplete="off" />
+            <span>Job description (JD)</span>
+            <textarea
+              id="jdText"
+              placeholder="Paste the job description here..."
+              rows="3"
+            ></textarea>
           </label>
-          <label class="field">
-            <span>Company</span>
-            <input id="companyName" type="text" placeholder="Acme Inc." autocomplete="off" />
-          </label>
-        </div>
-        <div class="row-split">
-          <label class="field grow">
-            <span>JD link</span>
-            <input id="jdLink" type="url" placeholder="https://..." autocomplete="off" />
-          </label>
-          <button type="button" id="copySheetRow" class="secondary compact" title="Copy sheet row">
-            Copy row
-          </button>
-        </div>
-      </section>
 
-      <label class="field">
-        <span>Job description (JD)</span>
-        <textarea
-          id="jdText"
-          placeholder="Paste the job description here..."
-          rows="3"
-        ></textarea>
-      </label>
+          <div class="row">
+            <button type="button" id="pasteJd" class="secondary">Paste JD</button>
+          </div>
 
-      <div class="row">
-        <button type="button" id="pasteJd" class="secondary">Paste JD</button>
-      </div>
+          <div class="row-split">
+            <label class="field grow">
+              <span>Output folder</span>
+              <input
+                id="outputDirLabel"
+                type="text"
+                placeholder="No folder selected"
+                autocomplete="off"
+                readonly
+              />
+            </label>
+            <button type="button" id="selectOutputDir" class="secondary compact" title="Choose a folder on your PC">
+              Select folder
+            </button>
+          </div>
+          <p class="hint">Files save to: selected folder / {job_title}-{company}-{name}/</p>
 
-      <div class="row-split">
-        <label class="field grow">
-          <span>Output folder</span>
-          <input
-            id="outputDirLabel"
-            type="text"
-            placeholder="No folder selected"
-            autocomplete="off"
-            readonly
-          />
-        </label>
-        <button type="button" id="selectOutputDir" class="secondary compact" title="Choose a folder on your PC">
-          Select folder
-        </button>
-      </div>
-      <p class="hint">Files save to: selected folder / {job_title}-{company}-{name}/</p>
+          <details class="accordion" id="spreadsheetSection">
+            <summary>
+              <span>Google Sheet</span>
+              <span class="accordion-note" id="sheetSummaryNote">Not connected</span>
+            </summary>
+            <div class="accordion-body">
+              <label class="field">
+                <span>Spreadsheet link (open the target tab first, then paste that URL)</span>
+                <input
+                  id="spreadsheetUrl"
+                  type="url"
+                  placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=123456789"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field">
+                <span>Sheet tab name (optional override)</span>
+                <input
+                  id="sheetTabName"
+                  type="text"
+                  placeholder="Exact tab name, e.g. Applications"
+                  autocomplete="off"
+                />
+              </label>
+              <div class="row-split">
+                <label class="field grow">
+                  <span>Apps Script Web App URL</span>
+                  <input
+                    id="sheetsWebAppUrl"
+                    type="url"
+                    placeholder="https://script.google.com/macros/s/.../exec"
+                    autocomplete="off"
+                  />
+                </label>
+                <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
+              </div>
+              <p class="hint">
+                Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
+              </p>
+            </div>
+          </details>
 
-      <section class="section" id="spreadsheetSection" hidden>
-        <label class="field">
-          <span>Spreadsheet link</span>
-          <input
-            id="spreadsheetUrl"
-            type="url"
-            placeholder="https://docs.google.com/spreadsheets/d/.../edit"
-            autocomplete="off"
-          />
-        </label>
-        <div class="row-split">
-          <label class="field grow">
-            <span>Apps Script Web App URL</span>
-            <input
-              id="sheetsWebAppUrl"
-              type="url"
-              placeholder="https://script.google.com/macros/s/.../exec"
-              autocomplete="off"
-            />
-          </label>
-          <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
-        </div>
-      </section>
+          <div class="row row-2">
+            <button type="button" id="generateResume">Generate resume &amp; cover letter</button>
+            <button type="button" id="autofillBtn">Autofill</button>
+          </div>
 
-      <div class="row row-2">
-        <button type="button" id="generateResume">Generate resume &amp; cover letter</button>
-        <button type="button" id="autofillBtn">Autofill</button>
-      </div>
+          <details class="accordion ai-qa-section" id="aiQaSection">
+            <summary>
+              <span>Missed form question</span>
+              <span class="accordion-note">AI answer</span>
+            </summary>
+            <div class="accordion-body">
+              <label class="field">
+                <span>Question</span>
+                <textarea
+                  id="manualQuestion"
+                  placeholder="Paste a question the autofill skipped..."
+                  rows="3"
+                ></textarea>
+              </label>
+              <div class="row">
+                <button type="button" id="generateAiAnswerBtn" class="secondary">
+                  Get brief AI answer
+                </button>
+              </div>
+              <label class="field">
+                <span>AI answer</span>
+                <textarea
+                  id="manualAnswer"
+                  placeholder="Answer appears here — copy into the form"
+                  rows="3"
+                  readonly
+                ></textarea>
+              </label>
+              <div class="row">
+                <button type="button" id="copyAiAnswerBtn" class="secondary" disabled>
+                  Copy answer
+                </button>
+              </div>
+              <p class="hint">Uses JD + resume + profile. 1–2 sentence humanized answer.</p>
+            </div>
+          </details>
 
-      <section class="section ai-qa-section">
-        <label class="field">
-          <span>Missed form question</span>
-          <textarea
-            id="manualQuestion"
-            placeholder="Paste a question the autofill skipped..."
-            rows="3"
-          ></textarea>
-        </label>
-        <div class="row">
-          <button type="button" id="generateAiAnswerBtn" class="secondary">
-            Get brief AI answer
-          </button>
-        </div>
-        <label class="field">
-          <span>AI answer</span>
-          <textarea
-            id="manualAnswer"
-            placeholder="Answer appears here — copy into the form"
-            rows="3"
-            readonly
-          ></textarea>
-        </label>
-        <div class="row">
-          <button type="button" id="copyAiAnswerBtn" class="secondary" disabled>
-            Copy answer
-          </button>
-        </div>
-        <p class="hint">Uses JD + resume + profile. 1–2 sentence humanized answer.</p>
-      </section>
+          <div class="row row-2">
+            <button type="button" id="reset" class="secondary">Refresh / Reset</button>
+            <button type="button" id="editProfile" class="secondary">Edit profile info</button>
+          </div>
 
-      <div class="row row-2">
-        <button type="button" id="reset" class="secondary">Refresh / Reset</button>
-        <button type="button" id="editProfile" class="secondary">Edit profile info</button>
-      </div>
+          <div class="row">
+            <button type="button" id="addProfile" class="secondary">+ Add profile</button>
+          </div>
 
-      <div class="row">
-        <button type="button" id="addProfile" class="secondary">+ Add profile</button>
-      </div>
-
-      <section id="saveBanner" class="save-banner" hidden>
-        <div class="save-banner-text">
-          <strong>Files saved</strong>
-          <span id="saveBannerPath"></span>
-        </div>
-        <button type="button" id="openSavedFolder" class="compact">Open folder</button>
-      </section>
-
-      <div id="genProgress" class="gen-progress" hidden>
-        <span class="gen-progress-indicator" aria-hidden="true"></span>
-        <div class="gen-progress-copy">
-          <strong id="genProgressState">In progress</strong>
-          <span id="genProgressDetail">Starting...</span>
         </div>
       </div>
-
-      <p id="status" role="status"></p>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

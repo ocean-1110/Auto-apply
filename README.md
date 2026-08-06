@@ -63,6 +63,13 @@ Chrome cannot write to a spreadsheet from the share/edit link alone. You need a 
 6. Authorize when prompted
 7. Copy the **Web App URL** into the extension with the spreadsheet link
 
+The spreadsheet URL's `gid` selects the sheet tab. After a resume is generated, the extension
+appends JD link, role, company, and date to columns A–D. CSV import reads column A through the
+same web app and ignores jobs whose URL is already present.
+
+If you update the Apps Script later, use **Deploy → Manage deployments → Edit → New version**.
+Saving the script alone does not update an existing Web App deployment.
+
 ## Notes
 
 - Keep ChatGPT tab open while it runs (resume and cover letter each start a new chat).

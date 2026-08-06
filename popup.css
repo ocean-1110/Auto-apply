@@ -4,7 +4,7 @@
 
 body {
   margin: 0;
-  width: 480px;
+  width: 980px;
   min-height: 100vh;
   background: #0b1220;
   color: #e5e7eb;
@@ -13,6 +13,136 @@ body {
 
 .app {
   padding: 10px;
+}
+
+.layout {
+  display: flex;
+  gap: 10px;
+}
+
+.sidebar {
+  width: 290px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.sidebar-modes button.is-active {
+  border-color: #60a5fa;
+  color: #e5e7eb;
+}
+
+.sidebar-import {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.job-source-filters {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.job-source-filters button {
+  min-width: 0;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+.job-source-filters button.is-active {
+  border-color: #60a5fa;
+  background: #1e3a5f;
+  color: #e5e7eb;
+}
+
+.import-status {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 630px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.job-card {
+  border: 1px solid #334155;
+  background: #0f172a;
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.job-summary {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.job-summary button {
+  width: auto !important;
+  min-width: 78px;
+  height: 28px;
+  padding: 4px 8px;
+}
+
+.job-summary-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 700;
+}
+
+.job-summary-status {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: #93c5fd;
+  white-space: nowrap;
+}
+
+.job-card-details {
+  margin-top: 6px;
+  border-top: 1px dashed #22304b;
+  padding-top: 6px;
+}
+
+.job-meta {
+  color: #cbd5e1;
+  font-size: 11px;
+  margin: 0 0 6px 0;
+  white-space: pre-wrap;
+}
+
+.job-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.job-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .brand {
@@ -247,12 +377,79 @@ button:disabled {
   background: #0b1220;
 }
 
-.ai-qa-section {
-  margin: 8px 0;
+/* Keeps generation status in view while the rest of the panel scrolls. */
+.status-dock {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin-bottom: 8px;
   padding: 8px;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0b1220;
+  text-align: center;
+}
+
+.status-dock .gen-progress,
+.status-dock .save-banner {
+  margin: 0 0 6px;
+  text-align: left;
+}
+
+.accordion {
+  margin: 0 0 8px;
   border: 1px solid #334155;
   border-radius: 8px;
   background: #0b1220;
+}
+
+.accordion > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  list-style: none;
+}
+
+.accordion > summary::-webkit-details-marker {
+  display: none;
+}
+
+.accordion > summary::after {
+  content: "▾";
+  color: #64748b;
+  font-size: 10px;
+}
+
+.accordion[open] > summary::after {
+  content: "▴";
+}
+
+.accordion > summary:hover {
+  color: #cbd5e1;
+}
+
+.accordion-note {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 600;
+  color: #64748b;
+  margin-left: auto;
+}
+
+.accordion-note.is-connected {
+  color: #86efac;
+}
+
+.accordion-body {
+  padding: 0 8px 8px;
 }
 
 .ai-qa-section .field {
@@ -285,6 +482,8 @@ button:disabled {
   font-size: 12px;
   line-height: 1.25;
   font-weight: 700;
+  text-align: center;
+  word-break: break-word;
 }
 
 #status.is-running {
@@ -426,6 +625,27 @@ button:disabled {
   background: #166534;
   border-color: #22c55e;
   color: #f0fdf4;
+}
+
+.perm-banner {
+  border-color: #92400e;
+  background: #3b2205;
+}
+
+.perm-banner .save-banner-text strong {
+  color: #fcd34d;
+}
+
+.perm-banner .save-banner-text span {
+  color: #fde68a;
+}
+
+#grantFolderAccess {
+  width: auto;
+  flex: 0 0 auto;
+  background: #92400e;
+  border-color: #f59e0b;
+  color: #fffbeb;
 }
 
 #openSavedFolder:hover {
