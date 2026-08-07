@@ -43,7 +43,13 @@ async function readSheetsResponse(response) {
     throw new Error("Google Sheet returned an invalid response. Redeploy the latest Apps Script code.");
   }
   if (parsed.ok === false) {
-    throw new Error(parsed.error || "Google Sheet request failed.");
+    const errText = String(parsed.error || "Google Sheet request failed.");
+    if (/number of rows in the data does not match/i.test(errText)) {
+      throw new Error(
+        "Your Apps Script Web App is still the old version. Click Copy script in the extension, paste into Apps Script, Save, then Deploy → Manage deployments → Edit → New version → Deploy."
+      );
+    }
+    throw new Error(errText);
   }
 
   return parsed;
@@ -118,9 +124,9 @@ export async function appendJobToSpreadsheet({
   };
 
   const result = await postToSheetsWebApp(endpoint, payload);
-  if (!result.row) {
+  if (!result.row || result.apiVersion !== "2026-08-06b") {
     throw new Error(
-      "The Apps Script deployment is outdated. Copy the latest script, then Deploy → Manage deployments → Edit → New version."
+      "Your Apps Script Web App is outdated (still running old code). In the extension click Copy script → paste into Apps Script → Save → Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Then try again."
     );
   }
 

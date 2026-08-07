@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Resume GPT Builder",
   "description": "Generate tailored resumes and cover letters via the OpenAI API, then autofill job applications.",
-  "version": "1.4.8",
+  "version": "1.4.9",
   "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "debugger", "notifications"],
   "host_permissions": [
     "https://api.openai.com/*",

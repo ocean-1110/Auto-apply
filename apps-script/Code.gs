@@ -89,9 +89,9 @@ function findNextEmptyRowInColumnA(sheet) {
 
 function appendJobRow(sheet, data) {
   var row = findNextEmptyRowInColumnA(sheet);
-  // IMPORTANT: 4-arg getRange is (startRow, startCol, numRows, numColumns).
-  // Writing one row of A–D must use numRows=1, numColumns=4.
-  sheet.getRange(row, 1, 1, 4).setValues([
+  // Use A1 notation so we never confuse end-row with numRows.
+  // (Apps Script getRange(r,c,numRows,numColumns) is NOT end-row/end-column.)
+  sheet.getRange("A" + row + ":D" + row).setValues([
     [
       data.jobLink || "",
       data.jobTitle || "",
@@ -101,6 +101,7 @@ function appendJobRow(sheet, data) {
   ]);
   return {
     ok: true,
+    apiVersion: "2026-08-06b",
     sheetName: sheet.getName(),
     sheetGid: String(sheet.getSheetId()),
     row: row
@@ -120,6 +121,7 @@ function doPost(e) {
     if (data.action === "getJobLinks") {
       return jsonResponse({
         ok: true,
+        apiVersion: "2026-08-06b",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -147,6 +149,7 @@ function doGet(e) {
       var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
       return jsonResponse({
         ok: true,
+        apiVersion: "2026-08-06b",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -156,6 +159,10 @@ function doGet(e) {
     }
   }
   return ContentService.createTextOutput(
-    "Resume GPT Builder sheet append endpoint is running."
-  );
+    JSON.stringify({
+      ok: true,
+      apiVersion: "2026-08-06b",
+      message: "Resume GPT Builder sheet append endpoint is running."
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
 }
