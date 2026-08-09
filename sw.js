@@ -8,7 +8,7 @@ import {
   RESUME_JSON_SYSTEM_PROMPT
 } from "./openai.js";
 import { getEnv } from "./env.js";
-import { getApplicantInfo } from "./applicant-info.js";
+import { getApplicantInfo, saveApplicantInfo } from "./applicant-info.js";
 import { awaitTabComplete } from "./tab-utils.js";
 import {
   getOutputDirectoryHandle,
@@ -19,6 +19,7 @@ import {
 } from "./fs-output.js";
 import { setLastGeneratedDocs, pickUploadDocsFromBundle, getLastGeneratedDocs } from "./upload-assets.js";
 import { generateHumanizedApplicationAnswers } from "./ai-answers.js";
+import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
 
 // Service worker entry (v1.3.5)
 let isRunning = false;
@@ -261,7 +262,71 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-05.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-09.2";
+
+/** Signal open panels that the Q&A bank changed so they can re-render. */
+function bumpQaVersion() {
+  chrome.storage.local.set({ qa_bank_version: Date.now() }).catch(() => {});
+}
+
+function hostnameFromUrl(url) {
+  try {
+    return new URL(String(url || "")).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Saved login / sign-up credentials used to autofill auth pages. */
+async function getAccountCredentials() {
+  const data = await chrome.storage.local.get("account_credentials");
+  const c = data.account_credentials || {};
+  return {
+    email: String(c.email || "").trim(),
+    username: String(c.username || "").trim(),
+    password: String(c.password || "")
+  };
+}
+
+/** Normalize a URL for loose tab matching (drop hash + trailing slash). */
+function normalizeUrlForMatch(url) {
+  try {
+    const u = new URL(String(url || ""));
+    u.hash = "";
+    if (u.pathname.length > 1) u.pathname = u.pathname.replace(/\/+$/, "");
+    return (u.origin + u.pathname + u.search).toLowerCase();
+  } catch {
+    return String(url || "").replace(/#.*$/, "").replace(/\/+$/, "").toLowerCase();
+  }
+}
+
+/** Find an open tab already showing this job URL, so we don't reopen it. */
+async function findTabByUrl(url) {
+  const target = normalizeUrlForMatch(url);
+  if (!target) return null;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch {
+    return null;
+  }
+  const exact = tabs.find((t) => t.url && normalizeUrlForMatch(t.url) === target);
+  if (exact) return exact;
+  const targetNoQuery = target.split("?")[0];
+  return (
+    tabs.find(
+      (t) => t.url && normalizeUrlForMatch(t.url).split("?")[0] === targetNoQuery
+    ) || null
+  );
+}
+
+/** Identify an easy-apply-capable site from a URL. */
+function detectSiteFromUrl(url) {
+  const host = hostnameFromUrl(url);
+  if (host.includes("dice.com")) return "dice";
+  if (host.includes("jobright.ai")) return "jobright";
+  return "generic";
+}
 
 async function ensureAutofillScript(tabId) {
   try {
@@ -309,9 +374,59 @@ async function getCurrentApplicationTab() {
 }
 
 /**
+ * Answer free-text application questions. These depend on the role/JD (e.g.
+ * "describe your most challenging project"), so they are always generated fresh
+ * by OpenAI and never read from or written to the Q&A bank. Reusable structured
+ * answers (dropdowns/checkboxes/radios) are handled separately by the bank.
+ * @returns {Promise<Array<{ id: string, answer: string }>>}
+ */
+async function resolveTextAnswers({ questions, applicantInfo, jobMeta = {}, resumeText = "" }) {
+  const list = (questions || []).filter((q) => q?.id && q?.label);
+  if (!list.length) return [];
+
+  const { apiKey, model } = await getOpenAiSettings();
+  const aiAnswers = await generateHumanizedApplicationAnswers({
+    apiKey,
+    model,
+    questions: list,
+    applicantInfo,
+    jobMeta,
+    resumeText
+  });
+
+  const byId = new Map(aiAnswers.map((a) => [a.id, String(a?.answer || "").trim()]));
+  return list
+    .map((q) => ({ id: q.id, answer: byId.get(q.id) || "" }))
+    .filter((row) => row.answer);
+}
+
+/**
+ * Resolve stored answers for novel CHOICE questions (dropdown / checkbox /
+ * radio) from the Q&A bank only — never AI. Returns just the ones with a match.
+ * @returns {Promise<Array<{ id: string, answer: string }>>}
+ */
+async function resolveChoiceAnswersFromBank(profileId, questions) {
+  const list = (questions || []).filter((q) => q?.id && q?.label);
+  const resolved = [];
+  for (const q of list) {
+    let match = null;
+    try {
+      match = await findQaMatch(profileId, q.label);
+    } catch {
+      match = null;
+    }
+    if (match?.record?.answer) {
+      resolved.push({ id: q.id, answer: match.record.answer });
+      recordQaUsage(match.record.id).catch(() => {});
+    }
+  }
+  return resolved;
+}
+
+/**
  * Autofill the currently open application page using the selected profile's answers.
  * Also injects last generated resume / cover letter PDFs into matching file inputs.
- * Unmatched question fields are answered via OpenAI (generate + humanize).
+ * Unmatched question fields are answered from the Q&A bank, then OpenAI.
  */
 async function startAutofillOnCurrentPage(profileId, tabId = null) {
   const applicantInfo = await getApplicantInfo(profileId);
@@ -343,10 +458,13 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
     };
   }
 
+  const credentials = await getAccountCredentials();
+
   await ensureAutofillScript(tab.id);
   const result = await chrome.tabs.sendMessage(tab.id, {
     type: "autofill_application",
     applicantInfo,
+    credentials,
     uploadFiles: {
       resume: docs?.resume || null,
       coverLetter: docs?.coverLetter || null
@@ -354,21 +472,38 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
   });
 
   let aiFilledCount = 0;
+  let choiceFilledCount = 0;
   const unmatched = Array.isArray(result?.unmatchedQuestions) ? result.unmatchedQuestions : [];
+  const unmatchedChoice = Array.isArray(result?.unmatchedChoiceQuestions)
+    ? result.unmatchedChoiceQuestions
+    : [];
+
+  // Reuse stored answers for novel dropdown/checkbox/radio questions (bank only).
+  if (unmatchedChoice.length) {
+    try {
+      const choiceAnswers = await resolveChoiceAnswersFromBank(profileId, unmatchedChoice);
+      if (choiceAnswers.length) {
+        const cRes = await chrome.tabs.sendMessage(tab.id, {
+          type: "autofill_choice_answers",
+          answers: choiceAnswers
+        });
+        choiceFilledCount = Number(cRes?.filledCount || 0);
+      }
+    } catch {
+      /* best-effort: choice reuse should never block the rest of autofill */
+    }
+  }
 
   if (unmatched.length) {
-    await setStatus(`Generating human-style answers for ${unmatched.length} extra question(s)...`);
+    await setStatus(`Generating fresh AI answer(s) for ${unmatched.length} question(s)...`);
     try {
-      const { apiKey, model } = await getOpenAiSettings();
       const stored = await chrome.storage.local.get([
         "last_job_title",
         "last_company_name",
         "last_jd_text",
         "last_response"
       ]);
-      const answers = await generateHumanizedApplicationAnswers({
-        apiKey,
-        model,
+      const answers = await resolveTextAnswers({
         questions: unmatched,
         applicantInfo,
         jobMeta: {
@@ -380,7 +515,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
       });
 
       if (answers.length) {
-        await setStatus(`Humanizing complete. Filling ${answers.length} AI answer(s)...`);
+        await setStatus(`Filling ${answers.length} AI answer(s)...`);
         const aiResult = await chrome.tabs.sendMessage(tab.id, {
           type: "autofill_ai_answers",
           answers
@@ -395,6 +530,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         tabUrl: tab.url || "",
         ...result,
         aiFilledCount: 0,
+        choiceFilledCount,
         aiError: String(aiErr?.message || aiErr)
       };
     }
@@ -405,8 +541,63 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
     tabId: tab.id,
     tabUrl: tab.url || "",
     ...result,
-    aiFilledCount
+    aiFilledCount,
+    choiceFilledCount
   };
+}
+
+/**
+ * Drive a multi-step "Easy Apply" flow (Dice / Jobright) on a tab: fill each
+ * step from profile + Q&A bank + AI, advance through the modal, and stop before
+ * the final submit (never auto-submits). The content script owns the DOM loop
+ * and calls back for answers via `easy_apply_answer_questions`.
+ */
+async function startEasyApplyOnTab(profileId, tabId = null) {
+  const applicantInfo = await getApplicantInfo(profileId);
+  const docs = await getLastGeneratedDocs();
+
+  const tab = tabId
+    ? await chrome.tabs.get(tabId).catch(() => null)
+    : await getCurrentApplicationTab();
+  if (!tab?.id) {
+    return { ok: false, error: "No application tab found. Open the Dice/Jobright job page first." };
+  }
+  if (!/^https?:\/\//i.test(tab.url || "")) {
+    return { ok: false, error: "The current tab is not a web page. Open the job page, then run Easy Apply." };
+  }
+
+  const site = detectSiteFromUrl(tab.url);
+  const stored = await chrome.storage.local.get([
+    "last_job_title",
+    "last_company_name",
+    "last_jd_text"
+  ]);
+
+  const credentials = await getAccountCredentials();
+
+  await ensureAutofillScript(tab.id);
+  const summary = await sendMessageToTab(
+    tab.id,
+    {
+      type: "easy_apply_run",
+      profileId,
+      site,
+      applicantInfo,
+      credentials,
+      uploadFiles: {
+        resume: docs?.resume || null,
+        coverLetter: docs?.coverLetter || null
+      },
+      jobMeta: {
+        jobTitle: stored.last_job_title || "",
+        companyName: stored.last_company_name || "",
+        jdText: stored.last_jd_text || ""
+      }
+    },
+    { attempts: 2 }
+  );
+
+  return { ok: Boolean(summary?.ok ?? true), tabId: tab.id, tabUrl: tab.url || "", site, ...summary };
 }
 
 /**
@@ -423,7 +614,6 @@ async function answerManualApplicationQuestion(profileId, questionText) {
   }
 
   const applicantInfo = await getApplicantInfo(profileId);
-  const { apiKey, model } = await getOpenAiSettings();
   const stored = await chrome.storage.local.get([
     "last_job_title",
     "last_company_name",
@@ -431,9 +621,7 @@ async function answerManualApplicationQuestion(profileId, questionText) {
     "last_response"
   ]);
 
-  const answers = await generateHumanizedApplicationAnswers({
-    apiKey,
-    model,
+  const answers = await resolveTextAnswers({
     questions: [
       {
         id: "manual_q1",
@@ -1122,7 +1310,12 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
         sheetName: jobMeta.sheetName || "",
         jobTitle: jobMeta.jobTitle,
         companyName: jobMeta.companyName,
-        jdLink: jobMeta.jdLink
+        jdLink: jobMeta.jdLink,
+        workArrangement: jobMeta.workArrangement || "",
+        employmentType: jobMeta.employmentType || "",
+        salaryMin: jobMeta.salaryMin || "",
+        salaryMax: jobMeta.salaryMax || "",
+        datePosted: jobMeta.datePosted || ""
       });
       const sheetLabel = sheetResult.sheetName
         ? `"${sheetResult.sheetName}" row ${sheetResult.row}`
@@ -1387,7 +1580,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         const msg =
           `Autofilled ${result.filledCount || 0} field(s)` +
+          (result.credentialFilledCount ? `, login ${result.credentialFilled.join("/")}` : "") +
           (result.uploadedCount ? `, uploaded ${result.uploadedCount} file(s)` : "") +
+          (result.choiceFilledCount ? `, reused ${result.choiceFilledCount} saved choice(s)` : "") +
           (result.aiFilledCount ? `, AI-answered ${result.aiFilledCount} question(s)` : "") +
           (result.aiError ? ` (AI answers failed: ${result.aiError})` : "") +
           " on the current page.";
@@ -1396,6 +1591,147 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       } catch (err) {
         const error = String(err?.message || err);
         await setStatus(`Autofill failed: ${error}`);
+        safeSendResponse(sendResponse, { ok: false, error });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "profile_learn_capture") {
+    (async () => {
+      try {
+        const key = String(message.key || "").trim();
+        const value = String(message.value || "").trim();
+        if (!key || !value) {
+          safeSendResponse(sendResponse, { ok: false });
+          return;
+        }
+        const { selected_profile_id } = await chrome.storage.local.get("selected_profile_id");
+        const profileId = selected_profile_id || "";
+        if (!profileId) {
+          safeSendResponse(sendResponse, { ok: false, error: "No profile selected." });
+          return;
+        }
+        const info = await getApplicantInfo(profileId);
+        if (!(key in info)) {
+          safeSendResponse(sendResponse, { ok: false });
+          return;
+        }
+        // Fill-if-empty: never overwrite a value the user curated in the profile.
+        if (String(info[key] || "").trim()) {
+          safeSendResponse(sendResponse, { ok: true, skipped: true });
+          return;
+        }
+        info[key] = value;
+        await saveApplicantInfo(profileId, info);
+        safeSendResponse(sendResponse, { ok: true, learned: true });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "qa_learn_capture") {
+    (async () => {
+      try {
+        const question = String(message.question || "").trim();
+        const answer = String(message.answer || "").trim();
+        if (!question || !answer) {
+          safeSendResponse(sendResponse, { ok: false });
+          return;
+        }
+        const { selected_profile_id } = await chrome.storage.local.get("selected_profile_id");
+        await saveQa({
+          profileId: selected_profile_id || "",
+          question,
+          answer,
+          fieldType: message.fieldType || "text",
+          source: "user",
+          site: message.site || ""
+        });
+        bumpQaVersion();
+        safeSendResponse(sendResponse, { ok: true });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "easy_apply_answer_questions") {
+    (async () => {
+      try {
+        const profileId = message.profileId;
+        const questions = Array.isArray(message.questions) ? message.questions : [];
+        if (!questions.length) {
+          safeSendResponse(sendResponse, { ok: true, answers: [] });
+          return;
+        }
+        const applicantInfo = await getApplicantInfo(profileId);
+        const stored = await chrome.storage.local.get([
+          "last_job_title",
+          "last_company_name",
+          "last_jd_text",
+          "last_response"
+        ]);
+        const answers = await resolveTextAnswers({
+          questions,
+          applicantInfo,
+          jobMeta: message.jobMeta || {
+            jobTitle: stored.last_job_title || "",
+            companyName: stored.last_company_name || "",
+            jdText: stored.last_jd_text || ""
+          },
+          resumeText: stored.last_response || ""
+        });
+        safeSendResponse(sendResponse, { ok: true, answers });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err), answers: [] });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "easy_apply_choice_answers") {
+    (async () => {
+      try {
+        const answers = await resolveChoiceAnswersFromBank(
+          message.profileId,
+          Array.isArray(message.questions) ? message.questions : []
+        );
+        safeSendResponse(sendResponse, { ok: true, answers });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err), answers: [] });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "easy_apply_current_page") {
+    (async () => {
+      try {
+        const profileId = message.profileId;
+        if (!profileId) {
+          safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
+          return;
+        }
+        await setStatus("Running Easy Apply on the current page...");
+        const result = await startEasyApplyOnTab(profileId);
+        if (!result.ok) {
+          await setStatus(`Easy Apply failed: ${result.error}`);
+          safeSendResponse(sendResponse, result);
+          return;
+        }
+        const msg =
+          `Easy Apply (${result.site || "site"}): ${result.status || "done"} — ` +
+          `${result.steps || 0} step(s), filled ${result.filled || 0}, ` +
+          `uploaded ${result.uploaded || 0}, answered ${result.answered || 0}. ${result.detail || ""}`.trim();
+        await setStatus(msg);
+        safeSendResponse(sendResponse, { ...result, status: msg });
+      } catch (err) {
+        const error = String(err?.message || err);
+        await setStatus(`Easy Apply failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
       }
     })();
@@ -1440,11 +1776,48 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           throw new Error("Missing job URL (jdLink).");
         }
 
-        const tab = await chrome.tabs.create({ url, active: true });
-        const tabId = tab?.id;
-        if (!tabId) throw new Error("Failed to open browser tab.");
+        // Reuse a tab already showing this job (e.g. opened via "See job")
+        // instead of opening the page again.
+        let tabId;
+        const existingTab = await findTabByUrl(url);
+        if (existingTab?.id != null) {
+          tabId = existingTab.id;
+          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+          if (existingTab.windowId != null) {
+            await chrome.windows
+              .update(existingTab.windowId, { focused: true })
+              .catch(() => {});
+          }
+          if (existingTab.status !== "complete") {
+            await awaitTabComplete(tabId, 30000);
+          }
+        } else {
+          const tab = await chrome.tabs.create({ url, active: true });
+          tabId = tab?.id;
+          if (!tabId) throw new Error("Failed to open browser tab.");
+          await awaitTabComplete(tabId, 30000);
+        }
 
-        await awaitTabComplete(tabId, 30000);
+        // Stop early if the posting is gone (expired / filled / removed / 404) so
+        // we don't waste an OpenAI call, and mark the job as no longer available.
+        try {
+          await ensureAutofillScript(tabId);
+          const availProbe = await sendMessageToTab(
+            tabId,
+            { type: "probe_application_form" },
+            { attempts: 2 }
+          );
+          if (availProbe?.jobUnavailable) {
+            await setImportedJobStatus(importedJobId, {
+              status: "unavailable",
+              statusDetail: `No longer available: ${availProbe.jobUnavailable}`
+            });
+            await setStatus(`Imported job skipped — no longer available: ${availProbe.jobUnavailable}`);
+            return;
+          }
+        } catch {
+          /* availability probe is best-effort; continue on failure */
+        }
 
         // Persist job fields so AI Q&A has the correct context.
         await chrome.storage.local.set({
@@ -1472,6 +1845,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           statusDetail: "Locating application form..."
         });
 
+        // Dice / Jobright use an in-page Easy Apply modal rather than a standalone
+        // form page — drive that flow directly (fills each step, stops before submit).
+        const liveTab = await chrome.tabs.get(tabId).catch(() => null);
+        const site = detectSiteFromUrl(liveTab?.url || url);
+        if (site === "dice" || site === "jobright") {
+          await setImportedJobStatus(importedJobId, {
+            status: "filling",
+            statusDetail: `Running ${site} Easy Apply...`
+          });
+          await setStatus(`Running ${site} Easy Apply...`);
+
+          const ea = await startEasyApplyOnTab(profileId, tabId);
+          if (!ea.ok && ea.error) throw new Error(ea.error);
+
+          const nextStatus =
+            ea.status === "submitted"
+              ? "completed"
+              : ea.status === "unavailable"
+                ? "unavailable"
+                : ea.status === "needs_review"
+                  ? "needs_review"
+                  : "ready_for_review";
+          await setImportedJobStatus(importedJobId, {
+            status: nextStatus,
+            statusDetail:
+              `Easy Apply (${site}): ${ea.status || "done"}. ` +
+              `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
+              `answered ${ea.answered || 0}. ${ea.detail || ""}`.trim()
+          });
+          await setStatus(`Imported job Easy Apply: ${ea.status || "done"} (no submit).`);
+          return;
+        }
+
         // Best-effort: probe page for fillable fields; if missing, try candidate Apply URLs.
         let probe = null;
         const probeTab = async () => {
@@ -1494,6 +1900,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           probe.ok !== false &&
           !probe.isApplicationForm &&
           !probe.blockedReason &&
+          !probe.jobUnavailable &&
           Array.isArray(probe.applyUrls) &&
           probe.applyUrls.length
         ) {
@@ -1516,17 +1923,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           tries += 1;
         }
 
+        // The posting became unavailable while we clicked through: stop and mark it.
+        if (probe?.jobUnavailable) {
+          await setImportedJobStatus(importedJobId, {
+            status: "unavailable",
+            statusDetail: `No longer available: ${probe.jobUnavailable}`
+          });
+          await setStatus(`Imported job unavailable: ${probe.jobUnavailable}`);
+          return;
+        }
+
         // Stop rather than typing profile answers into a listing page's search
         // and filter inputs, or into a login / CAPTCHA wall.
         if (probe?.blockedReason || probe?.isApplicationForm === false) {
           const reason =
             probe?.blockedReason ||
             "No application form found on this page. Open the apply form, then use Autofill.";
+
+          // If it's a sign-in / register wall, prefill saved credentials so the
+          // user only has to submit (we never auto-submit login forms).
+          let credNote = "";
+          try {
+            const credentials = await getAccountCredentials();
+            if (credentials.email || credentials.username || credentials.password) {
+              const credRes = await sendMessageToTab(
+                tabId,
+                { type: "autofill_credentials", credentials },
+                { attempts: 2 }
+              );
+              if (Number(credRes?.filledCount || 0) > 0) {
+                credNote = ` Saved login prefilled (${credRes.filled.join(", ")}) — sign in, then click Autofill.`;
+              }
+            }
+          } catch {
+            /* credential prefill is best-effort */
+          }
+
           await setImportedJobStatus(importedJobId, {
             status: "needs_review",
-            statusDetail: `${reason} Resume and cover letter are saved.`
+            statusDetail: `${reason}${credNote} Resume and cover letter are saved.`
           });
-          await setStatus(`Imported job needs review: ${reason}`);
+          await setStatus(`Imported job needs review: ${reason}${credNote}`);
           return;
         }
 
@@ -1548,10 +1985,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const filledCount = Number(autoRes.filledCount || 0);
         const uploadedCount = Number(autoRes.uploadedCount || 0);
         const aiFilledCount = Number(autoRes.aiFilledCount || 0);
+        const choiceFilledCount = Number(autoRes.choiceFilledCount || 0);
 
         await setImportedJobStatus(importedJobId, {
           status: "ready_for_review",
-          statusDetail: `Autofill complete. Filled ${filledCount} field(s), uploaded ${uploadedCount} file(s), AI answered ${aiFilledCount} question(s).`
+          statusDetail: `Autofill complete. Filled ${filledCount} field(s), uploaded ${uploadedCount} file(s), reused ${choiceFilledCount} saved choice(s), AI answered ${aiFilledCount} question(s).`
         });
 
         await setStatus("Imported job ready for review (no submit).");

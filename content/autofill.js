@@ -6,10 +6,19 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-05.1";
+  const SCRIPT_BUILD = "2026-08-09.2";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
+
+  // Learn mode: capture answers the user types/selects. Suppressed briefly while
+  // the extension autofills so we never re-store our own programmatic values.
+  let learnEnabled = true;
+  let learnSuppressUntil = 0;
+  const learnSentByQuestion = new Map();
+  function suppressLearn(ms = 2500) {
+    learnSuppressUntil = Date.now() + ms;
+  }
 
   const FIELD_ALIASES = {
     firstName: ["first name", "firstname", "given name", "legal first name"],
@@ -1096,6 +1105,7 @@
   }
 
   async function fillAiAnswers(answers = []) {
+    suppressLearn();
     const filled = [];
     for (const row of answers) {
       const id = String(row?.id || "").trim();
@@ -1114,6 +1124,74 @@
       if (await fillControl(el, answer, null)) {
         filled.push({ id, label: labelTextForControl(el), preview: answer.slice(0, 80) });
       }
+    }
+    return { filledCount: filled.length, filled };
+  }
+
+  /**
+   * Collect novel CHOICE questions (native select / radio / checkbox) that are
+   * NOT mapped to a known profile field. These get answered from the Q&A bank
+   * (stable, reusable selections) — never from AI.
+   */
+  function collectUnmatchedChoiceQuestions() {
+    const out = [];
+    const groupIds = new Map(); // labelNorm -> id (radio/checkbox groups share one)
+    const nodes = [
+      ...document.querySelectorAll('select, input[type="radio"], input[type="checkbox"]')
+    ];
+
+    for (const el of nodes) {
+      if (out.length >= 15) break;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (el.disabled) continue;
+      if (isReactSelectInput(el)) continue;
+
+      // Known profile fields are handled by the deterministic autofill loop.
+      if (matchApplicantKey(labelTextForControl(el))) continue;
+
+      const label = captureQuestionText(el);
+      if (!label) continue;
+      if (LEARN_SENSITIVE_RE.test(label)) continue;
+      const labelNorm = normalize(label);
+      if (!labelNorm || labelNorm.length < 6) continue;
+
+      const isGroup = el.type === "radio" || el.type === "checkbox";
+      if (isGroup && groupIds.has(labelNorm)) {
+        el.setAttribute("data-resume-bot-choice-qid", groupIds.get(labelNorm));
+        continue;
+      }
+
+      const id = `rbc_${out.length}_${Math.abs(
+        Array.from(labelNorm).reduce((n, ch) => (n * 31 + ch.charCodeAt(0)) | 0, 7)
+      )}`;
+      el.setAttribute("data-resume-bot-choice-qid", id);
+      if (isGroup) groupIds.set(labelNorm, id);
+      out.push({ id, label: label.slice(0, 1000) });
+    }
+
+    return out;
+  }
+
+  async function fillChoiceAnswers(answers = []) {
+    suppressLearn();
+    const filled = [];
+    for (const row of answers) {
+      const id = String(row?.id || "").trim();
+      const answer = String(row?.answer || "").trim();
+      if (!id || !answer) continue;
+      const els = [
+        ...document.querySelectorAll(`[data-resume-bot-choice-qid="${CSS.escape(id)}"]`)
+      ];
+      if (!els.length) continue;
+      let ok = false;
+      for (const el of els) {
+        if (await fillControl(el, answer, null)) {
+          ok = true;
+          if (el.tagName === "SELECT") break; // one select is enough
+        }
+      }
+      if (ok) filled.push({ id, preview: answer.slice(0, 80) });
     }
     return { filledCount: filled.length, filled };
   }
@@ -1142,7 +1220,122 @@
     });
   }
 
-  async function autofillApplication(applicantInfo = {}, uploadFiles = {}) {
+  function isFieldFillable(el) {
+    return (
+      el &&
+      typeof el.value !== "undefined" &&
+      !el.disabled &&
+      !el.readOnly &&
+      el.offsetParent !== null
+    );
+  }
+
+  function setCredentialValue(el, value) {
+    if (!el || value == null || String(value) === "") return false;
+    try {
+      el.focus?.();
+    } catch {
+      /* focus is best-effort */
+    }
+    const ok = setNativeValue(el, String(value));
+    try {
+      el.blur?.();
+    } catch {
+      /* blur is best-effort */
+    }
+    return ok;
+  }
+
+  function firstCredentialField(selectors, used) {
+    for (const sel of selectors) {
+      let nodes;
+      try {
+        nodes = document.querySelectorAll(sel);
+      } catch {
+        continue;
+      }
+      for (const el of nodes) {
+        if (used.has(el)) continue;
+        if (isFieldFillable(el)) return el;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Fill saved login / sign-up credentials (email, username, password) on an
+   * auth page. Only acts when a password field is present, so application forms
+   * that merely ask for a contact email are left to the profile autofill. Never
+   * submits the form.
+   */
+  function fillLoginCredentials(credentials = {}) {
+    const email = String(credentials.email || "").trim();
+    const username = String(credentials.username || "").trim();
+    const password = String(credentials.password || "").trim();
+    if (!email && !username && !password) return { filledCount: 0, filled: [] };
+
+    const passwordFields = Array.from(
+      document.querySelectorAll('input[type="password"]')
+    ).filter(isFieldFillable);
+    // No password field ⇒ this is not a login/register form; don't touch it.
+    if (!passwordFields.length) return { filledCount: 0, filled: [] };
+
+    suppressLearn();
+    const filled = [];
+    const used = new Set();
+
+    if (password) {
+      // Fill the primary password and any confirm-password field with the same value.
+      for (const el of passwordFields) {
+        if (setCredentialValue(el, password)) {
+          used.add(el);
+          filled.push("password");
+        }
+      }
+    }
+
+    if (email) {
+      const el = firstCredentialField(
+        [
+          'input[type="email"]',
+          'input[autocomplete="email"]',
+          'input[name*="email" i]',
+          'input[id*="email" i]',
+          'input[placeholder*="email" i]',
+          'input[aria-label*="email" i]'
+        ],
+        used
+      );
+      if (el && setCredentialValue(el, email)) {
+        used.add(el);
+        filled.push("email");
+      }
+    }
+
+    if (username) {
+      const el = firstCredentialField(
+        [
+          'input[autocomplete="username"]',
+          'input[name*="user" i]',
+          'input[id*="user" i]',
+          'input[name*="login" i]',
+          'input[id*="login" i]',
+          'input[placeholder*="user" i]',
+          'input[aria-label*="user" i]'
+        ],
+        used
+      );
+      if (el && setCredentialValue(el, username)) {
+        used.add(el);
+        filled.push("username");
+      }
+    }
+
+    return { filledCount: filled.length, filled };
+  }
+
+  async function autofillApplication(applicantInfo = {}, uploadFiles = {}, credentials = {}) {
+    suppressLearn();
     const filled = [];
     const controls = collectFillableControls();
 
@@ -1155,17 +1348,24 @@
       if (await fillControl(el, value, key)) filled.push({ key, label });
     }
 
+    // Fill saved login/sign-up credentials when this is an auth page.
+    const credResult = fillLoginCredentials(credentials);
+
     const uploadResult = uploadApplicationFiles(uploadFiles);
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
+    const unmatchedChoiceQuestions = collectUnmatchedChoiceQuestions();
 
     return {
       ok: true,
       filledCount: filled.length,
       filled,
+      credentialFilledCount: credResult.filledCount,
+      credentialFilled: credResult.filled,
       uploadedCount: uploadResult.uploadedCount,
       uploaded: uploadResult.uploaded,
       uploadSkipped: uploadResult.skipped,
-      unmatchedQuestions
+      unmatchedQuestions,
+      unmatchedChoiceQuestions
     };
   }
 
@@ -1238,6 +1438,49 @@
     return "";
   }
 
+  // Phrases that mean the posting is gone (expired / filled / removed / 404).
+  const JOB_GONE_RE = new RegExp(
+    [
+      "no longer (available|accepting applications|active|open|exists)",
+      "(job|position|posting|listing|role|opening|opportunity) (is |has been )?(no longer|not) (available|active|open)",
+      "(position|role|job) (has been |is )?(filled|closed)",
+      "(posting|job posting|application|applications|listing) (has |have )?(now )?(expired|closed|ended)",
+      "we (are|'re) no longer accepting",
+      "this (job|position|posting|listing) (has expired|is closed|was removed|has been removed|no longer exists)",
+      "(job|page) not found",
+      "this listing has been removed",
+      "404 error|error 404",
+      "couldn'?t find (this|that|the) (job|page|posting)",
+      "the (job|position) you(?:'| a)?re looking for"
+    ].join("|"),
+    "i"
+  );
+
+  function unavailableTextSnippet() {
+    const parts = [];
+    const title = String(document.title || "");
+    if (title) parts.push(title);
+    const nodes = document.querySelectorAll(
+      'h1, h2, [role="heading"], .error, [class*="error"], [class*="not-found"], [class*="notFound"], [class*="expired"], [class*="unavailable"], [class*="empty-state"]'
+    );
+    let count = 0;
+    for (const el of nodes) {
+      const t = cleanLabelText(el.textContent);
+      if (t && t.length <= 300) parts.push(t);
+      if (++count > 40) break;
+    }
+    return parts.join("  ").slice(0, 4000);
+  }
+
+  /** @returns {string} a short reason when the job is gone, else "" */
+  function detectJobUnavailable() {
+    const match = unavailableTextSnippet().match(JOB_GONE_RE);
+    if (match) {
+      return cleanLabelText(match[0]).slice(0, 140) || "This job is no longer available.";
+    }
+    return "";
+  }
+
   /**
    * Decide whether this page is really an application form. Job search / listing
    * pages also contain inputs (search boxes, filters), so field count alone is
@@ -1280,9 +1523,446 @@
       filterFields,
       hasFileInput,
       blockedReason: detectPageBlocker(),
+      jobUnavailable: detectJobUnavailable(),
       applyUrls: collectApplyUrlCandidates()
     };
   }
+
+  // ---- Easy Apply (multi-step) driver: Dice / Jobright ---------------------
+
+  const EASY_NEXT_RE = /\b(next|continue|save\s*(and|&)\s*continue|save and next|proceed)\b/i;
+  const EASY_REVIEW_RE = /\breview\b/i;
+  const EASY_SUBMIT_RE =
+    /\b(submit application|submit|apply now|send application|finish|complete application)\b/i;
+  const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss)\b/i;
+  const EASY_ENTRY_RE = /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply now|apply)\b/i;
+
+  function elActionText(el) {
+    return cleanLabelText(
+      el.textContent || el.value || el.getAttribute?.("aria-label") || ""
+    );
+  }
+
+  function isElVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function isElEnabled(el) {
+    return !el.disabled && el.getAttribute?.("aria-disabled") !== "true";
+  }
+
+  function scrollElIntoView(el) {
+    try {
+      el.scrollIntoView({ block: "center", inline: "center" });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** The most form-dense visible dialog/modal, or the document when none. */
+  function getApplyScope() {
+    const sel =
+      '[role="dialog"], dialog[open], dialog, [aria-modal="true"], .modal, [class*="modal"], [class*="apply"], [id*="apply"]';
+    let best = null;
+    let bestCount = -1;
+    for (const node of document.querySelectorAll(sel)) {
+      if (!isElVisible(node)) continue;
+      const count = node.querySelectorAll("input, textarea, select, button").length;
+      if (count > bestCount) {
+        best = node;
+        bestCount = count;
+      }
+    }
+    return best || document;
+  }
+
+  function classifyActionButton(text) {
+    const t = String(text || "").trim();
+    if (!t || t.length > 60) return null;
+    if (EASY_NEXT_RE.test(t)) return "next";
+    if (EASY_REVIEW_RE.test(t)) return "review";
+    if (EASY_SUBMIT_RE.test(t)) return "submit";
+    return null;
+  }
+
+  /**
+   * Pick the forward action. Priority next > review > submit so we advance
+   * through review pages to reach the real submit, then stop there.
+   */
+  function findActionButton(scope) {
+    const scopeEl = scope || getApplyScope();
+    const buttons = [
+      ...scopeEl.querySelectorAll(
+        'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
+      )
+    ].filter((el) => isElVisible(el) && isElEnabled(el));
+
+    let next = null;
+    let review = null;
+    let submit = null;
+    for (const btn of buttons) {
+      const text = elActionText(btn);
+      if (EASY_BACK_RE.test(text) && !EASY_NEXT_RE.test(text) && !EASY_SUBMIT_RE.test(text)) {
+        continue;
+      }
+      const cls = classifyActionButton(text);
+      if (cls === "next" && !next) next = btn;
+      else if (cls === "review" && !review) review = btn;
+      else if (cls === "submit" && !submit) submit = btn;
+    }
+    if (next) return { type: "next", el: next };
+    if (review) return { type: "review", el: review };
+    if (submit) return { type: "submit", el: submit };
+    return null;
+  }
+
+  async function clickEasyApplyEntry() {
+    const controls = [...document.querySelectorAll('button, a, [role="button"]')].filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    const preferred = controls.find((el) =>
+      /easy apply|1-?click apply|one-?click apply|quick apply/i.test(elActionText(el))
+    );
+    const target = preferred || controls.find((el) => EASY_ENTRY_RE.test(elActionText(el)));
+    if (!target) return false;
+    scrollElIntoView(target);
+    target.click();
+    await sleep(1200);
+    return true;
+  }
+
+  function stepSignature() {
+    const scope = getApplyScope();
+    const heading = cleanLabelText(
+      scope.querySelector?.('h1, h2, h3, [role="heading"], legend')?.textContent || ""
+    );
+    const fields = scope.querySelectorAll?.("input, textarea, select").length || 0;
+    return `${location.href}|${heading}|${fields}`;
+  }
+
+  async function waitForStepChange(prevSig, timeoutMs = 9000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await sleep(350);
+      if (stepSignature() !== prevSig) {
+        await sleep(300); // let the new step settle
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function requestAnswersFromSw(questions, profileId, jobMeta, site) {
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "easy_apply_answer_questions",
+        questions,
+        profileId,
+        jobMeta,
+        site
+      });
+      return Array.isArray(res?.answers) ? res.answers : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function requestChoiceAnswersFromSw(questions, profileId) {
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "easy_apply_choice_answers",
+        questions,
+        profileId
+      });
+      return Array.isArray(res?.answers) ? res.answers : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function runEasyApply({
+    applicantInfo = {},
+    uploadFiles = {},
+    credentials = {},
+    profileId = "",
+    jobMeta = {},
+    site = "generic",
+    autoSubmit = false,
+    maxSteps = 8
+  } = {}) {
+    const summary = {
+      ok: true,
+      site,
+      steps: 0,
+      filled: 0,
+      uploaded: 0,
+      aiFilled: 0,
+      answered: 0,
+      status: "",
+      detail: ""
+    };
+
+    const goneAtStart = detectJobUnavailable();
+    if (goneAtStart) {
+      summary.status = "unavailable";
+      summary.detail = goneAtStart;
+      return summary;
+    }
+    if (detectPageBlocker()) {
+      summary.status = "needs_review";
+      summary.detail = detectPageBlocker();
+      return summary;
+    }
+
+    // Open the apply modal if we're still on the job listing view.
+    let probe = probeApplicationForm();
+    if (!probe.isApplicationForm) {
+      await clickEasyApplyEntry();
+      probe = probeApplicationForm();
+      if (detectPageBlocker()) {
+        summary.status = "needs_review";
+        summary.detail = detectPageBlocker();
+        return summary;
+      }
+    }
+
+    let noAdvance = 0;
+    for (let step = 0; step < maxSteps; step += 1) {
+      const goneNow = detectJobUnavailable();
+      if (goneNow) {
+        summary.status = "unavailable";
+        summary.detail = goneNow;
+        return summary;
+      }
+      if (detectPageBlocker()) {
+        summary.status = "needs_review";
+        summary.detail = detectPageBlocker();
+        return summary;
+      }
+
+      const fillRes = await autofillApplication(applicantInfo, uploadFiles, credentials);
+      summary.filled += Number(fillRes.filledCount || 0);
+      summary.uploaded += Number(fillRes.uploadedCount || 0);
+
+      // Reuse stored answers for novel dropdown/checkbox/radio questions.
+      const choiceQuestions = Array.isArray(fillRes.unmatchedChoiceQuestions)
+        ? fillRes.unmatchedChoiceQuestions
+        : [];
+      if (choiceQuestions.length) {
+        const choiceAnswers = await requestChoiceAnswersFromSw(choiceQuestions, profileId);
+        if (choiceAnswers.length) {
+          const r = await fillChoiceAnswers(choiceAnswers);
+          summary.filled += Number(r.filledCount || 0);
+        }
+      }
+
+      // Free-text questions are always answered fresh by AI (role/JD specific).
+      const questions = Array.isArray(fillRes.unmatchedQuestions) ? fillRes.unmatchedQuestions : [];
+      if (questions.length) {
+        const answers = await requestAnswersFromSw(questions, profileId, jobMeta, site);
+        if (answers.length) {
+          const r = await fillAiAnswers(answers);
+          summary.aiFilled += Number(r.filledCount || 0);
+          summary.answered += answers.length;
+        }
+      }
+      summary.steps = step + 1;
+
+      const action = findActionButton();
+      if (!action) {
+        const stillForm = probeApplicationForm().isApplicationForm;
+        summary.status = stillForm ? "ready_for_review" : "needs_review";
+        summary.detail = stillForm
+          ? "Filled the form. No Next/Submit button detected — please review and submit."
+          : "No application form or action button found on this page.";
+        return summary;
+      }
+
+      if (action.type === "submit") {
+        if (autoSubmit) {
+          scrollElIntoView(action.el);
+          action.el.click();
+          summary.status = "submitted";
+          summary.detail = "Submitted the application.";
+          return summary;
+        }
+        summary.status = "ready_for_review";
+        summary.detail = "Reached the final Submit step. Stopped so you can review and submit.";
+        return summary;
+      }
+
+      const sigBefore = stepSignature();
+      scrollElIntoView(action.el);
+      action.el.click();
+      const advanced = await waitForStepChange(sigBefore);
+      if (advanced) {
+        noAdvance = 0;
+      } else {
+        noAdvance += 1;
+        if (noAdvance >= 2) {
+          summary.status = "needs_review";
+          summary.detail =
+            "Could not advance past this step (a required field or validation likely needs your input).";
+          return summary;
+        }
+      }
+    }
+
+    summary.status = "ready_for_review";
+    summary.detail = "Reached the step limit; please review the remaining steps.";
+    return summary;
+  }
+
+  // ---- Learn mode: passively grow the Q&A bank from real user answers -------
+
+  // Skip identity / PII / secrets / protected-class fields — those are handled by
+  // deterministic profile fields and must never be persisted to an exportable bank.
+  const LEARN_SENSITIVE_RE =
+    /\b(password|otp|captcha|ssn|social security|credit card|card number|cvv|routing|account number|search|first name|last name|full name|middle name|legal name|email|e-mail|phone|mobile|telephone|address|street|city|state|province|zip|postal|country|linkedin|github|portfolio|website|date of birth|dob|birthday|salary|compensation|desired pay|expected pay|disability|veteran|military|\brace\b|ethnic|gender|\bsex\b|hispanic|latino|felony|conviction|criminal)\b/i;
+
+  function captureQuestionText(el) {
+    const fieldset = el.closest("fieldset");
+    const legend = fieldset?.querySelector(":scope > legend");
+    if (legend) {
+      const t = cleanLabelText(legend.textContent);
+      if (t) return t;
+    }
+    const group = el.closest('[role="radiogroup"], [role="group"]');
+    const aria = group?.getAttribute?.("aria-label");
+    if (aria) return cleanLabelText(aria);
+    return questionTextForAi(el);
+  }
+
+  function readControlAnswer(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "select") {
+      const opt = el.options?.[el.selectedIndex];
+      const t = cleanLabelText(opt?.textContent || opt?.value || "");
+      return /^(select\.\.\.?|please select|choose|--)$/i.test(t) ? "" : t;
+    }
+    const type = (el.type || "text").toLowerCase();
+    if (type === "checkbox") return el.checked ? "Yes" : "No";
+    if (type === "radio") {
+      if (!el.checked) return "";
+      return cleanLabelText(questionTextForAi(el) || el.value);
+    }
+    return cleanLabelText(el.value || "");
+  }
+
+  /** Map a chosen option/answer back to the profile's canonical stored value. */
+  function canonicalValueForKey(key, text) {
+    const t = normalize(text);
+    if (!t) return String(text || "").trim();
+    const map = VALUE_LABELS[key];
+    if (map) {
+      for (const canon of Object.keys(map)) {
+        if (normalize(canon) === t) return canon;
+        for (const label of map[canon]) {
+          if (normalize(label) === t) return canon;
+        }
+      }
+    }
+    if (YES_VALUES.has(t)) return "yes";
+    if (NO_VALUES.has(t)) return "no";
+    return String(text || "").trim();
+  }
+
+  function maybeCaptureLearn(el) {
+    if (!learnEnabled) return;
+    if (Date.now() < learnSuppressUntil) return;
+    if (!el || typeof el.matches !== "function") return;
+    if (!el.matches("input, textarea, select")) return;
+
+    const type = (el.type || "text").toLowerCase();
+    if (["hidden", "file", "submit", "button", "image", "reset", "password"].includes(type)) return;
+    // Combobox search inputs hold transient text, not a final answer.
+    if (isReactSelectInput(el) || looksLikeCombobox(el)) return;
+
+    const answer = readControlAnswer(el);
+    if (!answer || answer.length > 2000) return;
+
+    // Known profile field (name, contact, links, work-eligibility, education,
+    // EEO, salary, ...) → learn into the PROFILE with fill-if-empty semantics so
+    // the deterministic autofill reuses it. These are the most common questions
+    // and are kept out of the exportable Q&A bank.
+    const profileKey = matchApplicantKey(labelTextForControl(el));
+    if (profileKey) {
+      const value = canonicalValueForKey(profileKey, answer);
+      if (!value) return;
+      const sig = `k:${profileKey}`;
+      if (learnSentByQuestion.get(sig) === value) return;
+      learnSentByQuestion.set(sig, value);
+      try {
+        chrome.runtime.sendMessage({ type: "profile_learn_capture", key: profileKey, value });
+      } catch {
+        /* extension context invalidated — ignore */
+      }
+      return;
+    }
+
+    // Only novel CHOICE questions (dropdown / checkbox / radio) are stored for
+    // reuse — their answers are stable across roles. Free-text questions (e.g.
+    // "most challenging project") depend on the role/JD, so those are always
+    // AI-generated per application and never stored here.
+    const isChoice = el.tagName === "SELECT" || type === "radio" || type === "checkbox";
+    if (!isChoice) return;
+
+    const label = captureQuestionText(el);
+    if (!label) return;
+    if (LEARN_SENSITIVE_RE.test(label)) return;
+
+    const labelNorm = normalize(label);
+    if (!labelNorm || labelNorm.length < 6) return;
+
+    if (learnSentByQuestion.get(labelNorm) === answer) return;
+    learnSentByQuestion.set(labelNorm, answer);
+
+    try {
+      chrome.runtime.sendMessage({
+        type: "qa_learn_capture",
+        question: label.slice(0, 1000),
+        answer: answer.slice(0, 2000),
+        fieldType: "choice",
+        site: location.hostname
+      });
+    } catch {
+      /* extension context invalidated — ignore */
+    }
+  }
+
+  function onLearnEvent(event) {
+    try {
+      maybeCaptureLearn(event.target);
+    } catch {
+      /* never let capture break the page */
+    }
+  }
+
+  function initLearnMode() {
+    chrome.storage.local
+      .get("qa_learn_enabled")
+      .then((data) => {
+        learnEnabled = data.qa_learn_enabled !== false;
+      })
+      .catch(() => {});
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.qa_learn_enabled) {
+        learnEnabled = changes.qa_learn_enabled.newValue !== false;
+      }
+    });
+
+    document.addEventListener("change", onLearnEvent, true);
+    document.addEventListener("focusout", onLearnEvent, true);
+  }
+
+  initLearnMode();
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "autofill_ping") {
@@ -1303,8 +1983,40 @@
         .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
       return true;
     }
+    if (message?.type === "autofill_choice_answers") {
+      fillChoiceAnswers(message.answers || [])
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "autofill_credentials") {
+      try {
+        sendResponse({ ok: true, ...fillLoginCredentials(message.credentials || {}) });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+      return true;
+    }
+    if (message?.type === "easy_apply_run") {
+      runEasyApply({
+        applicantInfo: message.applicantInfo || {},
+        uploadFiles: message.uploadFiles || {},
+        credentials: message.credentials || {},
+        profileId: message.profileId || "",
+        jobMeta: message.jobMeta || {},
+        site: message.site || "generic",
+        autoSubmit: Boolean(message.autoSubmit)
+      })
+        .then((summary) => sendResponse(summary))
+        .catch((err) => sendResponse({ ok: false, status: "failed", error: String(err?.message || err) }));
+      return true;
+    }
     if (message?.type !== "autofill_application") return undefined;
-    autofillApplication(message.applicantInfo || {}, message.uploadFiles || {})
+    autofillApplication(
+      message.applicantInfo || {},
+      message.uploadFiles || {},
+      message.credentials || {}
+    )
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;

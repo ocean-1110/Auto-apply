@@ -75,13 +75,31 @@ export function formatApplicationDate(date = new Date()) {
 }
 
 /**
- * Tab-separated row matching sheet columns A–D:
- * JOB URL | JOB TITLE | COMPANY NAME | Application Date
+ * Tab-separated row matching sheet columns A–I:
+ * JOB URL | JOB TITLE | COMPANY NAME | Application Date |
+ * Work arrangement | Employment type | Salary min | Salary max | Date posted
  * Paste into the first cell of an empty row in Google Sheets.
  */
-export function buildSheetRowTsv({ jobTitle, companyName, jdLink, includeDate = true }) {
+export function buildSheetRowTsv({
+  jobTitle,
+  companyName,
+  jdLink,
+  includeDate = true,
+  workArrangement = "",
+  employmentType = "",
+  salaryMin = "",
+  salaryMax = "",
+  datePosted = ""
+}) {
   const cells = [jdLink || "", jobTitle || "", companyName || ""];
-  if (includeDate) cells.push(formatApplicationDate());
+  cells.push(includeDate ? formatApplicationDate() : "");
+  cells.push(
+    workArrangement || "",
+    employmentType || "",
+    salaryMin || "",
+    salaryMax || "",
+    datePosted || ""
+  );
   return cells.join("\t");
 }
 
@@ -95,7 +113,12 @@ export async function appendJobToSpreadsheet({
   jobTitle,
   companyName,
   jdLink,
-  sheetName = ""
+  sheetName = "",
+  workArrangement = "",
+  employmentType = "",
+  salaryMin = "",
+  salaryMax = "",
+  datePosted = ""
 }) {
   const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
   if (!spreadsheetId) {
@@ -120,11 +143,16 @@ export async function appendJobToSpreadsheet({
     jobLink: jdLink || "",
     jobTitle: jobTitle || "",
     companyName: companyName || "",
-    applicationDate: formatApplicationDate()
+    applicationDate: formatApplicationDate(),
+    workArrangement: workArrangement || "",
+    employmentType: employmentType || "",
+    salaryMin: salaryMin || "",
+    salaryMax: salaryMax || "",
+    datePosted: datePosted || ""
   };
 
   const result = await postToSheetsWebApp(endpoint, payload);
-  if (!result.row || result.apiVersion !== "2026-08-06b") {
+  if (!result.row || result.apiVersion !== "2026-08-09") {
     throw new Error(
       "Your Apps Script Web App is outdated (still running old code). In the extension click Copy script → paste into Apps Script → Save → Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Then try again."
     );

@@ -164,6 +164,13 @@ export function parseImportedJobsCsvText(csvText) {
     const jdLink = fieldByHeader(row, headers, "url").trim();
     const description = fieldByHeader(row, headers, "description");
 
+    // Optional history columns (present in the ATS export, blank for manual jobs).
+    const workArrangement = fieldByHeader(row, headers, "work_arrangement").trim();
+    const employmentType = fieldByHeader(row, headers, "employment_type").trim();
+    const salaryMin = fieldByHeader(row, headers, "salary_min").trim();
+    const salaryMax = fieldByHeader(row, headers, "salary_max").trim();
+    const datePosted = fieldByHeader(row, headers, "date_posted").trim();
+
     if (!id || !title || !organization || !jdLink || !description) {
       skipped += 1;
       continue;
@@ -180,7 +187,12 @@ export function parseImportedJobsCsvText(csvText) {
       keySkills,
       jdText,
       source,
-      description: String(description || "")
+      description: String(description || ""),
+      workArrangement,
+      employmentType,
+      salaryMin,
+      salaryMax,
+      datePosted
     });
   }
 

@@ -219,9 +219,16 @@ JD SKILL DISTRIBUTION — HIGH PRIORITY
 
 - Most recent role,: include approximately 60–70% of the relevant JD technologies, responsibilities, and industry-specific skills; target roughly 70% when the JD is a close fit.
 - previous roles together: distribute the remaining approximately 30–40% of relevant JD technologies where they logically fit.
-- Do not put all JD-required skills into SFA Solutions.
-- Use earlier roles to show a believable foundation in Salesforce configuration, Apex, automation, UI development, APIs, data migration, debugging, production support, and deployment practices.
+- Do not put all JD-required skills into most recent role
 - If the JD includes preferred or nice-to-have skills, include them only if they fit naturally.
+- Categorize skills with:
+Salesforce Development
+Platform Automation
+Data Management
+Integration
+DevOps
+Cloud Ecosystem
+
 
 REMOTE AND DISTRIBUTED TEAM EXPERIENCE — HIGH PRIORITY
 
@@ -239,6 +246,7 @@ INDUSTRY AND DOMAIN ALIGNMENT RULES — HIGH PRIORITY
 
 EXPERIENCE CONTENT RULES
 
+- Bullet points are 7/7/5
 - Include experience objects from what I provided in chronological order from most recent to oldest, matching the fixed company history.
 - Include one realistic project name in each job's project field.
 - Use one primary Salesforce cloud or platform focus per project.

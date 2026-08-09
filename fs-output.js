@@ -211,15 +211,13 @@ export async function getLastJobDirectoryHandle() {
 }
 
 /**
- * Open the last saved job folder in the OS file manager when possible.
+ * Open the folder where the resume / cover letter were saved.
  *
- * Why not showDirectoryPicker?
- * That API opens Chrome's "Select folder" dialog (for picking a directory),
- * not File Explorer — so resume/cover-letter files are easy to miss.
- *
- * Fix: re-download the job files from the stored DirectoryHandle into
- * Chrome's Downloads/{jobFolder}/ (silent), then chrome.downloads.show()
- * which opens Explorer on that folder with the files visible.
+ * The File System Access API cannot reveal a folder in the OS file manager, and
+ * it must NOT re-download the files (that would trigger a Save-As prompt when
+ * Chrome is set to "Ask where to save each file"). Instead we open a native
+ * picker rooted at the exact saved directory so the generated files are right
+ * there, and open whatever the user selects — no downloads, no save prompts.
  */
 export async function browseLastSavedJobDirectory() {
   const jobDir = await getLastJobDirectoryHandle();
@@ -238,102 +236,61 @@ export async function browseLastSavedJobDirectory() {
       .replace(/\s+/g, " ")
       .trim() || "resume-bot";
 
-  let lastDownloadId = null;
-  const openedNames = [];
+  const isAbort = (err) =>
+    err && (err.name === "AbortError" || String(err.message || "").includes("abort"));
 
-  try {
-    for await (const entry of jobDir.values()) {
-      if (entry.kind !== "file") continue;
-      const name = String(entry.name || "");
-      if (!/\.(pdf|html|txt)$/i.test(name)) continue;
-
-      const file = await entry.getFile();
-      const url = URL.createObjectURL(file);
-      try {
-        const downloadId = await chrome.downloads.download({
-          url,
-          filename: `${folderName}/${name}`,
-          conflictAction: "uniquify",
-          saveAs: false
-        });
-        if (downloadId != null) {
-          lastDownloadId = downloadId;
-          openedNames.push(name);
-        }
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      }
-    }
-  } catch (downloadErr) {
-    // If Chrome is set to "Ask where to save", downloads may fail/abort.
-    // Fall back to a file picker rooted at the real job folder (shows PDFs).
-    if (typeof window.showOpenFilePicker === "function") {
-      try {
-        await window.showOpenFilePicker({
-          multiple: true,
-          startIn: jobDir,
-          types: [
-            {
-              description: "Resume files",
-              accept: {
-                "application/pdf": [".pdf"],
-                "text/html": [".html"],
-                "text/plain": [".txt"]
-              }
-            }
-          ]
-        });
-        return { ok: true, method: "file-picker", folderName };
-      } catch (pickerErr) {
-        if (
-          pickerErr &&
-          (pickerErr.name === "AbortError" ||
-            String(pickerErr.message || "").includes("abort"))
-        ) {
-          return { ok: true, method: "file-picker", aborted: true, folderName };
-        }
-        throw downloadErr;
-      }
-    }
-    throw downloadErr;
-  }
-
-  if (lastDownloadId == null) {
-    // No downloadable files — still try file picker on the real folder.
-    if (typeof window.showOpenFilePicker === "function") {
-      await window.showOpenFilePicker({
+  // Preferred: open-file dialog inside the saved folder (shows resume + cover letter).
+  if (typeof window.showOpenFilePicker === "function") {
+    try {
+      const handles = await window.showOpenFilePicker({
         multiple: true,
-        startIn: jobDir
+        startIn: jobDir,
+        types: [
+          {
+            description: "Generated documents",
+            accept: {
+              "application/pdf": [".pdf"],
+              "text/html": [".html"],
+              "text/plain": [".txt"]
+            }
+          }
+        ]
       });
-      return { ok: true, method: "file-picker", folderName };
+
+      // Open any files the user picked, so the resume/cover letter actually open.
+      const opened = [];
+      for (const handle of handles || []) {
+        try {
+          const file = await handle.getFile();
+          const url = URL.createObjectURL(file);
+          window.open(url, "_blank");
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          opened.push(file.name);
+        } catch {
+          /* ignore a single file that fails to open */
+        }
+      }
+      return { ok: true, method: "file-picker", folderName, files: opened };
+    } catch (err) {
+      if (isAbort(err)) return { ok: true, method: "file-picker", aborted: true, folderName };
+      throw err;
     }
-    throw new Error("No resume/cover letter files found in the saved folder.");
   }
 
-  // Reveal the last file in File Explorer (shows the folder + files).
-  try {
-    chrome.downloads.show(Number(lastDownloadId));
-  } catch (err) {
-    throw new Error(String(err?.message || err) || "Could not open Downloads folder.");
+  // Fallback: directory dialog rooted at the saved folder.
+  if (typeof window.showDirectoryPicker === "function") {
+    try {
+      await window.showDirectoryPicker({ startIn: jobDir });
+      return { ok: true, method: "directory-picker", folderName };
+    } catch (err) {
+      if (isAbort(err)) return { ok: true, method: "directory-picker", aborted: true, folderName };
+      throw err;
+    }
   }
 
-  await setLastSaveMeta(
-    {
-      ...(await getLastSaveMeta()),
-      downloadId: lastDownloadId,
-      revealFolder: `Downloads / ${folderName}`,
-      files: openedNames
-    },
-    { announce: false }
+  throw new Error(
+    "This browser can't open the folder directly. Your files are in the output folder you selected."
   );
-
-  return {
-    ok: true,
-    method: "downloads-show",
-    downloadId: lastDownloadId,
-    folderName,
-    files: openedNames
-  };
 }
 
 export async function setLastSaveMeta(meta, { announce = true } = {}) {

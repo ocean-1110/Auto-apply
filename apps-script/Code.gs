@@ -13,10 +13,12 @@
  *    (open the tab first, then copy the browser URL), or set Sheet tab name
  *
  * After generation, the extension appends:
- *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName, applicationDate
+ *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName, applicationDate,
+ *   workArrangement, employmentType, salaryMin, salaryMax, datePosted
  *
  * Row order matches your sheet headers:
- *   A JOB URL | B JOB TITLE | C COMPANY NAME | D Application Date
+ *   A JOB URL | B JOB TITLE | C COMPANY NAME | D Application Date |
+ *   E Work arrangement | F Employment type | G Salary min | H Salary max | I Date posted
  *
  * Rows are written on the selected tab, in the first empty cell of column A
  * (same place you'd paste after Copy row).
@@ -91,17 +93,22 @@ function appendJobRow(sheet, data) {
   var row = findNextEmptyRowInColumnA(sheet);
   // Use A1 notation so we never confuse end-row with numRows.
   // (Apps Script getRange(r,c,numRows,numColumns) is NOT end-row/end-column.)
-  sheet.getRange("A" + row + ":D" + row).setValues([
+  sheet.getRange("A" + row + ":I" + row).setValues([
     [
       data.jobLink || "",
       data.jobTitle || "",
       data.companyName || "",
-      data.applicationDate || ""
+      data.applicationDate || "",
+      data.workArrangement || "",
+      data.employmentType || "",
+      data.salaryMin || "",
+      data.salaryMax || "",
+      data.datePosted || ""
     ]
   ]);
   return {
     ok: true,
-    apiVersion: "2026-08-06b",
+    apiVersion: "2026-08-09",
     sheetName: sheet.getName(),
     sheetGid: String(sheet.getSheetId()),
     row: row
@@ -121,7 +128,7 @@ function doPost(e) {
     if (data.action === "getJobLinks") {
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-06b",
+        apiVersion: "2026-08-09",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -149,7 +156,7 @@ function doGet(e) {
       var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-06b",
+        apiVersion: "2026-08-09",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -161,7 +168,7 @@ function doGet(e) {
   return ContentService.createTextOutput(
     JSON.stringify({
       ok: true,
-      apiVersion: "2026-08-06b",
+      apiVersion: "2026-08-09",
       message: "Resume GPT Builder sheet append endpoint is running."
     })
   ).setMimeType(ContentService.MimeType.JSON);

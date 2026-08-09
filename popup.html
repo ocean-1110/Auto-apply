@@ -184,6 +184,82 @@
             <button type="button" id="autofillBtn">Autofill</button>
           </div>
 
+          <div class="row">
+            <button type="button" id="easyApplyBtn" class="secondary" title="Fill the Dice/Jobright Easy Apply steps, stopping before final submit">
+              Easy Apply (Dice / Jobright)
+            </button>
+          </div>
+
+          <details class="accordion" id="credentialsSection">
+            <summary>
+              <span>Login / signup credentials</span>
+              <span class="accordion-note" id="credentialsNote">Not set</span>
+            </summary>
+            <div class="accordion-body">
+              <p class="hint">
+                Used to autofill <strong>login / sign-up</strong> forms on application pages
+                (only when a password field is present). Stored locally in this browser.
+                We never submit login forms automatically.
+              </p>
+              <label class="field">
+                <span>Email</span>
+                <input type="email" id="accountEmail" placeholder="e.g. steven.avon1213@outlook.com" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Username</span>
+                <input type="text" id="accountUsername" placeholder="e.g. steven_1213" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input type="password" id="accountPassword" placeholder="Account password" autocomplete="off" />
+              </label>
+              <div class="qa-toolbar">
+                <label class="cred-show">
+                  <input type="checkbox" id="accountShowPassword" />
+                  <span>Show password</span>
+                </label>
+                <button type="button" id="accountSaveBtn" class="secondary compact">Save credentials</button>
+                <button type="button" id="accountClearBtn" class="secondary danger compact">Clear</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="accordion" id="qaBankSection">
+            <summary>
+              <span>Q&amp;A bank</span>
+              <span class="accordion-note" id="qaBankNote">0 saved</span>
+            </summary>
+            <div class="accordion-body">
+              <p class="hint">
+                Saved answers for <strong>dropdown / checkbox / radio</strong> questions, reused
+                (exact + fuzzy) on future applications. Free-text questions (e.g. "most challenging
+                project") are always answered fresh by AI and are not stored here.
+              </p>
+              <label class="qa-learn-toggle">
+                <input type="checkbox" id="qaLearnToggle" checked />
+                <span>Learn mode — remember my dropdown/checkbox choices for reuse. Common fields (name, contact, work eligibility, EEO, salary) fill empty profile fields instead.</span>
+              </label>
+              <div class="qa-add">
+                <label class="field">
+                  <span>Question</span>
+                  <textarea id="qaNewQuestion" rows="2" placeholder="e.g. Are you willing to work on-site?"></textarea>
+                </label>
+                <label class="field">
+                  <span>Answer (the option to pick)</span>
+                  <textarea id="qaNewAnswer" rows="2" placeholder="e.g. Yes"></textarea>
+                </label>
+                <div class="qa-toolbar">
+                  <button type="button" id="qaAddBtn" class="secondary compact">Save Q&amp;A</button>
+                  <button type="button" id="qaExportBtn" class="secondary compact">Export</button>
+                  <button type="button" id="qaImportBtn" class="secondary compact">Import</button>
+                  <button type="button" id="qaClearBtn" class="secondary danger compact">Clear all</button>
+                  <input type="file" id="qaImportInput" accept="application/json,.json" hidden />
+                </div>
+              </div>
+              <div class="qa-list" id="qaBankList" aria-label="Saved questions and answers"></div>
+            </div>
+          </details>
+
           <details class="accordion ai-qa-section" id="aiQaSection">
             <summary>
               <span>Missed form question</span>

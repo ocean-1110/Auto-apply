@@ -13,6 +13,7 @@ import {
   browseLastSavedJobDirectory
 } from "./fs-output.js";
 import { isLinkedInSource, parseImportedJobsCsvText } from "./csv-jobs.js";
+import { getAllQa, saveQa, deleteQa, clearQa, exportQa, importQa } from "./qa-store.js";
 
 const APPS_SCRIPT_SOURCE = `/**
  * Resume GPT Builder — paste into Extensions → Apps Script on your spreadsheet,
@@ -89,17 +90,22 @@ function appendJobRow(sheet, data) {
   var row = findNextEmptyRowInColumnA(sheet);
   // Use A1 notation so we never confuse end-row with numRows.
   // (Apps Script getRange(r,c,numRows,numColumns) is NOT end-row/end-column.)
-  sheet.getRange("A" + row + ":D" + row).setValues([
+  sheet.getRange("A" + row + ":I" + row).setValues([
     [
       data.jobLink || "",
       data.jobTitle || "",
       data.companyName || "",
-      data.applicationDate || ""
+      data.applicationDate || "",
+      data.workArrangement || "",
+      data.employmentType || "",
+      data.salaryMin || "",
+      data.salaryMax || "",
+      data.datePosted || ""
     ]
   ]);
   return {
     ok: true,
-    apiVersion: "2026-08-06b",
+    apiVersion: "2026-08-09",
     sheetName: sheet.getName(),
     sheetGid: String(sheet.getSheetId()),
     row: row
@@ -119,7 +125,7 @@ function doPost(e) {
     if (data.action === "getJobLinks") {
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-06b",
+        apiVersion: "2026-08-09",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -147,7 +153,7 @@ function doGet(e) {
       var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-06b",
+        apiVersion: "2026-08-09",
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -159,7 +165,7 @@ function doGet(e) {
   return ContentService.createTextOutput(
     JSON.stringify({
       ok: true,
-      apiVersion: "2026-08-06b",
+      apiVersion: "2026-08-09",
       message: "Resume GPT Builder sheet append endpoint is running."
     })
   ).setMimeType(ContentService.MimeType.JSON);
@@ -187,6 +193,26 @@ const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
+const easyApplyBtn = document.getElementById("easyApplyBtn");
+const qaBankSectionEl = document.getElementById("qaBankSection");
+const qaBankNoteEl = document.getElementById("qaBankNote");
+const qaBankListEl = document.getElementById("qaBankList");
+const qaNewQuestionEl = document.getElementById("qaNewQuestion");
+const qaNewAnswerEl = document.getElementById("qaNewAnswer");
+const qaAddBtn = document.getElementById("qaAddBtn");
+const qaExportBtn = document.getElementById("qaExportBtn");
+const qaImportBtn = document.getElementById("qaImportBtn");
+const qaImportInput = document.getElementById("qaImportInput");
+const qaClearBtn = document.getElementById("qaClearBtn");
+const qaLearnToggleEl = document.getElementById("qaLearnToggle");
+const credentialsSectionEl = document.getElementById("credentialsSection");
+const credentialsNoteEl = document.getElementById("credentialsNote");
+const accountEmailEl = document.getElementById("accountEmail");
+const accountUsernameEl = document.getElementById("accountUsername");
+const accountPasswordEl = document.getElementById("accountPassword");
+const accountShowPasswordEl = document.getElementById("accountShowPassword");
+const accountSaveBtn = document.getElementById("accountSaveBtn");
+const accountClearBtn = document.getElementById("accountClearBtn");
 const manualQuestionEl = document.getElementById("manualQuestion");
 const manualAnswerEl = document.getElementById("manualAnswer");
 const generateAiAnswerBtn = document.getElementById("generateAiAnswerBtn");
@@ -447,6 +473,8 @@ function displayImportedJobStatus(job) {
       return "Needs review";
     case "completed":
       return "Completed";
+    case "unavailable":
+      return "No longer available";
     case "failed":
       return "Failed";
     default:
@@ -526,6 +554,7 @@ function renderImportedJobs() {
     const card = document.createElement("details");
     card.className = "job-card";
     card.dataset.jobId = jobId;
+    if (job.status === "unavailable") card.classList.add("is-unavailable");
     if (jobId === importedJobsSelectedId) card.open = true;
 
     const summary = document.createElement("summary");
@@ -543,12 +572,16 @@ function renderImportedJobs() {
     summary.appendChild(status);
 
     const isCompleted = job.status === "completed";
+    const isUnavailable = job.status === "unavailable";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
 
     const applySummaryBtn = document.createElement("button");
     applySummaryBtn.type = "button";
     if (isCompleted) {
       applySummaryBtn.textContent = "Done";
+      applySummaryBtn.disabled = true;
+    } else if (isUnavailable) {
+      applySummaryBtn.textContent = "Blocked";
       applySummaryBtn.disabled = true;
     } else if (isInProgress) {
       applySummaryBtn.textContent = "Working";
@@ -588,6 +621,19 @@ function renderImportedJobs() {
     const actions = document.createElement("div");
     actions.className = "job-actions";
 
+    const seeBtn = document.createElement("button");
+    seeBtn.className = "secondary";
+    seeBtn.textContent = "See job";
+    seeBtn.title = "Open the job page in a browser tab";
+    const jobUrl = String(job.jdLink || job.url || "").trim();
+    seeBtn.disabled = !jobUrl;
+    seeBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await openImportedJobPage(jobId);
+    });
+    actions.appendChild(seeBtn);
+
     const completeBtn = document.createElement("button");
     completeBtn.className = "secondary";
     if (["ready_for_review", "needs_review"].includes(String(job.status))) {
@@ -604,6 +650,30 @@ function renderImportedJobs() {
     }
 
     actions.appendChild(completeBtn);
+
+    const blockBtn = document.createElement("button");
+    blockBtn.className = "secondary";
+    if (isUnavailable) {
+      blockBtn.textContent = "Unblock";
+      blockBtn.title = "Restore this job so you can apply again";
+      blockBtn.disabled = false;
+      blockBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await unblockImportedJob(jobId);
+      });
+    } else {
+      blockBtn.textContent = "Block";
+      blockBtn.title = "Mark this job as no longer available / disabled";
+      blockBtn.disabled = isInProgress;
+      blockBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await setImportedJobUnavailable(jobId, { detail: "Blocked by user." });
+      });
+    }
+    actions.appendChild(blockBtn);
+
     details.appendChild(actions);
 
     const err = shortError(job);
@@ -700,6 +770,41 @@ async function replaceImportedJobs(jobs) {
   return { imported: order.length, duplicateIds };
 }
 
+async function openImportedJobPage(jobId) {
+  const job = importedJobsById[jobId];
+  const url = String(job?.jdLink || job?.url || "").trim();
+  if (!url) {
+    setStatus("This job has no URL to open.");
+    return;
+  }
+
+  // Reuse a tab already showing this job (so a later "Apply" won't reopen it).
+  const target = normalizeJobLink(url).toLowerCase();
+  let existing = null;
+  try {
+    const tabs = await chrome.tabs.query({});
+    existing = tabs.find(
+      (t) => t.url && normalizeJobLink(t.url).toLowerCase() === target
+    );
+  } catch {
+    /* tabs query best-effort */
+  }
+
+  if (existing?.id != null) {
+    await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
+    if (existing.windowId != null) {
+      chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+    }
+    setStatus(`Showing job tab: ${job.jobTitle || jobId}`);
+  } else {
+    await chrome.tabs.create({ url, active: true }).catch(() => {});
+    setStatus(`Opened job: ${job.jobTitle || jobId}`);
+  }
+
+  importedJobsSelectedId = jobId;
+  chrome.storage.local.set({ imported_jobs_selected_id: jobId }).catch(() => {});
+}
+
 async function applyImportedJob(jobId) {
   const job = importedJobsById[jobId];
   if (!job) {
@@ -717,6 +822,13 @@ async function applyImportedJob(jobId) {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
+  // Carry the CSV history columns into the sheet-append payload.
+  collected.jobMeta.workArrangement = job.workArrangement || "";
+  collected.jobMeta.employmentType = job.employmentType || "";
+  collected.jobMeta.salaryMin = job.salaryMin || "";
+  collected.jobMeta.salaryMax = job.salaryMax || "";
+  collected.jobMeta.datePosted = job.datePosted || "";
+
   await chrome.storage.local.set({ imported_jobs_selected_id: jobId });
   setStatus(`Starting application: ${job.jobTitle || jobId}`);
 
@@ -732,20 +844,14 @@ async function applyImportedJob(jobId) {
   }
 }
 
-async function markImportedJobCompleted(jobId) {
+async function patchImportedJobLocally(jobId, patch) {
   const now = Date.now();
   const data = await chrome.storage.local.get(["imported_jobs_by_id"]);
   const byId = data.imported_jobs_by_id || {};
   const job = byId[jobId];
-  if (!job) return;
+  if (!job) return null;
 
-  byId[jobId] = {
-    ...job,
-    status: "completed",
-    statusDetail: "Completed by user.",
-    completedAt: now,
-    updatedAt: now
-  };
+  byId[jobId] = { ...job, ...patch, updatedAt: now };
 
   await chrome.storage.local.set({
     imported_jobs_by_id: byId,
@@ -755,7 +861,32 @@ async function markImportedJobCompleted(jobId) {
   importedJobsById = byId;
   importedJobsVersion = now;
   renderImportedJobs();
-  setStatus(`Marked completed: ${job.jobTitle || jobId}`);
+  return byId[jobId];
+}
+
+async function markImportedJobCompleted(jobId) {
+  const job = await patchImportedJobLocally(jobId, {
+    status: "completed",
+    statusDetail: "Completed by user.",
+    completedAt: Date.now()
+  });
+  if (job) setStatus(`Marked completed: ${job.jobTitle || jobId}`);
+}
+
+async function setImportedJobUnavailable(jobId, { detail = "Marked no longer available." } = {}) {
+  const job = await patchImportedJobLocally(jobId, {
+    status: "unavailable",
+    statusDetail: detail
+  });
+  if (job) setStatus(`Blocked (no longer available): ${job.jobTitle || jobId}`);
+}
+
+async function unblockImportedJob(jobId) {
+  const job = await patchImportedJobLocally(jobId, {
+    status: "imported",
+    statusDetail: ""
+  });
+  if (job) setStatus(`Unblocked: ${job.jobTitle || jobId}`);
 }
 
 async function refreshSaveBannerFromStorage() {
@@ -787,25 +918,18 @@ async function openSavedFolder() {
       return;
     }
 
-    // FS saves (and downloads-show fallback): copy job files into Downloads and reveal.
+    // FS saves: open a dialog rooted at the saved folder (no re-download).
     const result = await browseLastSavedJobDirectory();
-    if (result?.method === "file-picker") {
-      setStatus(
-        result.aborted
-          ? "File browser closed."
-          : `Showing files in saved folder${result.folderName ? ` (${result.folderName})` : ""}.`,
-        "done"
-      );
+    if (result?.aborted) {
+      setStatus("Folder browser closed.");
       return;
     }
-    const label =
-      result?.folderName != null
-        ? `Downloads / ${result.folderName}`
-        : meta.pathLabel || "Downloads";
-    setStatus(
-      `Opened ${label} — resume & cover letter should be visible in File Explorer.`,
-      "done"
-    );
+    const folderLabel = result?.folderName ? ` (${result.folderName})` : "";
+    if (result?.method === "file-picker" && Array.isArray(result.files) && result.files.length) {
+      setStatus(`Opened ${result.files.join(", ")} from the saved folder${folderLabel}.`, "done");
+      return;
+    }
+    setStatus(`Opened the saved folder${folderLabel}.`, "done");
   } catch (err) {
     if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
       setStatus("Folder browser closed.");
@@ -882,6 +1006,43 @@ async function tryFlushPendingOutput({ interactive = false } = {}) {
   }
 }
 
+function updateCredentialsNote(creds = {}) {
+  if (!credentialsNoteEl) return;
+  const parts = [];
+  if (String(creds.email || "").trim()) parts.push("email");
+  if (String(creds.username || "").trim()) parts.push("username");
+  if (String(creds.password || "")) parts.push("password");
+  credentialsNoteEl.textContent = parts.length ? `Set: ${parts.join(", ")}` : "Not set";
+}
+
+function applyAccountCredentials(creds = {}) {
+  if (accountEmailEl) accountEmailEl.value = String(creds.email || "");
+  if (accountUsernameEl) accountUsernameEl.value = String(creds.username || "");
+  if (accountPasswordEl) accountPasswordEl.value = String(creds.password || "");
+  updateCredentialsNote(creds);
+}
+
+function readAccountCredentialsFromForm() {
+  return {
+    email: String(accountEmailEl?.value || "").trim(),
+    username: String(accountUsernameEl?.value || "").trim(),
+    password: String(accountPasswordEl?.value || "")
+  };
+}
+
+async function saveAccountCredentials() {
+  const creds = readAccountCredentialsFromForm();
+  await chrome.storage.local.set({ account_credentials: creds });
+  updateCredentialsNote(creds);
+  setStatus("Login credentials saved.");
+}
+
+async function clearAccountCredentials() {
+  applyAccountCredentials({});
+  await chrome.storage.local.remove("account_credentials");
+  setStatus("Login credentials cleared.");
+}
+
 async function loadSettings() {
   const data = await chrome.storage.local.get([
     "selected_profile_id",
@@ -898,7 +1059,11 @@ async function loadSettings() {
     "pending_fs_write",
     "ui_sheet_section_open",
     "ui_ai_qa_section_open",
-    "imported_jobs_filter"
+    "ui_qa_bank_section_open",
+    "ui_credentials_section_open",
+    "qa_learn_enabled",
+    "imported_jobs_filter",
+    "account_credentials"
   ]);
 
   await refreshProfiles(data.selected_profile_id || DEFAULT_PROFILE_ID);
@@ -914,7 +1079,12 @@ async function loadSettings() {
 
   if (spreadsheetSectionEl) spreadsheetSectionEl.open = Boolean(data.ui_sheet_section_open);
   if (aiQaSectionEl) aiQaSectionEl.open = Boolean(data.ui_ai_qa_section_open);
+  if (qaBankSectionEl) qaBankSectionEl.open = Boolean(data.ui_qa_bank_section_open);
+  if (credentialsSectionEl) credentialsSectionEl.open = Boolean(data.ui_credentials_section_open);
+  applyAccountCredentials(data.account_credentials || {});
+  if (qaLearnToggleEl) qaLearnToggleEl.checked = data.qa_learn_enabled !== false;
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
+  refreshQaBank().catch(() => {});
 
   await refreshOutputDirLabel();
   setStatus(data.generation_status || "");
@@ -966,7 +1136,20 @@ async function copySheetRow() {
     return;
   }
 
-  const tsv = buildSheetRowTsv({ jobTitle, companyName, jdLink, includeDate: true });
+  // Pull the extra history columns from the currently selected imported job.
+  const selJob =
+    (importedJobsSelectedId && importedJobsById[importedJobsSelectedId]) || {};
+  const tsv = buildSheetRowTsv({
+    jobTitle,
+    companyName,
+    jdLink,
+    includeDate: true,
+    workArrangement: selJob.workArrangement || "",
+    employmentType: selJob.employmentType || "",
+    salaryMin: selJob.salaryMin || "",
+    salaryMax: selJob.salaryMax || "",
+    datePosted: selJob.datePosted || ""
+  });
   try {
     await navigator.clipboard.writeText(tsv);
     setStatus("Sheet row copied. Click the first cell of an empty row in Sheets, then paste (Ctrl+V).");
@@ -1052,7 +1235,12 @@ async function collectJobMetaOrShowError() {
       spreadsheetUrl,
       sheetName: sheetTabName,
       sheetsWebAppUrl,
-      templateId
+      templateId,
+      workArrangement: "",
+      employmentType: "",
+      salaryMin: "",
+      salaryMax: "",
+      datePosted: ""
     }
   };
 }
@@ -1100,6 +1288,162 @@ async function generateResumeAndCoverLetter() {
   }
 }
 
+// ---- Q&A bank UI ----------------------------------------------------------
+
+async function refreshQaBank() {
+  if (!qaBankListEl) return;
+  let rows = [];
+  try {
+    rows = await getAllQa(null);
+  } catch (err) {
+    qaBankListEl.innerHTML = `<p class="hint">Could not load Q&A bank: ${String(err.message || err)}</p>`;
+    return;
+  }
+
+  if (qaBankNoteEl) qaBankNoteEl.textContent = `${rows.length} saved`;
+
+  qaBankListEl.innerHTML = "";
+  if (!rows.length) {
+    qaBankListEl.innerHTML =
+      '<p class="hint" style="margin:0">No saved answers yet. They are added as you autofill applications.</p>';
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "qa-item";
+
+    const q = document.createElement("p");
+    q.className = "qa-item-q";
+    q.textContent = row.question;
+    item.appendChild(q);
+
+    const answer = document.createElement("textarea");
+    answer.className = "qa-item-a";
+    answer.value = row.answer;
+    answer.addEventListener("change", async () => {
+      const next = String(answer.value || "").trim();
+      if (!next) return;
+      await saveQa({
+        profileId: row.profileId || "",
+        question: row.question,
+        answer: next,
+        fieldType: row.fieldType || "text",
+        source: "user",
+        site: row.site || ""
+      });
+      setStatus("Q&A updated.");
+    });
+    item.appendChild(answer);
+
+    const meta = document.createElement("div");
+    meta.className = "qa-item-meta";
+
+    const tag = document.createElement("span");
+    tag.className = `qa-source-tag ${row.source === "user" ? "qa-source-user" : "qa-source-ai"}`;
+    tag.textContent = row.source === "user" ? "manual" : "ai";
+    meta.appendChild(tag);
+
+    const used = document.createElement("span");
+    used.textContent = `used ${Number(row.timesUsed || 0)}×`;
+    meta.appendChild(used);
+
+    const actions = document.createElement("div");
+    actions.className = "qa-item-actions";
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "secondary danger compact";
+    del.textContent = "Delete";
+    del.addEventListener("click", async () => {
+      await deleteQa(row.id);
+      await refreshQaBank();
+      setStatus("Q&A deleted.");
+    });
+    actions.appendChild(del);
+    meta.appendChild(actions);
+
+    item.appendChild(meta);
+    frag.appendChild(item);
+  }
+  qaBankListEl.appendChild(frag);
+}
+
+async function addQaFromForm() {
+  const question = String(qaNewQuestionEl?.value || "").trim();
+  const answer = String(qaNewAnswerEl?.value || "").trim();
+  if (!question || !answer) {
+    setStatus("Enter both a question and an answer to save.");
+    return;
+  }
+  const profileId = profileSelectEl.value || "";
+  await saveQa({ profileId, question, answer, source: "user" });
+  if (qaNewQuestionEl) qaNewQuestionEl.value = "";
+  if (qaNewAnswerEl) qaNewAnswerEl.value = "";
+  await refreshQaBank();
+  setStatus("Saved to Q&A bank.");
+}
+
+async function exportQaBank() {
+  try {
+    const rows = await exportQa();
+    const blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "qa-bank.json";
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`Exported ${rows.length} Q&A entr${rows.length === 1 ? "y" : "ies"}.`);
+  } catch (err) {
+    setStatus(`Export failed: ${String(err.message || err)}`);
+  }
+}
+
+async function importQaBankFromFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const count = await importQa(parsed);
+    await refreshQaBank();
+    setStatus(`Imported ${count} Q&A entr${count === 1 ? "y" : "ies"}.`);
+  } catch (err) {
+    setStatus(`Import failed: ${String(err.message || err)}`);
+  }
+}
+
+async function clearQaBank() {
+  const ok = window.confirm("Delete ALL saved Q&A answers? This cannot be undone.");
+  if (!ok) return;
+  await clearQa(null);
+  await refreshQaBank();
+  setStatus("Q&A bank cleared.");
+}
+
+async function runEasyApplyOnCurrentPage() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  if (!profileId) {
+    setStatus("Select a profile first.");
+    return;
+  }
+  setStatus("Running Easy Apply (fills each step, stops before submit)...");
+  setBusy(true);
+  try {
+    await chrome.storage.local.set({ selected_profile_id: profileId });
+    const res = await chrome.runtime.sendMessage({ type: "easy_apply_current_page", profileId });
+    if (!res?.ok && res?.error) {
+      throw new Error(res.error);
+    }
+    setStatus(res.status || `Easy Apply: ${res.status || "done"}.`);
+    await refreshQaBank();
+  } catch (err) {
+    setStatus(`Easy Apply failed: ${String(err.message || err)}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function runAutofillOnCurrentPage() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   if (!profileId) {
@@ -1119,6 +1463,7 @@ async function runAutofillOnCurrentPage() {
       throw new Error(res?.error || "Autofill failed.");
     }
     setStatus(res.status || `Autofilled ${res.filledCount || 0} field(s).`);
+    await refreshQaBank();
   } catch (err) {
     setStatus(`Autofill failed: ${String(err.message || err)}`);
   } finally {
@@ -1288,6 +1633,25 @@ for (const el of [
 
 wireAccordion(spreadsheetSectionEl, "ui_sheet_section_open");
 wireAccordion(aiQaSectionEl, "ui_ai_qa_section_open");
+wireAccordion(qaBankSectionEl, "ui_qa_bank_section_open");
+wireAccordion(credentialsSectionEl, "ui_credentials_section_open");
+
+accountShowPasswordEl?.addEventListener("change", () => {
+  if (accountPasswordEl) {
+    accountPasswordEl.type = accountShowPasswordEl.checked ? "text" : "password";
+  }
+});
+accountSaveBtn?.addEventListener("click", () => {
+  saveAccountCredentials().catch((err) => setStatus(String(err?.message || err)));
+});
+accountClearBtn?.addEventListener("click", () => {
+  clearAccountCredentials().catch((err) => setStatus(String(err?.message || err)));
+});
+for (const el of [accountEmailEl, accountUsernameEl, accountPasswordEl].filter(Boolean)) {
+  el.addEventListener("change", () => {
+    saveAccountCredentials().catch(() => {});
+  });
+}
 
 selectOutputDirBtn.addEventListener("click", () => {
   selectOutputDirectory().catch((err) => setStatus(String(err.message || err)));
@@ -1386,6 +1750,39 @@ csvFileInputEl?.addEventListener("change", async () => {
   }
 });
 
+easyApplyBtn?.addEventListener("click", () => {
+  runEasyApplyOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
+});
+qaAddBtn?.addEventListener("click", () => {
+  addQaFromForm().catch((err) => setStatus(String(err.message || err)));
+});
+qaExportBtn?.addEventListener("click", () => {
+  exportQaBank().catch((err) => setStatus(String(err.message || err)));
+});
+qaImportBtn?.addEventListener("click", () => qaImportInput?.click());
+qaImportInput?.addEventListener("change", () => {
+  const file = qaImportInput.files?.[0];
+  importQaBankFromFile(file).finally(() => {
+    if (qaImportInput) qaImportInput.value = "";
+  });
+});
+qaClearBtn?.addEventListener("click", () => {
+  clearQaBank().catch((err) => setStatus(String(err.message || err)));
+});
+qaLearnToggleEl?.addEventListener("change", () => {
+  const enabled = Boolean(qaLearnToggleEl.checked);
+  chrome.storage.local.set({ qa_learn_enabled: enabled }).catch(() => {});
+  setStatus(enabled ? "Learn mode on — typed answers will be saved." : "Learn mode off.");
+});
+qaBankSectionEl?.addEventListener("toggle", () => {
+  if (qaBankSectionEl.open) refreshQaBank().catch(() => {});
+});
+// Live-refresh the bank list as learn mode / autofill grow it.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.qa_bank_version && qaBankSectionEl?.open) {
+    refreshQaBank().catch(() => {});
+  }
+});
 generateAiAnswerBtn?.addEventListener("click", () => {
   generateManualAiAnswer().catch((err) => setStatus(String(err.message || err)));
 });
