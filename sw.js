@@ -26,6 +26,11 @@ let isRunning = false;
 let keepAliveTimer = null;
 let panelWindowId = null;
 
+// The last real browser window the user looked at, so "scrape/autofill the
+// current page" targets the tab they were viewing — not this extension panel
+// (a popup-type window) that steals focus when they click a button in it.
+let lastFocusedNormalWindowId = null;
+
 const PANEL_WIDTH = 1000;
 const PANEL_HEIGHT = 760;
 const PANEL_WINDOW_ID_KEY = "panel_window_id";
@@ -109,7 +114,40 @@ chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId === panelWindowId) {
     rememberPanelWindowId(null).catch(() => {});
   }
+  if (windowId === lastFocusedNormalWindowId) {
+    lastFocusedNormalWindowId = null;
+  }
 });
+
+/** Remember the most recent normal (browser) window the user focused. */
+function rememberFocusedNormalWindow(windowId) {
+  if (windowId == null || windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.windows
+    .get(windowId)
+    .then((win) => {
+      if (win && win.type === "normal") {
+        lastFocusedNormalWindowId = windowId;
+      }
+    })
+    .catch(() => {});
+}
+
+chrome.windows.onFocusChanged.addListener(rememberFocusedNormalWindow);
+
+// A tab becoming active in a normal window also marks it as the current one.
+chrome.tabs.onActivated.addListener(({ windowId }) => {
+  rememberFocusedNormalWindow(windowId);
+});
+
+// Seed the value at startup so the first scrape works before any focus change.
+(async () => {
+  try {
+    const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    if (win?.type === "normal") lastFocusedNormalWindowId = win.id;
+  } catch {
+    /* no normal window yet */
+  }
+})();
 
 async function handleOpenPanel() {
   try {
@@ -147,17 +185,55 @@ function safeSendResponse(sendResponse, payload) {
   }
 }
 
-async function sendMessageToTab(tabId, message, { attempts = 3, retryDelayMs = 200 } = {}) {
+async function sendMessageToTab(tabId, message, { attempts = 3, retryDelayMs = 200, frameId } = {}) {
   let lastErr = null;
+  const opts = frameId != null ? { frameId } : {};
   for (let i = 0; i < attempts; i += 1) {
     try {
-      return await chrome.tabs.sendMessage(tabId, message);
+      return await chrome.tabs.sendMessage(tabId, message, opts);
     } catch (err) {
       lastErr = err;
       await new Promise((r) => setTimeout(r, retryDelayMs * (i + 1)));
     }
   }
   throw lastErr || new Error("Failed to send message to tab.");
+}
+
+/** List frame ids in a tab (iCIMS / Workday often put the form in an iframe). */
+async function listTabFrameIds(tabId) {
+  try {
+    const infos = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => true
+    });
+    const ids = (infos || [])
+      .map((row) => row.frameId)
+      .filter((id) => typeof id === "number");
+    if (ids.length) return ids;
+  } catch {
+    /* fall through */
+  }
+  return [0];
+}
+
+/**
+ * Broadcast a content-script message to every frame and return per-frame replies.
+ * Needed because chrome.tabs.sendMessage without frameId only hits the top frame,
+ * while ATS forms (especially iCIMS) live inside iframes.
+ */
+async function sendMessageToAllFrames(tabId, message, { attempts = 2 } = {}) {
+  await ensureAutofillScript(tabId);
+  const frameIds = await listTabFrameIds(tabId);
+  const results = [];
+  for (const frameId of frameIds) {
+    try {
+      const res = await sendMessageToTab(tabId, message, { attempts, frameId });
+      if (res != null) results.push({ frameId, ...(typeof res === "object" ? res : { ok: true }) });
+    } catch {
+      /* frame may be cross-origin chrome:// or missing the script */
+    }
+  }
+  return results;
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -262,7 +338,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-09.2";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-10.2";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
 function bumpQaVersion() {
@@ -329,10 +405,19 @@ function detectSiteFromUrl(url) {
 }
 
 async function ensureAutofillScript(tabId) {
+  // Inject into every frame — iCIMS / some Workday pages host the form inside
+  // an iframe. The content script guards itself with SCRIPT_BUILD so re-inject is safe.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content/autofill.js"]
+    });
+    return;
+  } catch {
+    /* some frames may be restricted; fall back to the top frame */
+  }
   try {
     const pong = await chrome.tabs.sendMessage(tabId, { type: "autofill_ping" });
-    // A tab left open across an extension update still answers with the old
-    // script; re-inject so the current build handles the fill.
     if (pong?.build === AUTOFILL_SCRIPT_BUILD) return;
   } catch {
     /* not injected yet */
@@ -343,6 +428,50 @@ async function ensureAutofillScript(tabId) {
   });
 }
 
+function mergeAutofillFrameResults(frameResults = []) {
+  const merged = {
+    ok: false,
+    filledCount: 0,
+    filled: [],
+    credentialFilledCount: 0,
+    credentialFilled: [],
+    uploadedCount: 0,
+    uploaded: [],
+    uploadSkipped: [],
+    unmatchedQuestions: [],
+    unmatchedChoiceQuestions: [],
+    frameResults
+  };
+
+  for (const r of frameResults) {
+    if (!r || r.ok === false) continue;
+    merged.ok = true;
+    merged.filledCount += Number(r.filledCount || 0);
+    if (Array.isArray(r.filled)) merged.filled.push(...r.filled);
+    merged.credentialFilledCount += Number(r.credentialFilledCount || 0);
+    if (Array.isArray(r.credentialFilled)) {
+      for (const c of r.credentialFilled) {
+        if (!merged.credentialFilled.includes(c)) merged.credentialFilled.push(c);
+      }
+    }
+    merged.uploadedCount += Number(r.uploadedCount || 0);
+    if (Array.isArray(r.uploaded)) merged.uploaded.push(...r.uploaded);
+    if (Array.isArray(r.uploadSkipped)) merged.uploadSkipped.push(...r.uploadSkipped);
+    if (Array.isArray(r.unmatchedQuestions)) {
+      for (const q of r.unmatchedQuestions) {
+        merged.unmatchedQuestions.push({ ...q, frameId: r.frameId });
+      }
+    }
+    if (Array.isArray(r.unmatchedChoiceQuestions)) {
+      for (const q of r.unmatchedChoiceQuestions) {
+        merged.unmatchedChoiceQuestions.push({ ...q, frameId: r.frameId });
+      }
+    }
+  }
+
+  return merged;
+}
+
 /**
  * Prefer the active tab in a normal browser window (not this extension panel).
  */
@@ -351,6 +480,17 @@ async function getCurrentApplicationTab() {
     populate: true,
     windowTypes: ["normal"]
   });
+
+  // Prefer the active tab of the window the user last looked at. This is the
+  // "current page" even when the extension panel (a popup window) is focused.
+  const trackedWindow =
+    (lastFocusedNormalWindowId != null &&
+      normalWindows.find((w) => w.id === lastFocusedNormalWindowId)) ||
+    null;
+  const activeInTracked = trackedWindow?.tabs?.find((t) => t.active) || null;
+  if (activeInTracked?.id != null && /^https?:\/\//i.test(activeInTracked.url || "")) {
+    return activeInTracked;
+  }
 
   const focusedNormal =
     normalWindows.find((w) => w.focused) ||
@@ -459,9 +599,13 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
   }
 
   const credentials = await getAccountCredentials();
+  // Create-login forms often want the Login field to be the email address.
+  if (!credentials.email && applicantInfo.email) {
+    credentials.email = String(applicantInfo.email || "").trim();
+  }
 
   await ensureAutofillScript(tab.id);
-  const result = await chrome.tabs.sendMessage(tab.id, {
+  const frameResults = await sendMessageToAllFrames(tab.id, {
     type: "autofill_application",
     applicantInfo,
     credentials,
@@ -470,6 +614,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
       coverLetter: docs?.coverLetter || null
     }
   });
+  const result = mergeAutofillFrameResults(frameResults);
 
   let aiFilledCount = 0;
   let choiceFilledCount = 0;
@@ -481,13 +626,21 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
   // Reuse stored answers for novel dropdown/checkbox/radio questions (bank only).
   if (unmatchedChoice.length) {
     try {
-      const choiceAnswers = await resolveChoiceAnswersFromBank(profileId, unmatchedChoice);
-      if (choiceAnswers.length) {
-        const cRes = await chrome.tabs.sendMessage(tab.id, {
-          type: "autofill_choice_answers",
-          answers: choiceAnswers
-        });
-        choiceFilledCount = Number(cRes?.filledCount || 0);
+      const byFrame = new Map();
+      for (const q of unmatchedChoice) {
+        const fid = q.frameId;
+        if (!byFrame.has(fid)) byFrame.set(fid, []);
+        byFrame.get(fid).push(q);
+      }
+      for (const [frameId, questions] of byFrame) {
+        const choiceAnswers = await resolveChoiceAnswersFromBank(profileId, questions);
+        if (!choiceAnswers.length) continue;
+        const cRes = await sendMessageToTab(
+          tab.id,
+          { type: "autofill_choice_answers", answers: choiceAnswers },
+          { attempts: 2, frameId }
+        );
+        choiceFilledCount += Number(cRes?.filledCount || 0);
       }
     } catch {
       /* best-effort: choice reuse should never block the rest of autofill */
@@ -503,24 +656,31 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         "last_jd_text",
         "last_response"
       ]);
-      const answers = await resolveTextAnswers({
-        questions: unmatched,
-        applicantInfo,
-        jobMeta: {
-          jobTitle: stored.last_job_title || "",
-          companyName: stored.last_company_name || "",
-          jdText: stored.last_jd_text || ""
-        },
-        resumeText: stored.last_response || ""
-      });
-
-      if (answers.length) {
-        await setStatus(`Filling ${answers.length} AI answer(s)...`);
-        const aiResult = await chrome.tabs.sendMessage(tab.id, {
-          type: "autofill_ai_answers",
-          answers
+      const byFrame = new Map();
+      for (const q of unmatched) {
+        const fid = q.frameId;
+        if (!byFrame.has(fid)) byFrame.set(fid, []);
+        byFrame.get(fid).push(q);
+      }
+      for (const [frameId, questions] of byFrame) {
+        const answers = await resolveTextAnswers({
+          questions,
+          applicantInfo,
+          jobMeta: {
+            jobTitle: stored.last_job_title || "",
+            companyName: stored.last_company_name || "",
+            jdText: stored.last_jd_text || ""
+          },
+          resumeText: stored.last_response || ""
         });
-        aiFilledCount = Number(aiResult?.filledCount || 0);
+        if (!answers.length) continue;
+        await setStatus(`Filling ${answers.length} AI answer(s)...`);
+        const aiResult = await sendMessageToTab(
+          tab.id,
+          { type: "autofill_ai_answers", answers },
+          { attempts: 2, frameId }
+        );
+        aiFilledCount += Number(aiResult?.filledCount || 0);
       }
     } catch (aiErr) {
       // Keep profile/file autofill success even if AI Q&A fails.
@@ -1554,6 +1714,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     showSaveNotification(message.pathLabel || "").then(() => {
       safeSendResponse(sendResponse, { ok: true });
     });
+    return true;
+  }
+
+  if (message?.type === "scrape_current_page") {
+    (async () => {
+      try {
+        const tab = await getCurrentApplicationTab();
+        if (!tab?.id) {
+          safeSendResponse(sendResponse, {
+            ok: false,
+            error:
+              "No active job tab found. Open the job page in a normal browser window first."
+          });
+          return;
+        }
+        if (!/^https?:\/\//i.test(tab.url || "")) {
+          safeSendResponse(sendResponse, {
+            ok: false,
+            error: "The current tab is not a web page. Open the job posting, then scrape."
+          });
+          return;
+        }
+
+        await setStatus("Scraping the open job page...");
+        await ensureAutofillScript(tab.id);
+        const res = await sendMessageToTab(
+          tab.id,
+          { type: "scrape_job_page" },
+          { attempts: 3 }
+        );
+
+        if (!res?.ok) {
+          const err = res?.error || "Could not scrape this page.";
+          await setStatus(`Scrape failed: ${err}`);
+          safeSendResponse(sendResponse, { ok: false, error: err });
+          return;
+        }
+
+        await setStatus(
+          `Scraped ${res.jobData?.jobTitle || "job"}${
+            res.jobData?.companyName ? ` @ ${res.jobData.companyName}` : ""
+          } (${res.site || "page"}).`
+        );
+        safeSendResponse(sendResponse, {
+          ok: true,
+          site: res.site || "",
+          jobData: res.jobData || {},
+          tabUrl: tab.url || ""
+        });
+      } catch (err) {
+        const error = String(err?.message || err);
+        await setStatus(`Scrape failed: ${error}`);
+        safeSendResponse(sendResponse, { ok: false, error });
+      }
+    })();
     return true;
   }
 

@@ -37,6 +37,30 @@ This extension injects a selected profile's resume prompt + JD into your already
 
 If ChatGPT already shows the resume JSON but files were not saved, fill the job fields and click **Finish from current ChatGPT reply**.
 
+## Scrape an open job page (no CSV / sheet needed)
+
+When you open a job posting directly (e.g. a Dice or Jobright job page), you don't have to
+copy/paste the details:
+
+1. Open the job posting in a normal browser tab.
+2. Open the extension panel and click **Scrape open job page**.
+3. Job title, company, JD link, and the full job description are filled in for you
+   (plus work model, employment type, salary, and posted date for the sheet row).
+4. Review the fields, then click **Generate resume & cover letter**.
+
+Supported detection:
+
+- **Dice** (`dice.com`) — works on `/job-detail/{id}` and the search side panel
+  (`/jobs?…&selectedJobId=`). Reads the on-page JD module and/or fetches the
+  detail page JSON-LD when the SERP panel has no schema.org block.
+- **Jobright** (`jobright.ai`) — reads the embedded `__NEXT_DATA__` job payload.
+- **Generic fallback** — any site that embeds a schema.org `JobPosting` block
+  (many boards / ATS do). More sites are added over time.
+
+To add another site, append an entry to the `JOB_SCRAPERS` registry in
+`content/autofill.js` with a hostname matcher and a `scrape()` that returns
+`{ jobTitle, companyName, jdLink, jdText, ... }`.
+
 ## CoverLetter prompt
 
 Built-in file: `prompts/cover-letter.js` (profile title: **CoverLetter**).

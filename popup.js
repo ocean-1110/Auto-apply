@@ -191,6 +191,7 @@ const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
 const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
+const scrapePageBtn = document.getElementById("scrapePageBtn");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
 const easyApplyBtn = document.getElementById("easyApplyBtn");
@@ -247,6 +248,9 @@ const sidebarImportEl = jobsSidebarEl?.querySelector(".sidebar-import") || null;
 let profilesCache = [];
 let templatesCache = [];
 let wasGenerationRunning = false;
+
+// Extra job metadata captured by the page scraper (sheet history columns).
+let scrapedJobMeta = null;
 
 let awaitingFolderPermission = false;
 let permissionRetryArmed = false;
@@ -1063,8 +1067,10 @@ async function loadSettings() {
     "ui_credentials_section_open",
     "qa_learn_enabled",
     "imported_jobs_filter",
-    "account_credentials"
+    "account_credentials",
+    "scraped_job_meta"
   ]);
+  scrapedJobMeta = data.scraped_job_meta || null;
 
   await refreshProfiles(data.selected_profile_id || DEFAULT_PROFILE_ID);
   await refreshTemplates(data.selected_template_id || templateIdForProfile(profileSelectEl.value));
@@ -1117,6 +1123,57 @@ async function pasteJdFromClipboard() {
   }
 }
 
+async function scrapeCurrentJobPage() {
+  setStatus("Scraping the open job page...", "running");
+  setBusy(true);
+  if (scrapePageBtn) scrapePageBtn.disabled = true;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "scrape_current_page" });
+    if (!res?.ok) {
+      throw new Error(res?.error || "Could not scrape this page.");
+    }
+
+    const d = res.jobData || {};
+    // Always overwrite identity fields so a previous scrape/job cannot linger
+    // in the form (and later get written to the tracking sheet).
+    jobTitleEl.value = d.jobTitle || "";
+    companyNameEl.value = d.companyName || "";
+    if (d.jdLink) jdLinkEl.value = d.jdLink;
+    if (d.jdText) jdTextEl.value = d.jdText;
+
+    scrapedJobMeta = {
+      workArrangement: d.workArrangement || "",
+      employmentType: d.employmentType || "",
+      salaryMin: d.salaryMin || "",
+      salaryMax: d.salaryMax || "",
+      datePosted: d.datePosted || ""
+    };
+
+    await persistJobFields();
+    await chrome.storage.local.set({ scraped_job_meta: scrapedJobMeta });
+
+    if (!d.companyName) {
+      setStatus(
+        `Scraped ${d.jobTitle || "job"}, but company name was missing — enter the company before generating.`,
+        "error"
+      );
+      companyNameEl.focus();
+      return;
+    }
+
+    const site = res.site ? ` (${res.site})` : "";
+    setStatus(
+      `Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Review the fields, then Generate resume & cover letter.`,
+      "done"
+    );
+  } catch (err) {
+    setStatus(`Scrape failed: ${String(err.message || err)}`, "error");
+  } finally {
+    setBusy(false);
+    if (scrapePageBtn) scrapePageBtn.disabled = false;
+  }
+}
+
 async function copyAppsScript() {
   try {
     await navigator.clipboard.writeText(APPS_SCRIPT_SOURCE);
@@ -1136,9 +1193,12 @@ async function copySheetRow() {
     return;
   }
 
-  // Pull the extra history columns from the currently selected imported job.
+  // Pull the extra history columns from the currently selected imported job,
+  // or from the last page scrape when applying a job opened directly.
   const selJob =
-    (importedJobsSelectedId && importedJobsById[importedJobsSelectedId]) || {};
+    (importedJobsSelectedId && importedJobsById[importedJobsSelectedId]) ||
+    scrapedJobMeta ||
+    {};
   const tsv = buildSheetRowTsv({
     jobTitle,
     companyName,
@@ -1236,11 +1296,11 @@ async function collectJobMetaOrShowError() {
       sheetName: sheetTabName,
       sheetsWebAppUrl,
       templateId,
-      workArrangement: "",
-      employmentType: "",
-      salaryMin: "",
-      salaryMax: "",
-      datePosted: ""
+      workArrangement: scrapedJobMeta?.workArrangement || "",
+      employmentType: scrapedJobMeta?.employmentType || "",
+      salaryMin: scrapedJobMeta?.salaryMin || "",
+      salaryMax: scrapedJobMeta?.salaryMax || "",
+      datePosted: scrapedJobMeta?.datePosted || ""
     }
   };
 }
@@ -1542,13 +1602,14 @@ async function clearJobFields() {
   hidePermissionBanner();
   if (genProgressEl) genProgressEl.hidden = true;
 
+  scrapedJobMeta = null;
   await chrome.storage.local.set({
     last_job_title: "",
     last_company_name: "",
     last_jd_link: "",
     last_jd_text: ""
   });
-  await chrome.storage.local.remove(["last_save_ready", "last_save_meta"]);
+  await chrome.storage.local.remove(["last_save_ready", "last_save_meta", "scraped_job_meta"]);
 }
 
 async function resetWorkflow() {
@@ -1658,6 +1719,9 @@ selectOutputDirBtn.addEventListener("click", () => {
 });
 
 pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
+scrapePageBtn?.addEventListener("click", () => {
+  scrapeCurrentJobPage().catch((err) => setStatus(String(err.message || err)));
+});
 copyAppsScriptBtn.addEventListener("click", copyAppsScript);
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);

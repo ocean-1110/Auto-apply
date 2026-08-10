@@ -6,7 +6,7 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-09.2";
+  const SCRIPT_BUILD = "2026-08-10.2";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -22,7 +22,14 @@
 
   const FIELD_ALIASES = {
     firstName: ["first name", "firstname", "given name", "legal first name"],
-    lastName: ["last name", "lastname", "surname", "family name", "legal last name"],
+    lastName: [
+      "last name",
+      "lastname",
+      "surname",
+      "family name",
+      "legal last name",
+      "preferred last name"
+    ],
     middleName: ["middle name", "middle initial", "mi"],
     preferredName: ["preferred name", "preferred first name", "nickname", "what should we call you"],
     email: ["email", "e-mail", "email address", "work email"],
@@ -81,7 +88,14 @@
       "language proficiency",
       "fluency in english"
     ],
-    linkedinUrl: ["linkedin", "linkedin url", "linkedin profile"],
+    linkedinUrl: [
+      "linkedin",
+      "linkedin url",
+      "linkedin profile",
+      "linkedin profile link",
+      "linkedin profile url",
+      "linkedin link"
+    ],
     portfolioUrl: ["portfolio", "website", "personal website", "portfolio url"],
     githubUrl: ["github", "github url", "github profile"],
 
@@ -1221,13 +1235,23 @@
   }
 
   function isFieldFillable(el) {
-    return (
-      el &&
-      typeof el.value !== "undefined" &&
-      !el.disabled &&
-      !el.readOnly &&
-      el.offsetParent !== null
-    );
+    if (!el || el.disabled || el.readOnly) return false;
+    if (typeof el.value === "undefined") return false;
+    try {
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      // Don't require offsetParent — iCIMS / fixed-position layouts often leave
+      // it null even when the control is visible and editable.
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        const type = (el.type || "").toLowerCase();
+        // Hidden file inputs are still usable for programmatic upload.
+        if (type !== "file") return false;
+      }
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   function setCredentialValue(el, value) {
@@ -1264,9 +1288,10 @@
 
   /**
    * Fill saved login / sign-up credentials (email, username, password) on an
-   * auth page. Only acts when a password field is present, so application forms
-   * that merely ask for a contact email are left to the profile autofill. Never
-   * submits the form.
+   * auth / "create a login" section. Only acts when a password field is present,
+   * so plain contact-email fields stay with profile autofill. Never submits.
+   *
+   * iCIMS uses a bare "Login*" field (not always name=username) — match by label too.
    */
   function fillLoginCredentials(credentials = {}) {
     const email = String(credentials.email || "").trim();
@@ -1294,6 +1319,53 @@
       }
     }
 
+    const loginValue = username || email;
+
+    // Prefer an explicit Login / Username field (iCIMS "Login*") over the contact Email.
+    if (loginValue) {
+      let loginEl = firstCredentialField(
+        [
+          'input[autocomplete="username"]',
+          'input[name*="login" i]',
+          'input[id*="login" i]',
+          'input[name*="user" i]',
+          'input[id*="user" i]',
+          'input[placeholder*="user" i]',
+          'input[aria-label*="user" i]',
+          'input[placeholder*="login" i]',
+          'input[aria-label*="login" i]'
+        ],
+        used
+      );
+      if (!loginEl) {
+        for (const el of document.querySelectorAll("input")) {
+          if (used.has(el) || !isFieldFillable(el)) continue;
+          const type = (el.type || "text").toLowerCase();
+          if (["password", "hidden", "file", "submit", "button", "checkbox", "radio"].includes(type)) {
+            continue;
+          }
+          const label = normalize(labelTextForControl(el));
+          if (!label) continue;
+          // Exact-ish "login" / "username" — avoid matching "LinkedIn" etc.
+          if (
+            label === "login" ||
+            label === "username" ||
+            label === "user name" ||
+            label.startsWith("login ") ||
+            /\b(login|username|user name)\b/.test(label)
+          ) {
+            if (/linkedin|email|password|phone/.test(label)) continue;
+            loginEl = el;
+            break;
+          }
+        }
+      }
+      if (loginEl && setCredentialValue(loginEl, loginValue)) {
+        used.add(loginEl);
+        filled.push(username ? "username" : "login");
+      }
+    }
+
     if (email) {
       const el = firstCredentialField(
         [
@@ -1312,26 +1384,18 @@
       }
     }
 
-    if (username) {
-      const el = firstCredentialField(
-        [
-          'input[autocomplete="username"]',
-          'input[name*="user" i]',
-          'input[id*="user" i]',
-          'input[name*="login" i]',
-          'input[id*="login" i]',
-          'input[placeholder*="user" i]',
-          'input[aria-label*="user" i]'
-        ],
-        used
-      );
-      if (el && setCredentialValue(el, username)) {
-        used.add(el);
-        filled.push("username");
-      }
-    }
-
     return { filledCount: filled.length, filled };
+  }
+
+  /** Prefer the profile field; fall back preferredName → firstName. */
+  function resolveApplicantValue(applicantInfo, key) {
+    const direct = applicantInfo?.[key];
+    if (direct != null && String(direct).trim()) return String(direct).trim();
+    if (key === "preferredName") {
+      const first = applicantInfo?.firstName;
+      if (first != null && String(first).trim()) return String(first).trim();
+    }
+    return "";
   }
 
   async function autofillApplication(applicantInfo = {}, uploadFiles = {}, credentials = {}) {
@@ -1343,13 +1407,18 @@
       const label = labelTextForControl(el);
       const key = matchApplicantKey(label);
       if (!key) continue;
-      const value = applicantInfo[key];
-      if (value == null || String(value).trim() === "") continue;
+      const value = resolveApplicantValue(applicantInfo, key);
+      if (!value) continue;
       if (await fillControl(el, value, key)) filled.push({ key, label });
     }
 
-    // Fill saved login/sign-up credentials when this is an auth page.
-    const credResult = fillLoginCredentials(credentials);
+    // Fill saved login/sign-up credentials when this page has a Create Login section.
+    const creds = {
+      email: String(credentials.email || applicantInfo.email || "").trim(),
+      username: String(credentials.username || "").trim(),
+      password: String(credentials.password || "")
+    };
+    const credResult = fillLoginCredentials(creds);
 
     const uploadResult = uploadApplicationFiles(uploadFiles);
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
@@ -1964,10 +2033,735 @@
 
   initLearnMode();
 
+  // ---- Job page scraping (site-specific, extensible) ------------------------
+  //
+  // Each site posts its job data in a slightly different shape. We keep a small
+  // registry of site scrapers keyed by hostname, and always fall back to the
+  // schema.org JobPosting JSON-LD block that most boards/ATS embed. To add a new
+  // site, append an entry to JOB_SCRAPERS with a host matcher and a scrape().
+
+  function htmlToPlainText(html) {
+    let s = String(html || "");
+    if (!s) return "";
+    s = s
+      .replace(/<\s*br\s*\/?>/gi, "\n")
+      .replace(/<\s*li[^>]*>/gi, "- ")
+      .replace(/<\/\s*li\s*>/gi, "\n")
+      .replace(/<\/\s*(p|div|h[1-6]|ul|ol|section|article|tr|table)\s*>/gi, "\n\n")
+      .replace(/<[^>]+>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'")
+      .replace(/&#x27;/gi, "'")
+      .replace(/&rsquo;/gi, "\u2019");
+    return s
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function readJsonScript(id, root = document) {
+    const el =
+      typeof root.getElementById === "function"
+        ? root.getElementById(id)
+        : root.querySelector(`#${CSS.escape(id)}`);
+    if (!el) return null;
+    try {
+      return JSON.parse(el.textContent || el.innerText || "");
+    } catch {
+      return null;
+    }
+  }
+
+  function jobrightIdFromUrl() {
+    const m = String(location.pathname || "").match(/\/jobs\/info\/([A-Za-z0-9]+)/);
+    return m ? m[1] : "";
+  }
+
+  function canonicalPageUrl() {
+    const link = document.querySelector('link[rel="canonical"]');
+    const href = link?.getAttribute("href");
+    if (href && /^https?:\/\//i.test(href)) return href;
+    try {
+      const u = new URL(location.href);
+      u.hash = "";
+      return u.toString();
+    } catch {
+      return location.href;
+    }
+  }
+
+  function normalizeEmploymentType(value) {
+    const v = String(Array.isArray(value) ? value[0] : value || "").trim();
+    if (!v) return "";
+    const map = {
+      FULL_TIME: "Full-time",
+      PART_TIME: "Part-time",
+      CONTRACTOR: "Contract",
+      CONTRACT: "Contract",
+      TEMPORARY: "Temporary",
+      INTERN: "Internship",
+      INTERNSHIP: "Internship",
+      VOLUNTEER: "Volunteer",
+      PER_DIEM: "Per diem",
+      OTHER: "Other"
+    };
+    return map[v.toUpperCase().replace(/[\s-]+/g, "_")] || v;
+  }
+
+  function sectionLines(title, arr) {
+    const items = (Array.isArray(arr) ? arr : [])
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+    if (!items.length) return [];
+    return [`${title}:`, ...items.map((it) => `- ${it}`), ""];
+  }
+
+  function buildJobrightJdText(jr = {}, cr = {}) {
+    const lines = [];
+    const summary = String(jr.jobSummary || "").trim();
+    if (summary) lines.push(summary, "");
+    lines.push(...sectionLines("Responsibilities", jr.coreResponsibilities));
+    lines.push(...sectionLines("Qualifications / Skills", jr.skillSummaries));
+    lines.push(...sectionLines("Education", jr.educationSummaries));
+    lines.push(...sectionLines("Benefits", jr.benefitsSummaries));
+    const companyDesc = String(cr.companyDesc || "").trim();
+    if (companyDesc) lines.push("Company Overview:", companyDesc);
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  function companyFromJobrightChrome(doc = document) {
+    const title = String(
+      doc.querySelector?.("title")?.textContent || doc.title || ""
+    ).trim();
+    // e.g. "Sr Applications Developer (Salesforce) @ HealthEquity | Jobright.ai"
+    let m = title.match(/\s@\s(.+?)\s*\|\s*Jobright/i);
+    if (m?.[1]) return m[1].trim();
+
+    const og = doc.querySelector?.('meta[property="og:title"], meta[name="title"]');
+    const ogTitle = String(og?.getAttribute?.("content") || "").trim();
+    m = ogTitle.match(/\s@\s(.+?)\s*\|\s*Jobright/i);
+    if (m?.[1]) return m[1].trim();
+
+    return "";
+  }
+
+  /**
+   * Pull the job/company/posting payloads out of a document, keeping only the
+   * ones that belong to `urlId`. Jobright is a Next.js SPA: `__NEXT_DATA__` is
+   * baked in at the FIRST server render and is NOT updated on client-side
+   * navigation, so it can describe a previously viewed job. Matching on the job
+   * id in the URL is what prevents returning the wrong (stale) job.
+   */
+  function pickJobrightSources(doc, urlId) {
+    const nextDs = readJsonScript("__NEXT_DATA__", doc)?.props?.pageProps?.dataSource || null;
+    const helper = readJsonScript("jobright-helper-job-detail-info", doc);
+    const posting = readJsonScript("job-posting", doc);
+
+    const candidates = [];
+    // Prefer sources that include companyResult (helper is the head-managed
+    // payload that updates on SPA navigation; __NEXT_DATA__ can be stale).
+    if (helper?.jobResult) {
+      candidates.push([helper.jobResult, helper.companyResult || {}]);
+    }
+    if (nextDs?.jobResult) {
+      candidates.push([nextDs.jobResult, nextDs.companyResult || {}]);
+    }
+
+    let jr = null;
+    let cr = {};
+    for (const [cjr, ccr] of candidates) {
+      if (urlId && String(cjr.jobId || "") !== urlId) continue;
+      if (!jr) jr = cjr;
+      if (ccr?.companyName) {
+        cr = ccr;
+        break;
+      }
+      if (!cr?.companyName && ccr && Object.keys(ccr).length) cr = ccr;
+    }
+
+    // If we matched a job without company, steal companyResult from any
+    // same-id candidate (e.g. helper job + nextData company, or vice versa).
+    if (jr && !cr?.companyName) {
+      for (const [cjr, ccr] of candidates) {
+        if (String(cjr.jobId || "") === String(jr.jobId || "") && ccr?.companyName) {
+          cr = ccr;
+          break;
+        }
+      }
+      if (!cr?.companyName && helper?.companyResult?.companyName) {
+        const helperJobId = String(helper?.jobResult?.jobId || "");
+        if (!urlId || !helperJobId || helperJobId === urlId) {
+          cr = helper.companyResult;
+        }
+      }
+    }
+
+    let validPosting = null;
+    if (posting) {
+      const pid = String(posting?.identifier?.value || "");
+      // Accept posting when id matches, or when id is absent (SPA-updated head
+      // scripts sometimes omit identifier while still describing the open job).
+      if (!urlId || !pid || pid === urlId) validPosting = posting;
+    }
+
+    return {
+      jr,
+      cr,
+      posting: validPosting,
+      pageCompany: companyFromJobrightChrome(doc)
+    };
+  }
+
+  function assembleJobright({ jr, cr, posting, pageCompany }) {
+    if (!jr && !posting) return null;
+    jr = jr || {};
+    cr = cr || {};
+
+    const jobTitle = String(jr.jobTitle || jr.jobNlpTitle || posting?.title || "")
+      .replace(/^\[Remote\]\s*/i, "")
+      .trim();
+    const socialCompany = Array.isArray(jr.socialConnections)
+      ? String(
+          jr.socialConnections.find((c) => c?.companyName)?.companyName || ""
+        ).trim()
+      : "";
+    const companyName = String(
+      cr.companyName ||
+        jr.companyName ||
+        socialCompany ||
+        posting?.hiringOrganization?.name ||
+        pageCompany ||
+        ""
+    ).trim();
+
+    // Prefer the full schema.org JobPosting description (richest, includes
+    // responsibilities/skills/benefits/company overview), then fall back to
+    // rebuilding the JD from the structured jobResult fields.
+    let jdText = htmlToPlainText(posting?.description || "");
+    if (!jdText) jdText = buildJobrightJdText(jr, cr);
+
+    const sal = posting?.baseSalary?.value || {};
+    const remoteFromPosting =
+      String(posting?.jobLocationType || "").toUpperCase() === "TELECOMMUTE" ? "Remote" : "";
+
+    return {
+      jobId: String(jr.jobId || posting?.identifier?.value || ""),
+      jobTitle,
+      companyName,
+      jdLink: canonicalPageUrl(),
+      jdText,
+      applyLink: String(jr.applyLink || jr.originalUrl || posting?.url || "").trim(),
+      workArrangement: String(
+        jr.workModel || (jr.isRemote ? "Remote" : "") || remoteFromPosting
+      ).trim(),
+      employmentType: normalizeEmploymentType(jr.employmentType || posting?.employmentType),
+      salaryMin:
+        jr.minSalary != null && jr.minSalary !== ""
+          ? String(jr.minSalary)
+          : sal.minValue != null
+            ? String(sal.minValue)
+            : "",
+      salaryMax:
+        jr.maxSalary != null && jr.maxSalary !== ""
+          ? String(jr.maxSalary)
+          : sal.maxValue != null
+            ? String(sal.maxValue)
+            : "",
+      datePosted: String(jr.publishTime || posting?.datePosted || "").trim(),
+      jobLocation: String(jr.jobLocation || "").trim()
+    };
+  }
+
+  async function scrapeJobright() {
+    const urlId = jobrightIdFromUrl();
+
+    // 1) Use the in-page data, but only if it belongs to the job in the URL.
+    let data = assembleJobright(pickJobrightSources(document, urlId));
+    // Prefer a complete scrape (company included). If company is missing, keep
+    // going to the fresh HTML fetch — SPA pages often have job text but no
+    // companyResult until the server render is re-fetched.
+    if (
+      data &&
+      (!urlId || data.jobId === urlId) &&
+      (data.jobTitle || data.jdText) &&
+      data.companyName
+    ) {
+      return data;
+    }
+
+    // 2) The embedded payload was stale (SPA navigation) or missing company —
+    //    re-fetch the current URL's server-rendered HTML and parse it.
+    try {
+      const res = await fetch(location.href, {
+        credentials: "include",
+        headers: { Accept: "text/html" },
+        cache: "no-store"
+      });
+      if (res.ok) {
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const fetched = assembleJobright(pickJobrightSources(doc, urlId));
+        if (fetched && (fetched.jobTitle || fetched.jdText)) {
+          // Merge: prefer fetched company/title, keep any richer in-page JD.
+          if (data) {
+            return {
+              ...data,
+              ...fetched,
+              companyName: fetched.companyName || data.companyName || "",
+              jobTitle: fetched.jobTitle || data.jobTitle || "",
+              jdText: fetched.jdText || data.jdText || ""
+            };
+          }
+          return fetched;
+        }
+      }
+    } catch {
+      /* network/parse failure — fall back to whatever we had */
+    }
+
+    return data && (data.jobTitle || data.jdText) ? data : null;
+  }
+
+  function findJobPostingLdJson(root = document) {
+    const scripts = root.querySelectorAll('script[type="application/ld+json"]');
+    for (const s of scripts) {
+      let data;
+      try {
+        data = JSON.parse(s.textContent || "");
+      } catch {
+        continue;
+      }
+      const nodes = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.["@graph"])
+          ? data["@graph"]
+          : [data];
+      for (const node of nodes) {
+        const type = node?.["@type"];
+        const isJob =
+          type === "JobPosting" || (Array.isArray(type) && type.includes("JobPosting"));
+        if (isJob) return node;
+      }
+    }
+    return null;
+  }
+
+  function extractSchemaLocation(node) {
+    const loc = Array.isArray(node?.jobLocation) ? node.jobLocation[0] : node?.jobLocation;
+    const addr = loc?.address || {};
+    return [addr.addressLocality, addr.addressRegion, addr.addressCountry]
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+      .join(", ");
+  }
+
+  function scrapeSchemaOrgJobPosting() {
+    const node = findJobPostingLdJson();
+    if (!node) return null;
+
+    const jobTitle = String(node.title || node.name || "").trim();
+    const org = node.hiringOrganization;
+    const companyName = String(
+      (org && (org.name || org.legalName)) || (typeof org === "string" ? org : "") || ""
+    ).trim();
+    const jdText = htmlToPlainText(node.description || "");
+    if (!jobTitle && !jdText) return null;
+
+    const salaryValue = node.baseSalary?.value || node.estimatedSalary?.value || {};
+    const remote =
+      String(node.jobLocationType || "").toUpperCase() === "TELECOMMUTE" ? "Remote" : "";
+
+    return {
+      jobTitle,
+      companyName,
+      jdLink: canonicalPageUrl(),
+      jdText,
+      applyLink: String(node.url || "").trim(),
+      workArrangement: remote,
+      employmentType: normalizeEmploymentType(node.employmentType),
+      salaryMin: salaryValue.minValue != null ? String(salaryValue.minValue) : "",
+      salaryMax: salaryValue.maxValue != null ? String(salaryValue.maxValue) : "",
+      datePosted: String(node.datePosted || "").trim(),
+      jobLocation: extractSchemaLocation(node)
+    };
+  }
+
+  function diceIdFromUrl(url = location.href) {
+    try {
+      const u = new URL(String(url || ""), "https://www.dice.com");
+      const selected = u.searchParams.get("selectedJobId");
+      if (selected) return selected;
+      const parts = u.pathname.split("/").filter(Boolean);
+      const detailIdx = parts.findIndex((p) => p === "job-detail" || p === "detail");
+      if (detailIdx >= 0 && parts[detailIdx + 1]) {
+        // Modern Dice: /job-detail/{uuid}
+        // Legacy: /job-detail/{slug}/{id} or /jobs/detail/{id}
+        if (parts[detailIdx] === "job-detail" && parts[detailIdx + 2]) {
+          return parts[detailIdx + 2];
+        }
+        return parts[detailIdx + 1];
+      }
+      return u.searchParams.get("jobId") || u.searchParams.get("id") || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function elementText(el) {
+    return el ? String(el.textContent || "").replace(/\s+/g, " ").trim() : "";
+  }
+
+  function locationFromLd(ld) {
+    if (!ld) return "";
+    if (ld.applicantLocationRequirements?.name) {
+      return String(ld.applicantLocationRequirements.name).trim();
+    }
+    const loc = ld.jobLocation;
+    if (typeof loc === "string") return loc.trim();
+    const first = Array.isArray(loc) ? loc[0] : loc;
+    if (!first) return "";
+    if (typeof first === "string") return first.trim();
+    const addr = first.address || {};
+    return (
+      [addr.addressLocality, addr.addressRegion, addr.addressCountry]
+        .map((x) => String(x || "").trim())
+        .filter(Boolean)
+        .join(", ") ||
+      String(first.name || "").trim()
+    );
+  }
+
+  function salaryBoundsFromLd(ld) {
+    const raw = ld?.baseSalary?.value ?? ld?.estimatedSalary?.value;
+    if (raw == null || raw === "") return { min: "", max: "" };
+    if (typeof raw === "number" || typeof raw === "string") {
+      const n = String(raw).trim();
+      return { min: n, max: n };
+    }
+    return {
+      min: raw.minValue != null ? String(raw.minValue) : "",
+      max: raw.maxValue != null ? String(raw.maxValue) : ""
+    };
+  }
+
+  function diceDetailRoot(doc = document) {
+    return (
+      doc.querySelector('[class*="@container/job-detail"]') ||
+      doc.querySelector('[class*="job-detail"]') ||
+      doc.querySelector("main") ||
+      doc.body ||
+      doc
+    );
+  }
+
+  function diceCompanyFromDom(root) {
+    const links = Array.from(root.querySelectorAll('a[href*="/company-profile/"]'));
+    for (const a of links) {
+      const t = elementText(a);
+      if (t) return t;
+    }
+    return (
+      elementText(root.querySelector('[data-cy="companyNameLink"]')) ||
+      elementText(root.querySelector('[data-cy="companyName"]')) ||
+      elementText(root.querySelector("[class*='companyName']")) ||
+      ""
+    );
+  }
+
+  function diceIdFromDom(doc = document) {
+    const fromUrl = diceIdFromUrl(doc.defaultView?.location?.href || location.href);
+    if (fromUrl) return fromUrl;
+    const root = diceDetailRoot(doc);
+    const href =
+      root.querySelector('a[href*="/job-detail/"]')?.getAttribute("href") ||
+      doc.querySelector('a[href*="/job-detail/"]')?.getAttribute("href") ||
+      "";
+    return diceIdFromUrl(href) || "";
+  }
+
+  function diceCanonicalLink(jobId) {
+    if (jobId) return `https://www.dice.com/job-detail/${jobId}`;
+    try {
+      if (/\/job-detail\//i.test(location.pathname)) {
+        const u = new URL(location.href);
+        u.hash = "";
+        u.search = "";
+        return u.toString();
+      }
+    } catch {
+      /* ignore */
+    }
+    return canonicalPageUrl();
+  }
+
+  function assembleDiceFromLd(ld, { jobId = "", dom = null } = {}) {
+    if (!ld && !dom) return null;
+    ld = ld || {};
+    dom = dom || {};
+
+    const ldOrg = ld.hiringOrganization;
+    const ldCompany =
+      (ldOrg && (ldOrg.name || ldOrg.legalName)) ||
+      (typeof ldOrg === "string" ? ldOrg : "") ||
+      "";
+    const salary = salaryBoundsFromLd(ld);
+    const remoteFromLd =
+      String(ld.jobLocationType || "").toUpperCase() === "TELECOMMUTE" ? "Remote" : "";
+
+    let jdText = String(dom.jdText || "").trim();
+    if (!jdText && ld.description) jdText = htmlToPlainText(ld.description);
+
+    const skills = Array.isArray(dom.skills) ? dom.skills.filter(Boolean) : [];
+    if (skills.length && jdText && !/^Key skills:/i.test(jdText)) {
+      jdText = `Key skills:\n${skills.join("; ")}\n\n${jdText}`;
+    } else if (skills.length && !jdText) {
+      jdText = `Key skills:\n${skills.join("; ")}`;
+    }
+
+    const id =
+      jobId ||
+      String(ld.identifier?.value || "") ||
+      diceIdFromUrl(String(ld.url || "")) ||
+      "";
+    const jobTitle =
+      String(dom.jobTitle || "").trim() || String(ld.title || ld.name || "").trim();
+    const companyName = String(dom.companyName || "").trim() || String(ldCompany).trim();
+
+    if (!jobTitle && !jdText) return null;
+
+    return {
+      jobId: id,
+      jobTitle,
+      companyName,
+      jdLink: diceCanonicalLink(id),
+      jdText,
+      applyLink: String(ld.url || "").trim(),
+      workArrangement: String(dom.workArrangement || "").trim() || remoteFromLd,
+      employmentType: normalizeEmploymentType(
+        dom.employmentType || ld.employmentType
+      ),
+      salaryMin: salary.min,
+      salaryMax: salary.max,
+      datePosted:
+        String(dom.datePosted || "").trim() || String(ld.datePosted || "").trim(),
+      jobLocation: String(dom.jobLocation || "").trim() || locationFromLd(ld)
+    };
+  }
+
+  /**
+   * Dice scrape for the current redesigned UI:
+   * - Dedicated /job-detail/{uuid} pages embed schema.org JobPosting JSON-LD.
+   * - Search SERP uses a side panel (`?selectedJobId=`) with NO JSON-LD and no
+   *   legacy data-cy hooks; JD lives in a CSS-module class containing
+   *   "jobDescription". When the panel is incomplete we fetch the detail URL.
+   */
+  function scrapeDiceDom(doc = document) {
+    const root = diceDetailRoot(doc);
+    const text = elementText;
+
+    const titleEl =
+      root.querySelector('[data-cy="jobTitle"]') ||
+      root.querySelector("h1") ||
+      root.querySelector('[class*="jobTitle"]') ||
+      doc.querySelector("h1");
+
+    const locationEl =
+      root.querySelector('[data-cy="location"]') ||
+      root.querySelector('[data-cy="jobLocation"]');
+
+    // Modern Dice: job-detail-description-module__…__jobDescription
+    // Legacy: #jobDescription / data-cy / job-description
+    const descEl =
+      root.querySelector('[class*="jobDescription"]') ||
+      root.querySelector('[class*="job-detail-description"]') ||
+      root.querySelector("#jobDescription") ||
+      root.querySelector('[data-cy="jobDescription"]') ||
+      root.querySelector('[class*="job-description"]') ||
+      root.querySelector('[id*="description"]');
+
+    let jdText = "";
+    if (descEl) {
+      jdText = String(descEl.innerText || descEl.textContent || "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+
+    const skills = Array.from(
+      root.querySelectorAll(
+        '[data-cy="skillsList"] li, [data-cy="chip"], [class*="skill"] li, [class*="SkillChip"], [class*="SkillBadge"]'
+      )
+    )
+      .map((el) => text(el))
+      .filter(Boolean)
+      .slice(0, 40);
+
+    // Header line often looks like "Remote or Olympia, Washington•Today"
+    let workArrangement = "";
+    let datePosted = "";
+    const headerBits = Array.from(
+      root.querySelectorAll("span, div, p, li, time")
+    )
+      .map((el) => text(el))
+      .filter((t) => t && t.length < 80);
+    for (const t of headerBits) {
+      if (!workArrangement && /\b(Remote|Hybrid|On-?site)\b/i.test(t)) {
+        if (/remote/i.test(t)) workArrangement = "Remote";
+        else if (/hybrid/i.test(t)) workArrangement = "Hybrid";
+        else workArrangement = "On-site";
+      }
+      if (!datePosted && /^(today|yesterday|\d+\s*(day|hour|week|month)s?\s*ago)$/i.test(t)) {
+        datePosted = t;
+      }
+    }
+    datePosted =
+      datePosted ||
+      text(root.querySelector('[data-cy="postedDate"]')) ||
+      text(root.querySelector("time")) ||
+      "";
+
+    return {
+      jobTitle: text(titleEl),
+      companyName: diceCompanyFromDom(root),
+      jobLocation: text(locationEl),
+      jdText,
+      workArrangement:
+        workArrangement ||
+        text(root.querySelector('[data-cy="workplaceType"]')) ||
+        text(root.querySelector('[data-cy="workSettings"]')) ||
+        "",
+      employmentType:
+        text(root.querySelector('[data-cy="employmentDetails"]')) ||
+        text(root.querySelector('[data-cy="employmentType"]')) ||
+        "",
+      datePosted,
+      skills
+    };
+  }
+
+  function scrapeDiceOnce(doc = document) {
+    const jobId = diceIdFromDom(doc);
+    const dom = scrapeDiceDom(doc);
+    const ld = findJobPostingLdJson(doc);
+    return assembleDiceFromLd(ld, { jobId, dom });
+  }
+
+  async function fetchDiceDetailDocument(jobId) {
+    if (!jobId) return null;
+    try {
+      const res = await fetch(`https://www.dice.com/job-detail/${jobId}`, {
+        credentials: "include",
+        headers: { Accept: "text/html" },
+        cache: "no-store"
+      });
+      if (!res.ok) return null;
+      const html = await res.text();
+      return new DOMParser().parseFromString(html, "text/html");
+    } catch {
+      return null;
+    }
+  }
+
+  function mergeDiceScrapes(base, next) {
+    if (!base) return next;
+    if (!next) return base;
+    return {
+      ...base,
+      ...next,
+      companyName: next.companyName || base.companyName || "",
+      jobTitle: next.jobTitle || base.jobTitle || "",
+      jdText: next.jdText || base.jdText || "",
+      workArrangement: next.workArrangement || base.workArrangement || "",
+      employmentType: next.employmentType || base.employmentType || "",
+      salaryMin: next.salaryMin || base.salaryMin || "",
+      salaryMax: next.salaryMax || base.salaryMax || "",
+      datePosted: next.datePosted || base.datePosted || "",
+      jobLocation: next.jobLocation || base.jobLocation || "",
+      jobId: next.jobId || base.jobId || "",
+      jdLink: next.jdLink || base.jdLink || ""
+    };
+  }
+
+  async function scrapeDice() {
+    let data = scrapeDiceOnce(document);
+    if (data?.jobTitle && data?.companyName && data?.jdText) return data;
+
+    // SERP side panel often has title/company in the DOM but no JSON-LD / incomplete
+    // JD. Fetch the canonical /job-detail/{id} HTML (has JobPosting JSON-LD).
+    const jobId = data?.jobId || diceIdFromDom(document);
+    if (jobId) {
+      const detailDoc = await fetchDiceDetailDocument(jobId);
+      if (detailDoc) {
+        const fetched = scrapeDiceOnce(detailDoc);
+        data = mergeDiceScrapes(data, fetched);
+        if (data?.jobTitle && data?.companyName && data?.jdText) return data;
+      }
+    }
+
+    // Brief retries for client-side hydration on the open tab.
+    for (const waitMs of [400, 800]) {
+      await new Promise((r) => setTimeout(r, waitMs));
+      data = mergeDiceScrapes(data, scrapeDiceOnce(document));
+      if (data?.jobTitle && data?.companyName && data?.jdText) return data;
+    }
+
+    return data && (data.jobTitle || data.jdText) ? data : null;
+  }
+
+  // Registry of site-specific scrapers. Extend this as new sites are supported.
+  const JOB_SCRAPERS = [
+    { id: "jobright", host: /(^|\.)jobright\.ai$/i, scrape: scrapeJobright },
+    { id: "dice", host: /(^|\.)dice\.com$/i, scrape: scrapeDice }
+  ];
+
+  async function scrapeJobPage() {
+    const host = location.hostname || "";
+
+    for (const scraper of JOB_SCRAPERS) {
+      if (!scraper.host.test(host)) continue;
+      try {
+        const data = await scraper.scrape();
+        if (data && (data.jobTitle || data.jdText)) {
+          return { ok: true, site: scraper.id, jobData: data };
+        }
+      } catch {
+        /* fall through to the generic schema.org scraper */
+      }
+    }
+
+    // Generic fallback: most job boards / ATS embed a schema.org JobPosting.
+    try {
+      const data = scrapeSchemaOrgJobPosting();
+      if (data && (data.jobTitle || data.jdText)) {
+        return { ok: true, site: "schema.org", jobData: data };
+      }
+    } catch {
+      /* ignore and report not-found below */
+    }
+
+    return {
+      ok: false,
+      error:
+        "Could not detect job details on this page yet. Wait for it to finish loading, or paste the JD manually."
+    };
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "autofill_ping") {
       sendResponse({ ok: true, build: SCRIPT_BUILD });
       return false;
+    }
+    if (message?.type === "scrape_job_page") {
+      scrapeJobPage()
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
     }
     if (message?.type === "probe_application_form") {
       try {
