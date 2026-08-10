@@ -29,10 +29,20 @@
           </div>
 
           <div class="sidebar-import">
+            <div class="capture-panel">
+              <label class="capture-toggle">
+                <input type="checkbox" id="autoCaptureToggle" checked />
+                <span>Auto-capture every 4h</span>
+              </label>
+              <button type="button" id="captureNowBtn" class="secondary compact">Capture now</button>
+              <p id="captureStatus" class="import-status capture-status" role="status"></p>
+            </div>
             <input type="file" id="csvFileInput" accept=".csv" hidden />
             <button type="button" id="importCsvBtn" class="secondary compact">Import CSV</button>
             <div class="job-source-filters" role="group" aria-label="Filter imported jobs by source">
               <button type="button" id="filterAllJobs" class="secondary compact is-active">All</button>
+              <button type="button" id="filterDiceJobs" class="secondary compact">Dice</button>
+              <button type="button" id="filterJobrightJobs" class="secondary compact">Jobright</button>
               <button type="button" id="filterLinkedInJobs" class="secondary compact">LinkedIn</button>
               <button type="button" id="filterOtherJobs" class="secondary compact">Others</button>
             </div>
@@ -117,11 +127,17 @@
           </label>
 
           <div class="row row-2">
-            <button type="button" id="scrapePageBtn" title="Read the job details from the open tab and fill these fields">
+            <button type="button" id="scrapePageBtn" title="Alt+Shift+S — Scrape open job, generate, then Easy Apply">
               Scrape open job page
+              <kbd class="shortcut-hint">Alt+Shift+S</kbd>
             </button>
             <button type="button" id="pasteJd" class="secondary">Paste JD</button>
           </div>
+
+          <label class="inline-check" title="Skip cover letter generation to save tokens">
+            <input type="checkbox" id="resumeOnlyToggle" />
+            <span>generate only resume</span>
+          </label>
 
           <div class="row-split">
             <label class="field grow">
@@ -183,15 +199,25 @@
           </details>
 
           <div class="row row-2">
-            <button type="button" id="generateResume">Generate resume &amp; cover letter</button>
-            <button type="button" id="autofillBtn">Autofill</button>
+            <button type="button" id="generateResume" title="Alt+Shift+G">
+              Generate resume &amp; cover letter
+              <kbd class="shortcut-hint">Alt+Shift+G</kbd>
+            </button>
+            <button type="button" id="autofillBtn">
+              Autofill
+            </button>
           </div>
 
           <div class="row">
-            <button type="button" id="easyApplyBtn" class="secondary" title="Fill the Dice/Jobright Easy Apply steps, stopping before final submit">
+            <button type="button" id="easyApplyBtn" class="secondary" title="Alt+Shift+E — Fill Dice/Jobright Easy Apply, stop before submit">
               Easy Apply (Dice / Jobright)
+              <kbd class="shortcut-hint">Alt+Shift+E</kbd>
             </button>
           </div>
+          <p class="hint">
+            Open panel: <kbd>Alt+J</kbd>. Rebind shortcuts at
+            <code>chrome://extensions/shortcuts</code> if needed.
+          </p>
 
           <details class="accordion" id="credentialsSection">
             <summary>

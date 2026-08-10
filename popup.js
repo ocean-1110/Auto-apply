@@ -12,7 +12,13 @@ import {
   getLastSaveMeta,
   browseLastSavedJobDirectory
 } from "./fs-output.js";
-import { isLinkedInSource, parseImportedJobsCsvText } from "./csv-jobs.js";
+import { isLinkedInSource, isDiceSource, isJobrightSource, parseImportedJobsCsvText } from "./csv-jobs.js";
+import {
+  AUTO_CAPTURE_ENABLED_KEY,
+  LAST_CAPTURE_STATUS_KEY,
+  buildCaptureSummary,
+  normalizeJobLink
+} from "./capture-jobs.js";
 import { getAllQa, saveQa, deleteQa, clearQa, exportQa, importQa } from "./qa-store.js";
 
 const APPS_SCRIPT_SOURCE = `/**
@@ -192,6 +198,7 @@ const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
+const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
 const easyApplyBtn = document.getElementById("easyApplyBtn");
@@ -239,8 +246,13 @@ const modeImportedBtn = document.getElementById("modeImported");
 const csvFileInputEl = document.getElementById("csvFileInput");
 const importCsvBtn = document.getElementById("importCsvBtn");
 const importStatusEl = document.getElementById("importStatus");
+const autoCaptureToggleEl = document.getElementById("autoCaptureToggle");
+const captureNowBtn = document.getElementById("captureNowBtn");
+const captureStatusEl = document.getElementById("captureStatus");
 const importedJobsListEl = document.getElementById("importedJobsList");
 const filterAllJobsBtn = document.getElementById("filterAllJobs");
+const filterDiceJobsBtn = document.getElementById("filterDiceJobs");
+const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
 const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
 const sidebarImportEl = jobsSidebarEl?.querySelector(".sidebar-import") || null;
@@ -260,6 +272,40 @@ let importedJobsOrder = [];
 let importedJobsSelectedId = null;
 let importedJobsVersion = 0;
 let importedJobsFilter = "all";
+let capturePollRunning = false;
+let panelPollTimer = null;
+let extensionContextDead = false;
+
+function isExtensionContextValid() {
+  try {
+    return Boolean(chrome?.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
+function isContextInvalidatedError(err) {
+  const msg = String(err?.message || err || "");
+  return /extension context invalidated/i.test(msg);
+}
+
+/** Stop background polls and tell the user to reopen after a Reload. */
+function handleExtensionContextInvalidated() {
+  if (extensionContextDead) return;
+  extensionContextDead = true;
+  if (panelPollTimer != null) {
+    clearInterval(panelPollTimer);
+    panelPollTimer = null;
+  }
+  try {
+    setStatus(
+      "Extension was reloaded. Close this panel and open it again (Alt+J).",
+      "error"
+    );
+  } catch {
+    /* UI may already be dead */
+  }
+}
 
 function setStatus(message, kind = "") {
   statusEl.textContent = message;
@@ -507,8 +553,11 @@ async function refreshImportedJobsFromStorage() {
 }
 
 function setImportedJobsFilter(filter, { persist = true } = {}) {
-  importedJobsFilter = ["linkedin", "others"].includes(filter) ? filter : "all";
+  const allowed = ["all", "dice", "jobright", "linkedin", "others"];
+  importedJobsFilter = allowed.includes(filter) ? filter : "all";
   filterAllJobsBtn?.classList.toggle("is-active", importedJobsFilter === "all");
+  filterDiceJobsBtn?.classList.toggle("is-active", importedJobsFilter === "dice");
+  filterJobrightJobsBtn?.classList.toggle("is-active", importedJobsFilter === "jobright");
   filterLinkedInJobsBtn?.classList.toggle("is-active", importedJobsFilter === "linkedin");
   filterOtherJobsBtn?.classList.toggle("is-active", importedJobsFilter === "others");
   if (persist) {
@@ -519,21 +568,63 @@ function setImportedJobsFilter(filter, { persist = true } = {}) {
 
 function importedJobMatchesFilter(job) {
   if (job?.status === "completed") return false;
-  if (importedJobsFilter === "linkedin") return isLinkedInSource(job?.source);
-  if (importedJobsFilter === "others") return !isLinkedInSource(job?.source);
+  const source = String(job?.source || "").trim().toLowerCase();
+  if (importedJobsFilter === "dice") return isDiceSource(source);
+  if (importedJobsFilter === "jobright") return isJobrightSource(source);
+  if (importedJobsFilter === "linkedin") return isLinkedInSource(source);
+  if (importedJobsFilter === "others") {
+    return !isLinkedInSource(source) && !isDiceSource(source) && !isJobrightSource(source);
+  }
   return true;
 }
 
-function normalizeJobLink(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
+function formatCaptureStatus(status, running = false) {
+  return buildCaptureSummary(status, { running });
+}
+
+async function refreshCaptureStatus() {
+  if (!captureStatusEl) return;
   try {
-    const url = new URL(raw);
-    url.hash = "";
-    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
-    return url.toString();
+    const res = await chrome.runtime.sendMessage({ type: "get_capture_status" });
+    const data = await chrome.storage.local.get([AUTO_CAPTURE_ENABLED_KEY, LAST_CAPTURE_STATUS_KEY]);
+    if (autoCaptureToggleEl) {
+      autoCaptureToggleEl.checked = data[AUTO_CAPTURE_ENABLED_KEY] !== false;
+    }
+    captureStatusEl.textContent = formatCaptureStatus(
+      res?.status || data[LAST_CAPTURE_STATUS_KEY] || null,
+      Boolean(res?.running)
+    );
   } catch {
-    return raw.replace(/#.*$/, "").replace(/\/+$/, "");
+    captureStatusEl.textContent = "Reload the extension panel after updating.";
+  }
+}
+
+async function runJobCaptureNow() {
+  if (captureNowBtn) captureNowBtn.disabled = true;
+  if (captureStatusEl) captureStatusEl.textContent = "Capturing Dice + Jobright jobs…";
+  setStatus("Running job capture…", "running");
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "run_job_capture",
+      trigger: "manual"
+    });
+    await refreshCaptureStatus();
+    await refreshImportedJobsFromStorage();
+    if (result?.added > 0) setSidebarMode("imported");
+    const msg = result?.summary || formatCaptureStatus(result, false);
+    const when = result?.at ? ` · ${new Date(result.at).toLocaleString()}` : "";
+    setStatus(
+      result?.ok ? `Capture complete: ${msg}${when}` : `Capture failed: ${result?.error || msg}`,
+      result?.ok ? "done" : "error"
+    );
+    if (importStatusEl) importStatusEl.textContent = `${msg}${when}`;
+    if (captureStatusEl) captureStatusEl.textContent = `${msg}${when}`;
+  } catch (err) {
+    const errMsg = String(err?.message || err);
+    setStatus(`Capture failed: ${errMsg}`, "error");
+    if (captureStatusEl) captureStatusEl.textContent = errMsg;
+  } finally {
+    if (captureNowBtn) captureNowBtn.disabled = false;
   }
 }
 
@@ -543,7 +634,7 @@ function renderImportedJobs() {
 
   if (!importedJobsOrder.length) {
     importedJobsListEl.innerHTML =
-      '<p class="import-status" style="margin:0">Import a CSV to populate the jobs list.</p>';
+      '<p class="import-status" style="margin:0">No pending jobs. Use Capture now, Import CSV, or wait for auto-capture.</p>';
     return;
   }
 
@@ -558,8 +649,12 @@ function renderImportedJobs() {
     const card = document.createElement("details");
     card.className = "job-card";
     card.dataset.jobId = jobId;
-    if (job.status === "unavailable") card.classList.add("is-unavailable");
-    if (jobId === importedJobsSelectedId) card.open = true;
+    const isUnavailable = job.status === "unavailable";
+    if (isUnavailable) card.classList.add("is-unavailable");
+    // Keep blocked/compact cards collapsed unless the user explicitly opens them.
+    if (jobId === importedJobsSelectedId && !isUnavailable) {
+      card.open = true;
+    }
 
     const summary = document.createElement("summary");
     summary.className = "job-summary";
@@ -576,16 +671,36 @@ function renderImportedJobs() {
     summary.appendChild(status);
 
     const isCompleted = job.status === "completed";
-    const isUnavailable = job.status === "unavailable";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
+
+    if (isUnavailable) {
+      const blockedLabel = document.createElement("button");
+      blockedLabel.type = "button";
+      blockedLabel.textContent = "Blocked";
+      blockedLabel.disabled = true;
+      summary.appendChild(blockedLabel);
+
+      const unblockBtn = document.createElement("button");
+      unblockBtn.type = "button";
+      unblockBtn.className = "secondary";
+      unblockBtn.textContent = "Unblock";
+      unblockBtn.title = "Restore this job so you can apply again";
+      unblockBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await unblockImportedJob(jobId);
+      });
+      summary.appendChild(unblockBtn);
+
+      card.appendChild(summary);
+      frag.appendChild(card);
+      continue;
+    }
 
     const applySummaryBtn = document.createElement("button");
     applySummaryBtn.type = "button";
     if (isCompleted) {
       applySummaryBtn.textContent = "Done";
-      applySummaryBtn.disabled = true;
-    } else if (isUnavailable) {
-      applySummaryBtn.textContent = "Blocked";
       applySummaryBtn.disabled = true;
     } else if (isInProgress) {
       applySummaryBtn.textContent = "Working";
@@ -878,11 +993,15 @@ async function markImportedJobCompleted(jobId) {
 }
 
 async function setImportedJobUnavailable(jobId, { detail = "Marked no longer available." } = {}) {
+  if (importedJobsSelectedId === jobId) {
+    importedJobsSelectedId = null;
+    await chrome.storage.local.set({ imported_jobs_selected_id: null });
+  }
   const job = await patchImportedJobLocally(jobId, {
     status: "unavailable",
     statusDetail: detail
   });
-  if (job) setStatus(`Blocked (no longer available): ${job.jobTitle || jobId}`);
+  if (job) setStatus(`Blocked: ${job.jobTitle || jobId}`);
 }
 
 async function unblockImportedJob(jobId) {
@@ -1068,7 +1187,8 @@ async function loadSettings() {
     "qa_learn_enabled",
     "imported_jobs_filter",
     "account_credentials",
-    "scraped_job_meta"
+    "scraped_job_meta",
+    "generate_resume_only"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -1089,8 +1209,14 @@ async function loadSettings() {
   if (credentialsSectionEl) credentialsSectionEl.open = Boolean(data.ui_credentials_section_open);
   applyAccountCredentials(data.account_credentials || {});
   if (qaLearnToggleEl) qaLearnToggleEl.checked = data.qa_learn_enabled !== false;
+  if (resumeOnlyToggleEl) {
+    // Default unchecked (false) — only check when user previously enabled it.
+    resumeOnlyToggleEl.checked = data.generate_resume_only === true;
+  }
+  updateGenerateButtonLabel();
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
   refreshQaBank().catch(() => {});
+  refreshCaptureStatus().catch(() => {});
 
   await refreshOutputDirLabel();
   setStatus(data.generation_status || "");
@@ -1123,6 +1249,54 @@ async function pasteJdFromClipboard() {
   }
 }
 
+async function waitForGenerationComplete(timeoutMs = 10 * 60 * 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const data = await chrome.storage.local.get(["generation_running", "generation_status"]);
+    if (!data.generation_running) {
+      return String(data.generation_status || "Ready.");
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new Error("Generation timed out.");
+}
+
+async function startGenerationAndWait() {
+  const collected = await collectJobMetaOrShowError();
+  if (!collected) return { ok: false };
+
+  wasGenerationRunning = true;
+  updateGenerationProgress({
+    running: true,
+    statusText: "Starting resume generation..."
+  });
+  setBusy(true);
+
+  const res = await chrome.runtime.sendMessage({
+    type: "generate_resume",
+    profileId: collected.profileId,
+    jobMeta: collected.jobMeta
+  });
+  if (!res?.ok) {
+    throw new Error(res?.error || "Failed to start generation.");
+  }
+
+  updateGenerationProgress({
+    running: true,
+    statusText: "Calling OpenAI for resume JSON..."
+  });
+
+  const statusText = await waitForGenerationComplete();
+  wasGenerationRunning = false;
+  updateGenerationProgress({ running: false, statusText });
+  setBusy(false);
+
+  if (/failed|error/i.test(statusText)) {
+    throw new Error(statusText);
+  }
+  return { ok: true, status: statusText };
+}
+
 async function scrapeCurrentJobPage() {
   setStatus("Scraping the open job page...", "running");
   setBusy(true);
@@ -1134,8 +1308,6 @@ async function scrapeCurrentJobPage() {
     }
 
     const d = res.jobData || {};
-    // Always overwrite identity fields so a previous scrape/job cannot linger
-    // in the form (and later get written to the tracking sheet).
     jobTitleEl.value = d.jobTitle || "";
     companyNameEl.value = d.companyName || "";
     if (d.jdLink) jdLinkEl.value = d.jdLink;
@@ -1163,11 +1335,25 @@ async function scrapeCurrentJobPage() {
 
     const site = res.site ? ` (${res.site})` : "";
     setStatus(
-      `Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Review the fields, then Generate resume & cover letter.`,
+      `Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`,
+      "running"
+    );
+
+    const gen = await startGenerationAndWait();
+    if (!gen.ok) return;
+
+    setStatus("Resume saved. Running Easy Apply…", "running");
+    setBusy(true);
+    await runEasyApplyOnCurrentPage({ quiet: true });
+
+    setStatus(
+      `Done: scraped${site}, generated ${
+        isResumeOnlyEnabled() ? "resume" : "resume & cover letter"
+      }, and ran Easy Apply (stops before submit).`,
       "done"
     );
   } catch (err) {
-    setStatus(`Scrape failed: ${String(err.message || err)}`, "error");
+    setStatus(`Scrape flow failed: ${String(err.message || err)}`, "error");
   } finally {
     setBusy(false);
     if (scrapePageBtn) scrapePageBtn.disabled = false;
@@ -1281,7 +1467,8 @@ async function collectJobMetaOrShowError() {
     last_jd_text: jd,
     spreadsheet_url: spreadsheetUrl,
     sheets_sheet_name: sheetTabName,
-    sheets_web_app_url: sheetsWebAppUrl
+    sheets_web_app_url: sheetsWebAppUrl,
+    generate_resume_only: isResumeOnlyEnabled()
   });
 
   return {
@@ -1300,7 +1487,8 @@ async function collectJobMetaOrShowError() {
       employmentType: scrapedJobMeta?.employmentType || "",
       salaryMin: scrapedJobMeta?.salaryMin || "",
       salaryMax: scrapedJobMeta?.salaryMax || "",
-      datePosted: scrapedJobMeta?.datePosted || ""
+      datePosted: scrapedJobMeta?.datePosted || "",
+      resumeOnly: isResumeOnlyEnabled()
     }
   };
 }
@@ -1313,6 +1501,28 @@ function setBusy(busy) {
 
 function setCopyAnswerEnabled(enabled) {
   if (copyAiAnswerBtn) copyAiAnswerBtn.disabled = !enabled;
+}
+
+function isResumeOnlyEnabled() {
+  return Boolean(resumeOnlyToggleEl?.checked);
+}
+
+function updateGenerateButtonLabel() {
+  if (!generateResumeBtn) return;
+  const hint = generateResumeBtn.querySelector(".shortcut-hint");
+  const hintHtml = hint ? ` <kbd class="shortcut-hint">${hint.textContent}</kbd>` : "";
+  if (isResumeOnlyEnabled()) {
+    generateResumeBtn.innerHTML = `Generate resume only${hintHtml}`;
+    generateResumeBtn.title = "Alt+Shift+G — Generate resume only (no cover letter)";
+  } else {
+    generateResumeBtn.innerHTML = `Generate resume &amp; cover letter${hintHtml}`;
+    generateResumeBtn.title = "Alt+Shift+G — Generate resume & cover letter";
+  }
+}
+
+async function persistResumeOnlySetting() {
+  await chrome.storage.local.set({ generate_resume_only: isResumeOnlyEnabled() });
+  updateGenerateButtonLabel();
 }
 
 async function generateResumeAndCoverLetter() {
@@ -1481,13 +1691,15 @@ async function clearQaBank() {
   setStatus("Q&A bank cleared.");
 }
 
-async function runEasyApplyOnCurrentPage() {
+async function runEasyApplyOnCurrentPage({ quiet = false } = {}) {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   if (!profileId) {
     setStatus("Select a profile first.");
     return;
   }
-  setStatus("Running Easy Apply (fills each step, stops before submit)...");
+  if (!quiet) {
+    setStatus("Running Easy Apply (fills each step, stops before submit)...");
+  }
   setBusy(true);
   try {
     await chrome.storage.local.set({ selected_profile_id: profileId });
@@ -1495,10 +1707,16 @@ async function runEasyApplyOnCurrentPage() {
     if (!res?.ok && res?.error) {
       throw new Error(res.error);
     }
-    setStatus(res.status || `Easy Apply: ${res.status || "done"}.`);
+    if (!quiet) {
+      setStatus(res.status || `Easy Apply: ${res.status || "done"}.`);
+    }
     await refreshQaBank();
+    return res;
   } catch (err) {
-    setStatus(`Easy Apply failed: ${String(err.message || err)}`);
+    if (!quiet) {
+      setStatus(`Easy Apply failed: ${String(err.message || err)}`);
+    }
+    throw err;
   } finally {
     setBusy(false);
   }
@@ -1629,16 +1847,63 @@ async function resetWorkflow() {
 }
 
 async function openProfileEditor({ mode = "edit", profileId = null } = {}) {
+  if (!isExtensionContextValid()) {
+    handleExtensionContextInvalidated();
+    return;
+  }
+
   const url = new URL(chrome.runtime.getURL("profile-editor.html"));
   url.searchParams.set("mode", mode);
   if (mode === "edit" && profileId) {
     url.searchParams.set("profileId", profileId);
   }
-  await chrome.tabs.create({ url: url.toString() });
+  const href = url.toString();
+
+  try {
+    // The main panel is a popup window. chrome.tabs.create() would open the
+    // editor in a normal browser window behind this panel — looks like a no-op.
+    // Open a dedicated focused popup instead.
+    const win = await chrome.windows.create({
+      url: href,
+      type: "popup",
+      width: 960,
+      height: 820,
+      focused: true
+    });
+    if (win?.id != null) {
+      await chrome.windows.update(win.id, { focused: true });
+    }
+    setStatus(
+      mode === "new" ? "Opened Add profile window." : "Opened Edit profile window.",
+      "done"
+    );
+  } catch (err) {
+    if (isContextInvalidatedError(err)) {
+      handleExtensionContextInvalidated();
+      return;
+    }
+    // Fallback if windows.create is blocked for some reason.
+    try {
+      const tab = await chrome.tabs.create({ url: href, active: true });
+      if (tab?.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      setStatus("Opened profile editor in a browser tab.", "done");
+    } catch (tabErr) {
+      setStatus(
+        `Could not open profile editor: ${String(tabErr?.message || tabErr || err?.message || err)}`,
+        "error"
+      );
+    }
+  }
 }
 
 async function editSelectedProfile() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  if (!profileId) {
+    setStatus("Select a profile first.", "error");
+    return;
+  }
   await openProfileEditor({ mode: "edit", profileId });
 }
 
@@ -1733,8 +1998,26 @@ autofillBtn.addEventListener("click", () => {
 modeManualBtn?.addEventListener("click", () => setSidebarMode("manual"));
 modeImportedBtn?.addEventListener("click", () => setSidebarMode("imported"));
 filterAllJobsBtn?.addEventListener("click", () => setImportedJobsFilter("all"));
+filterDiceJobsBtn?.addEventListener("click", () => setImportedJobsFilter("dice"));
+filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jobright"));
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));
+
+autoCaptureToggleEl?.addEventListener("change", () => {
+  const enabled = Boolean(autoCaptureToggleEl.checked);
+  chrome.runtime
+    .sendMessage({ type: "set_auto_capture", enabled })
+    .catch(() => {});
+  if (captureStatusEl) {
+    captureStatusEl.textContent = enabled
+      ? "Auto-capture enabled (every 4 hours while Chrome is open)."
+      : "Auto-capture disabled.";
+  }
+});
+
+captureNowBtn?.addEventListener("click", () => {
+  runJobCaptureNow().catch((err) => setStatus(String(err.message || err)));
+});
 
 importCsvBtn?.addEventListener("click", () => {
   csvFileInputEl?.click?.();
@@ -1843,8 +2126,11 @@ qaBankSectionEl?.addEventListener("toggle", () => {
 });
 // Live-refresh the bank list as learn mode / autofill grow it.
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (extensionContextDead || !isExtensionContextValid()) return;
   if (area === "local" && changes.qa_bank_version && qaBankSectionEl?.open) {
-    refreshQaBank().catch(() => {});
+    refreshQaBank().catch((err) => {
+      if (isContextInvalidatedError(err)) handleExtensionContextInvalidated();
+    });
   }
 });
 generateAiAnswerBtn?.addEventListener("click", () => {
@@ -1876,6 +2162,7 @@ grantFolderAccessBtn?.addEventListener("click", () => {
 // The profile editor runs in its own tab, so the panel has to pick up profiles
 // it creates or renames instead of only reading the list once at startup.
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (extensionContextDead || !isExtensionContextValid()) return;
   if (area !== "local") return;
   if (!changes.custom_profiles && !changes.selected_profile_id) return;
 
@@ -1892,10 +2179,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (added) {
       setStatus(`Profile added: ${added.label}`, "done");
     }
-  })().catch(() => {});
+  })().catch((err) => {
+    if (isContextInvalidatedError(err)) handleExtensionContextInvalidated();
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (extensionContextDead || !isExtensionContextValid()) return undefined;
   if (message?.type === "flush_pending_output") {
     tryFlushPendingOutput()
       .then((result) => sendResponse(result || { ok: false }))
@@ -1916,61 +2206,108 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "panel_command") {
+    const cmd = message.command;
+    (async () => {
+      try {
+        if (cmd === "scrape_and_apply") {
+          await scrapeCurrentJobPage();
+        } else if (cmd === "generate_docs") {
+          await generateResumeAndCoverLetter();
+        } else if (cmd === "easy_apply") {
+          await runEasyApplyOnCurrentPage();
+        }
+        sendResponse({ ok: true });
+      } catch (err) {
+        setStatus(String(err?.message || err), "error");
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
   return undefined;
 });
 
 document.addEventListener("keydown", (e) => {
   const key = String(e.key || "").toLowerCase();
+  // Ctrl/Cmd+Enter still generates from the panel.
   if ((e.ctrlKey || e.metaKey) && key === "enter") {
     e.preventDefault();
     generateResumeAndCoverLetter().catch(() => {});
   }
 });
 
+resumeOnlyToggleEl?.addEventListener("change", () => {
+  persistResumeOnlySetting().catch(() => {});
+});
+
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));
 setSidebarMode("manual");
 refreshImportedJobsFromStorage().catch(() => {});
-setInterval(async () => {
-  const data = await chrome.storage.local.get([
-    "generation_status",
-    "generation_running",
-    "pending_fs_write",
-    "last_save_ready",
-    "last_save_meta",
-    "imported_jobs_by_id",
-    "imported_jobs_order",
-    "imported_jobs_selected_id",
-    "imported_jobs_version"
-  ]);
-
-  const running = Boolean(data.generation_running);
-  const statusText =
-    typeof data.generation_status === "string" ? data.generation_status : "";
-
-  updateGenerationProgress({ running, statusText });
-  setBusy(running);
-
-  if (wasGenerationRunning && !running) {
-    wasGenerationRunning = false;
-  } else if (running) {
-    wasGenerationRunning = true;
+panelPollTimer = setInterval(async () => {
+  if (extensionContextDead) return;
+  if (!isExtensionContextValid()) {
+    handleExtensionContextInvalidated();
+    return;
   }
+  try {
+    const data = await chrome.storage.local.get([
+      "generation_status",
+      "generation_running",
+      "pending_fs_write",
+      "last_save_ready",
+      "last_save_meta",
+      "imported_jobs_by_id",
+      "imported_jobs_order",
+      "imported_jobs_selected_id",
+      "imported_jobs_version"
+    ]);
 
-  // While a gesture is pending, the click/keydown handler drives the retry.
-  if (data.pending_fs_write && !awaitingFolderPermission) {
-    await tryFlushPendingOutput();
-  }
-  if (data.last_save_ready && data.last_save_meta?.pathLabel) {
-    showSaveBanner(data.last_save_meta.pathLabel);
-    await chrome.storage.local.remove("last_save_ready");
-  }
+    const running = Boolean(data.generation_running);
+    const statusText =
+      typeof data.generation_status === "string" ? data.generation_status : "";
 
-  const nextVersion = Number(data.imported_jobs_version || 0);
-  if (nextVersion && nextVersion !== importedJobsVersion) {
-    importedJobsById = data.imported_jobs_by_id || {};
-    importedJobsOrder = data.imported_jobs_order || [];
-    importedJobsSelectedId = data.imported_jobs_selected_id || null;
-    importedJobsVersion = nextVersion;
-    renderImportedJobs();
+    updateGenerationProgress({ running, statusText });
+    setBusy(running);
+
+    if (wasGenerationRunning && !running) {
+      wasGenerationRunning = false;
+    } else if (running) {
+      wasGenerationRunning = true;
+    }
+
+    // While a gesture is pending, the click/keydown handler drives the retry.
+    if (data.pending_fs_write && !awaitingFolderPermission) {
+      await tryFlushPendingOutput();
+    }
+    if (data.last_save_ready && data.last_save_meta?.pathLabel) {
+      showSaveBanner(data.last_save_meta.pathLabel);
+      await chrome.storage.local.remove("last_save_ready");
+    }
+
+    const nextVersion = Number(data.imported_jobs_version || 0);
+    if (nextVersion && nextVersion !== importedJobsVersion) {
+      importedJobsById = data.imported_jobs_by_id || {};
+      importedJobsOrder = data.imported_jobs_order || [];
+      importedJobsSelectedId = data.imported_jobs_selected_id || null;
+      importedJobsVersion = nextVersion;
+      renderImportedJobs();
+    }
+
+    if (!capturePollRunning) {
+      capturePollRunning = true;
+      refreshCaptureStatus()
+        .catch((err) => {
+          if (isContextInvalidatedError(err)) handleExtensionContextInvalidated();
+        })
+        .finally(() => {
+          capturePollRunning = false;
+        });
+    }
+  } catch (err) {
+    if (isContextInvalidatedError(err) || !isExtensionContextValid()) {
+      handleExtensionContextInvalidated();
+    }
   }
 }, 600);

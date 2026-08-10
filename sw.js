@@ -1,4 +1,10 @@
 import { appendJobToSpreadsheet } from "./sheets.js";
+import {
+  ensureCaptureAlarm,
+  registerCaptureAlarmListener,
+  runUnifiedJobCapture,
+  isCaptureRunning as isJobCaptureRunning
+} from "./capture-runner.js";
 import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson } from "./resume-json.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
@@ -157,9 +163,26 @@ async function handleOpenPanel() {
   }
 }
 
-// Icon click opens the single panel. Keyboard: Ctrl+Shift+G (_execute_action).
+// Icon click / Alt+J opens the single panel.
 chrome.action.onClicked.addListener(() => {
   handleOpenPanel();
+});
+
+chrome.commands.onCommand.addListener((command) => {
+  (async () => {
+    if (command === "scrape_and_apply" || command === "generate_docs" || command === "easy_apply") {
+      await openPanelWindow();
+      // Give the panel a moment to load listeners, then relay the command.
+      await new Promise((r) => setTimeout(r, 350));
+      try {
+        await chrome.runtime.sendMessage({ type: "panel_command", command });
+      } catch {
+        await setStatus(
+          `Shortcut ${command} — open the panel once, then try again (panel was still loading).`
+        );
+      }
+    }
+  })().catch((err) => console.error("[commands]", err));
 });
 
 function startKeepAlive() {
@@ -244,6 +267,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     generation_status: "Ready."
   });
   recoverInterruptedImportedJobs().catch(() => {});
+  ensureCaptureAlarm().catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -254,7 +278,10 @@ chrome.runtime.onStartup.addListener(async () => {
     generation_status: "Ready."
   });
   recoverInterruptedImportedJobs().catch(() => {});
+  ensureCaptureAlarm().catch(() => {});
 });
+
+registerCaptureAlarmListener();
 
 async function setStatus(status) {
   await chrome.storage.local.set({ generation_status: status });
@@ -1608,11 +1635,13 @@ function buildCoverLetterHtml(rawText, contact = {}) {
 
 async function runGenerationPipeline({ profileId, jobMeta }) {
   const { apiKey, model } = await getOpenAiSettings();
+  const meta = jobMeta || {};
+  const resumeOnly = meta.resumeOnly === true;
 
   await setStatus("Building resume prompt...");
-  const resumePrompt = await buildPrompt(profileId, jobMeta.jdText || "", {
-    jobTitle: jobMeta.jobTitle || "",
-    companyName: jobMeta.companyName || ""
+  const resumePrompt = await buildPrompt(profileId, meta.jdText || "", {
+    jobTitle: meta.jobTitle || "",
+    companyName: meta.companyName || ""
   });
 
   await setStatus("Calling OpenAI for resume JSON...");
@@ -1640,12 +1669,16 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   }
   const rawText = JSON.stringify(data, null, 2);
   await chrome.storage.local.set({ last_response: rawText });
-  await setStatus("Resume JSON ready. Rendering PDF + cover letter...");
+  await setStatus(
+    resumeOnly
+      ? "Resume JSON ready. Rendering PDF (skipping cover letter)..."
+      : "Resume JSON ready. Rendering PDF + cover letter..."
+  );
 
-  const saved = await saveResumeAndCoverLetter(rawText, data, jobMeta || {}, {
+  const saved = await saveResumeAndCoverLetter(rawText, data, meta, {
     apiKey,
     model,
-    runCoverLetter: true
+    runCoverLetter: !resumeOnly
   });
 
   return {
@@ -1714,6 +1747,56 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     showSaveNotification(message.pathLabel || "").then(() => {
       safeSendResponse(sendResponse, { ok: true });
     });
+    return true;
+  }
+
+  if (message?.type === "run_job_capture") {
+    (async () => {
+      try {
+        const result = await runUnifiedJobCapture({
+          trigger: message.trigger || "manual"
+        });
+        safeSendResponse(sendResponse, result);
+      } catch (err) {
+        safeSendResponse(sendResponse, {
+          ok: false,
+          error: String(err?.message || err)
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "get_capture_status") {
+    (async () => {
+      try {
+        const data = await chrome.storage.local.get(["last_capture_status"]);
+        safeSendResponse(sendResponse, {
+          ok: true,
+          running: isJobCaptureRunning(),
+          status: data.last_capture_status || null,
+          summary: data.last_capture_status?.summary || ""
+        });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "set_auto_capture") {
+    (async () => {
+      try {
+        const { AUTO_CAPTURE_ENABLED_KEY } = await import("./capture-jobs.js");
+        await chrome.storage.local.set({
+          [AUTO_CAPTURE_ENABLED_KEY]: message.enabled !== false
+        });
+        await ensureCaptureAlarm();
+        safeSendResponse(sendResponse, { ok: true, enabled: message.enabled !== false });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
     return true;
   }
 
@@ -2047,13 +2130,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
         });
 
-        // Generate resume + cover letter first, then autofill the resolved application form.
+        const resumeOnlyStored =
+          (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
+        const genMeta = { ...jobMeta, resumeOnly: resumeOnlyStored };
         await setImportedJobStatus(importedJobId, {
           status: "generating",
-          statusDetail: "Generating resume & cover letter..."
+          statusDetail: resumeOnlyStored
+            ? "Generating resume only..."
+            : "Generating resume & cover letter..."
         });
         await setStatus(`Generating resume for imported job...`);
-        await runGenerationPipeline({ profileId, jobMeta });
+        await runGenerationPipeline({ profileId, jobMeta: genMeta });
 
         await setImportedJobStatus(importedJobId, {
           status: "opening_form",

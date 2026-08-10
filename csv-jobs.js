@@ -109,6 +109,14 @@ export function isLinkedInSource(source) {
   return String(source || "").trim().toLowerCase() === "linkedin";
 }
 
+export function isDiceSource(source) {
+  return String(source || "").trim().toLowerCase() === "dice";
+}
+
+export function isJobrightSource(source) {
+  return String(source || "").trim().toLowerCase() === "jobright";
+}
+
 function buildJdText({ description, keySkills, prependKeySkills }) {
   const jd = String(description || "").trim();
   const skills = String(keySkills || "").trim();

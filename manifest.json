@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Resume GPT Builder",
   "description": "Generate tailored resumes and cover letters via the OpenAI API, then autofill job applications.",
-  "version": "1.5.9",
-  "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "debugger", "notifications"],
+  "version": "1.6.1",
+  "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "debugger", "notifications", "alarms"],
   "host_permissions": [
     "https://api.openai.com/*",
     "https://script.google.com/*",
@@ -50,7 +50,7 @@
     "128": "icons/j-icon.svg"
   },
   "action": {
-    "default_title": "Resume GPT Builder (Ctrl+Shift+G)",
+    "default_title": "Resume GPT Builder (Alt+J)",
     "default_icon": {
       "16": "icons/j-icon.svg",
       "32": "icons/j-icon.svg"
@@ -59,10 +59,31 @@
   "commands": {
     "_execute_action": {
       "suggested_key": {
-        "default": "Ctrl+Shift+G",
-        "mac": "Command+Shift+G"
+        "default": "Alt+J",
+        "mac": "Alt+J"
       },
-      "description": "Open Resume GPT Builder"
+      "description": "Open Resume GPT Builder panel"
+    },
+    "scrape_and_apply": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "Scrape open job → generate → Easy Apply"
+    },
+    "generate_docs": {
+      "suggested_key": {
+        "default": "Alt+Shift+G",
+        "mac": "Alt+Shift+G"
+      },
+      "description": "Generate resume (and cover letter unless resume-only)"
+    },
+    "easy_apply": {
+      "suggested_key": {
+        "default": "Alt+Shift+E",
+        "mac": "Alt+Shift+E"
+      },
+      "description": "Easy Apply on current Dice/Jobright page"
     }
   }
 }
