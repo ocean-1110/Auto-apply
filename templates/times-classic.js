@@ -69,6 +69,12 @@ const CSS = `
       page-break-inside: avoid;
     }
 
+    /* Large skills blocks must be allowed to split or they can be clipped off-page */
+    section.skills {
+      break-inside: auto;
+      page-break-inside: auto;
+    }
+
     h2 {
       margin: 9px 0 4px;
       padding-bottom: 2px;
@@ -95,6 +101,11 @@ const CSS = `
     p.education {
       margin: 0 0 2.6px;
       line-height: 1.2;
+    }
+
+    /* One blank line between Education heading and school/degree content */
+    h2 + p.education {
+      margin-top: 1.15em;
     }
 
     p.education br {
@@ -151,6 +162,7 @@ const CSS = `
     }
 
     h2 + p, h2 + ul, h2 + div, h2 + h3 { margin-top: 3px; }
+    h2 + p.education { margin-top: 1.15em; }
     h3 + p, h3 + ul, .role-meta + p { margin-top: 3px; }
     .role-meta + ul { margin-top: 10px; }
 `;

@@ -7,6 +7,31 @@
  * New AI answers are written back here, building the bank over time.
  */
 
+export const QA_FIELD_TYPES = [
+  { value: "text", label: "Text field" },
+  { value: "textarea", label: "Text area (long text)" },
+  { value: "select", label: "Dropdown / select" },
+  { value: "combobox", label: "Combobox / searchable list" },
+  { value: "checkbox", label: "Checkbox" },
+  { value: "radio", label: "Radio buttons" }
+];
+
+export function normalizeFieldType(value) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "choice") return "select";
+  if (QA_FIELD_TYPES.some((t) => t.value === v)) return v;
+  return "text";
+}
+
+export function fieldTypeLabel(value) {
+  const v = normalizeFieldType(value);
+  return QA_FIELD_TYPES.find((t) => t.value === v)?.label || "Text field";
+}
+
+export function isChoiceFieldType(value) {
+  return ["select", "combobox", "checkbox", "radio"].includes(normalizeFieldType(value));
+}
+
 const DB_NAME = "resume_bot_qa";
 const DB_VERSION = 1;
 const STORE = "qa_bank";
@@ -151,13 +176,22 @@ export async function findQaMatch(profileId, question, { threshold = 0.82 } = {}
  * Insert or update a Q&A. When a matching normalized question already exists for
  * the same profile, its answer is refreshed instead of duplicated.
  */
+function notifyQaChanged() {
+  try {
+    chrome.storage?.local?.set({ qa_bank_version: Date.now() });
+  } catch {
+    /* not in an extension page */
+  }
+}
+
 export async function saveQa({
   profileId = "",
   question,
   answer,
   fieldType = "text",
   source = "ai",
-  site = ""
+  site = "",
+  silent = false
 }) {
   const q = String(question || "").trim();
   const a = String(answer || "").trim();
@@ -177,7 +211,7 @@ export async function saveQa({
     ? {
         ...existing,
         answer: a,
-        fieldType: fieldType || existing.fieldType || "text",
+        fieldType: normalizeFieldType(fieldType || existing.fieldType || "text"),
         source,
         site: site || existing.site || "",
         updatedAt: now
@@ -190,7 +224,7 @@ export async function saveQa({
         question: q,
         questionNorm,
         answer: a,
-        fieldType: fieldType || "text",
+        fieldType: normalizeFieldType(fieldType || "text"),
         source,
         site: site || "",
         timesUsed: 0,
@@ -199,6 +233,7 @@ export async function saveQa({
       };
 
   await reqToPromise(store.put(record));
+  if (!silent) notifyQaChanged();
   return record;
 }
 
@@ -223,30 +258,44 @@ export async function getAllQa(profileId = null) {
   return filtered.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
 }
 
+export async function getQaById(id) {
+  if (!id) return null;
+  const db = await openDb();
+  return (await reqToPromise(txStore(db, "readonly").get(id)).catch(() => null)) || null;
+}
+
+export async function getQaCount(profileId = null) {
+  const rows = await getAllQa(profileId);
+  return rows.length;
+}
+
 export async function deleteQa(id) {
   if (!id) return;
   const db = await openDb();
   await reqToPromise(txStore(db, "readwrite").delete(id)).catch(() => {});
+  notifyQaChanged();
 }
 
 export async function clearQa(profileId = null) {
   const db = await openDb();
   if (profileId == null) {
     await reqToPromise(txStore(db, "readwrite").clear()).catch(() => {});
+    notifyQaChanged();
     return;
   }
   const rows = await getAllQa(profileId);
   const store = txStore(db, "readwrite");
   for (const r of rows) store.delete(r.id);
+  notifyQaChanged();
 }
 
-export async function exportQa() {
-  const rows = await getAllQa(null);
+export async function exportQa(profileId = null) {
+  const rows = await getAllQa(profileId);
   return rows.map((r) => ({
     profileId: r.profileId || "",
     question: r.question,
     answer: r.answer,
-    fieldType: r.fieldType || "text",
+    fieldType: normalizeFieldType(r.fieldType || "text"),
     source: r.source || "user",
     site: r.site || "",
     timesUsed: Number(r.timesUsed || 0)
@@ -263,9 +312,11 @@ export async function importQa(records) {
       answer: rec.answer,
       fieldType: rec.fieldType || "text",
       source: rec.source || "user",
-      site: rec.site || ""
+      site: rec.site || "",
+      silent: true
     });
     if (saved) imported += 1;
   }
+  if (imported) notifyQaChanged();
   return imported;
 }

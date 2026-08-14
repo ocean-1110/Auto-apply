@@ -752,13 +752,6 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.qa-add {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
 .qa-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -768,6 +761,10 @@ button:disabled {
 .qa-toolbar button {
   width: auto;
   flex: 0 0 auto;
+}
+
+#qaOpenEditorBtn {
+  width: auto;
 }
 
 .qa-list {

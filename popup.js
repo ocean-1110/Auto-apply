@@ -19,7 +19,7 @@ import {
   buildCaptureSummary,
   normalizeJobLink
 } from "./capture-jobs.js";
-import { getAllQa, saveQa, deleteQa, clearQa, exportQa, importQa } from "./qa-store.js";
+import { getQaCount } from "./qa-store.js";
 
 const APPS_SCRIPT_SOURCE = `/**
  * Resume GPT Builder — paste into Extensions → Apps Script on your spreadsheet,
@@ -204,14 +204,7 @@ const autofillBtn = document.getElementById("autofillBtn");
 const easyApplyBtn = document.getElementById("easyApplyBtn");
 const qaBankSectionEl = document.getElementById("qaBankSection");
 const qaBankNoteEl = document.getElementById("qaBankNote");
-const qaBankListEl = document.getElementById("qaBankList");
-const qaNewQuestionEl = document.getElementById("qaNewQuestion");
-const qaNewAnswerEl = document.getElementById("qaNewAnswer");
-const qaAddBtn = document.getElementById("qaAddBtn");
-const qaExportBtn = document.getElementById("qaExportBtn");
-const qaImportBtn = document.getElementById("qaImportBtn");
-const qaImportInput = document.getElementById("qaImportInput");
-const qaClearBtn = document.getElementById("qaClearBtn");
+const qaOpenEditorBtn = document.getElementById("qaOpenEditorBtn");
 const qaLearnToggleEl = document.getElementById("qaLearnToggle");
 const credentialsSectionEl = document.getElementById("credentialsSection");
 const credentialsNoteEl = document.getElementById("credentialsNote");
@@ -1342,14 +1335,14 @@ async function scrapeCurrentJobPage() {
     const gen = await startGenerationAndWait();
     if (!gen.ok) return;
 
-    setStatus("Resume saved. Running Easy Apply…", "running");
+    setStatus("Resume saved. Running Auto Apply…", "running");
     setBusy(true);
     await runEasyApplyOnCurrentPage({ quiet: true });
 
     setStatus(
       `Done: scraped${site}, generated ${
         isResumeOnlyEnabled() ? "resume" : "resume & cover letter"
-      }, and ran Easy Apply (stops before submit).`,
+      }, and ran Auto Apply (stops before submit).`,
       "done"
     );
   } catch (err) {
@@ -1561,134 +1554,63 @@ async function generateResumeAndCoverLetter() {
 // ---- Q&A bank UI ----------------------------------------------------------
 
 async function refreshQaBank() {
-  if (!qaBankListEl) return;
-  let rows = [];
+  if (!qaBankNoteEl) return;
   try {
-    rows = await getAllQa(null);
-  } catch (err) {
-    qaBankListEl.innerHTML = `<p class="hint">Could not load Q&A bank: ${String(err.message || err)}</p>`;
+    const profileId = profileSelectEl?.value || "";
+    const [profileCount, sharedCount] = await Promise.all([
+      getQaCount(profileId),
+      getQaCount("")
+    ]);
+    const parts = [];
+    if (profileCount) parts.push(`${profileCount} this profile`);
+    if (sharedCount) parts.push(`${sharedCount} shared`);
+    qaBankNoteEl.textContent = parts.length ? parts.join(" · ") : "0 saved";
+  } catch {
+    qaBankNoteEl.textContent = "Q&A";
+  }
+}
+
+async function openQaEditor() {
+  if (!isExtensionContextValid()) {
+    handleExtensionContextInvalidated();
     return;
   }
 
-  if (qaBankNoteEl) qaBankNoteEl.textContent = `${rows.length} saved`;
+  const url = new URL(chrome.runtime.getURL("qa-editor.html"));
+  const profileId = profileSelectEl?.value || "";
+  if (profileId) url.searchParams.set("profileId", profileId);
+  const href = url.toString();
 
-  qaBankListEl.innerHTML = "";
-  if (!rows.length) {
-    qaBankListEl.innerHTML =
-      '<p class="hint" style="margin:0">No saved answers yet. They are added as you autofill applications.</p>';
-    return;
-  }
-
-  const frag = document.createDocumentFragment();
-  for (const row of rows) {
-    const item = document.createElement("div");
-    item.className = "qa-item";
-
-    const q = document.createElement("p");
-    q.className = "qa-item-q";
-    q.textContent = row.question;
-    item.appendChild(q);
-
-    const answer = document.createElement("textarea");
-    answer.className = "qa-item-a";
-    answer.value = row.answer;
-    answer.addEventListener("change", async () => {
-      const next = String(answer.value || "").trim();
-      if (!next) return;
-      await saveQa({
-        profileId: row.profileId || "",
-        question: row.question,
-        answer: next,
-        fieldType: row.fieldType || "text",
-        source: "user",
-        site: row.site || ""
-      });
-      setStatus("Q&A updated.");
+  try {
+    const win = await chrome.windows.create({
+      url: href,
+      type: "popup",
+      width: 980,
+      height: 860,
+      focused: true
     });
-    item.appendChild(answer);
-
-    const meta = document.createElement("div");
-    meta.className = "qa-item-meta";
-
-    const tag = document.createElement("span");
-    tag.className = `qa-source-tag ${row.source === "user" ? "qa-source-user" : "qa-source-ai"}`;
-    tag.textContent = row.source === "user" ? "manual" : "ai";
-    meta.appendChild(tag);
-
-    const used = document.createElement("span");
-    used.textContent = `used ${Number(row.timesUsed || 0)}×`;
-    meta.appendChild(used);
-
-    const actions = document.createElement("div");
-    actions.className = "qa-item-actions";
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "secondary danger compact";
-    del.textContent = "Delete";
-    del.addEventListener("click", async () => {
-      await deleteQa(row.id);
-      await refreshQaBank();
-      setStatus("Q&A deleted.");
-    });
-    actions.appendChild(del);
-    meta.appendChild(actions);
-
-    item.appendChild(meta);
-    frag.appendChild(item);
-  }
-  qaBankListEl.appendChild(frag);
-}
-
-async function addQaFromForm() {
-  const question = String(qaNewQuestionEl?.value || "").trim();
-  const answer = String(qaNewAnswerEl?.value || "").trim();
-  if (!question || !answer) {
-    setStatus("Enter both a question and an answer to save.");
-    return;
-  }
-  const profileId = profileSelectEl.value || "";
-  await saveQa({ profileId, question, answer, source: "user" });
-  if (qaNewQuestionEl) qaNewQuestionEl.value = "";
-  if (qaNewAnswerEl) qaNewAnswerEl.value = "";
-  await refreshQaBank();
-  setStatus("Saved to Q&A bank.");
-}
-
-async function exportQaBank() {
-  try {
-    const rows = await exportQa();
-    const blob = new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "qa-bank.json";
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus(`Exported ${rows.length} Q&A entr${rows.length === 1 ? "y" : "ies"}.`);
+    if (win?.id != null) {
+      await chrome.windows.update(win.id, { focused: true });
+    }
+    setStatus("Opened Q&A editor.", "done");
   } catch (err) {
-    setStatus(`Export failed: ${String(err.message || err)}`);
+    if (isContextInvalidatedError(err)) {
+      handleExtensionContextInvalidated();
+      return;
+    }
+    try {
+      const tab = await chrome.tabs.create({ url: href, active: true });
+      if (tab?.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      setStatus("Opened Q&A editor in a browser tab.", "done");
+    } catch (tabErr) {
+      setStatus(
+        `Could not open Q&A editor: ${String(tabErr?.message || tabErr || err?.message || err)}`,
+        "error"
+      );
+    }
   }
-}
-
-async function importQaBankFromFile(file) {
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const parsed = JSON.parse(text);
-    const count = await importQa(parsed);
-    await refreshQaBank();
-    setStatus(`Imported ${count} Q&A entr${count === 1 ? "y" : "ies"}.`);
-  } catch (err) {
-    setStatus(`Import failed: ${String(err.message || err)}`);
-  }
-}
-
-async function clearQaBank() {
-  const ok = window.confirm("Delete ALL saved Q&A answers? This cannot be undone.");
-  if (!ok) return;
-  await clearQa(null);
-  await refreshQaBank();
-  setStatus("Q&A bank cleared.");
 }
 
 async function runEasyApplyOnCurrentPage({ quiet = false } = {}) {
@@ -1698,7 +1620,7 @@ async function runEasyApplyOnCurrentPage({ quiet = false } = {}) {
     return;
   }
   if (!quiet) {
-    setStatus("Running Easy Apply (fills each step, stops before submit)...");
+    setStatus("Running Auto Apply (fills each step, stops before submit)...");
   }
   setBusy(true);
   try {
@@ -1708,13 +1630,13 @@ async function runEasyApplyOnCurrentPage({ quiet = false } = {}) {
       throw new Error(res.error);
     }
     if (!quiet) {
-      setStatus(res.status || `Easy Apply: ${res.status || "done"}.`);
+      setStatus(res.status || `Auto Apply: ${res.status || "done"}.`);
     }
     await refreshQaBank();
     return res;
   } catch (err) {
     if (!quiet) {
-      setStatus(`Easy Apply failed: ${String(err.message || err)}`);
+      setStatus(`Auto Apply failed: ${String(err.message || err)}`);
     }
     throw err;
   } finally {
@@ -1936,6 +1858,7 @@ profileSelectEl.addEventListener("change", () => {
   syncDeleteButton();
   saveSelectedProfile(profileSelectEl.value).catch(() => {});
   applyProfileTemplateDefault(profileSelectEl.value).catch(() => {});
+  refreshQaBank().catch(() => {});
 });
 
 templateSelectEl.addEventListener("change", () => {
@@ -2100,21 +2023,8 @@ csvFileInputEl?.addEventListener("change", async () => {
 easyApplyBtn?.addEventListener("click", () => {
   runEasyApplyOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
 });
-qaAddBtn?.addEventListener("click", () => {
-  addQaFromForm().catch((err) => setStatus(String(err.message || err)));
-});
-qaExportBtn?.addEventListener("click", () => {
-  exportQaBank().catch((err) => setStatus(String(err.message || err)));
-});
-qaImportBtn?.addEventListener("click", () => qaImportInput?.click());
-qaImportInput?.addEventListener("change", () => {
-  const file = qaImportInput.files?.[0];
-  importQaBankFromFile(file).finally(() => {
-    if (qaImportInput) qaImportInput.value = "";
-  });
-});
-qaClearBtn?.addEventListener("click", () => {
-  clearQaBank().catch((err) => setStatus(String(err.message || err)));
+qaOpenEditorBtn?.addEventListener("click", () => {
+  openQaEditor().catch((err) => setStatus(String(err.message || err)));
 });
 qaLearnToggleEl?.addEventListener("change", () => {
   const enabled = Boolean(qaLearnToggleEl.checked);
@@ -2124,10 +2034,9 @@ qaLearnToggleEl?.addEventListener("change", () => {
 qaBankSectionEl?.addEventListener("toggle", () => {
   if (qaBankSectionEl.open) refreshQaBank().catch(() => {});
 });
-// Live-refresh the bank list as learn mode / autofill grow it.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (extensionContextDead || !isExtensionContextValid()) return;
-  if (area === "local" && changes.qa_bank_version && qaBankSectionEl?.open) {
+  if (area === "local" && changes.qa_bank_version) {
     refreshQaBank().catch((err) => {
       if (isContextInvalidatedError(err)) handleExtensionContextInvalidated();
     });

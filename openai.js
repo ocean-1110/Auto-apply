@@ -1,4 +1,15 @@
-export const DEFAULT_OPENAI_MODEL = "gpt-4o";
+export const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
+
+export function estimateTokensFromText(text) {
+  return Math.max(1, Math.ceil(String(text || "").length / 4));
+}
+
+export function estimateTokensFromMessages(messages = []) {
+  return (messages || []).reduce(
+    (n, m) => n + estimateTokensFromText(m?.content),
+    0
+  );
+}
 
 /** Large enough for full resume JSON (6 jobs, dense skills, long bullets). */
 const DEFAULT_MAX_TOKENS = 16384;
@@ -70,7 +81,20 @@ export async function chatCompletion({
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("OpenAI returned an empty response.");
   }
-  return content.trim();
+  const usageRaw = payload?.usage || {};
+  const promptTokens =
+    Number(usageRaw.prompt_tokens) || estimateTokensFromMessages(messages);
+  const completionTokens =
+    Number(usageRaw.completion_tokens) || estimateTokensFromText(content);
+  return {
+    content: content.trim(),
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: Number(usageRaw.total_tokens) || promptTokens + completionTokens,
+      estimated: !usageRaw.prompt_tokens
+    }
+  };
 }
 
 export const RESUME_JSON_SYSTEM_PROMPT = `You generate tailored technical resumes as a single valid JSON object only — no markdown fences, no commentary.

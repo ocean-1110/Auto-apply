@@ -6,7 +6,7 @@ import {
   isCaptureRunning as isJobCaptureRunning
 } from "./capture-runner.js";
 import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
-import { resumeJsonToHtml, extractResumeJson } from "./resume-json.js";
+import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeSkills } from "./resume-json.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import {
   chatCompletion,
@@ -15,6 +15,13 @@ import {
 } from "./openai.js";
 import { getEnv } from "./env.js";
 import { getApplicantInfo, saveApplicantInfo } from "./applicant-info.js";
+import {
+  buildWorkHistory,
+  buildEducationHistory,
+  hasFormHistory,
+  getStoredResumeJson,
+  persistRoleSummaries
+} from "./history.js";
 import { awaitTabComplete } from "./tab-utils.js";
 import {
   getOutputDirectoryHandle,
@@ -24,8 +31,19 @@ import {
   setLastSaveMeta
 } from "./fs-output.js";
 import { setLastGeneratedDocs, pickUploadDocsFromBundle, getLastGeneratedDocs } from "./upload-assets.js";
-import { generateHumanizedApplicationAnswers } from "./ai-answers.js";
+import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, isComplexQuestion, shouldBankAnswer, generateRoleSummaries } from "./ai-answers.js";
 import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
+import {
+  generateApplicationBrief,
+  getApplicationBrief,
+  storeApplicationBrief
+} from "./application-brief.js";
+import {
+  ensureCostSession,
+  logLlmCall,
+  logFillHits,
+  getCostSummaryText
+} from "./cost-tracker.js";
 
 // Service worker entry (v1.3.5)
 let isRunning = false;
@@ -365,7 +383,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-10.2";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-13.1";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
 function bumpQaVersion() {
@@ -540,41 +558,186 @@ async function getCurrentApplicationTab() {
   return httpTabs.find((t) => t.active) || httpTabs[0] || null;
 }
 
-/**
- * Answer free-text application questions. These depend on the role/JD (e.g.
- * "describe your most challenging project"), so they are always generated fresh
- * by OpenAI and never read from or written to the Q&A bank. Reusable structured
- * answers (dropdowns/checkboxes/radios) are handled separately by the bank.
- * @returns {Promise<Array<{ id: string, answer: string }>>}
- */
-async function resolveTextAnswers({ questions, applicantInfo, jobMeta = {}, resumeText = "" }) {
-  const list = (questions || []).filter((q) => q?.id && q?.label);
-  if (!list.length) return [];
+async function getAutofillAiContext() {
+  const stored = await chrome.storage.local.get([
+    "last_job_title",
+    "last_company_name",
+    "last_jd_text",
+    "last_jd_link",
+    "last_response",
+    "last_application_brief",
+    "last_resume_json"
+  ]);
+  return {
+    jobMeta: {
+      jobTitle: stored.last_job_title || "",
+      companyName: stored.last_company_name || "",
+      jdText: stored.last_jd_text || "",
+      jdLink: stored.last_jd_link || ""
+    },
+    resumeText: stored.last_response || "",
+    applicationBrief: stored.last_application_brief || null,
+    resumeData: stored.last_resume_json && typeof stored.last_resume_json === "object"
+      ? stored.last_resume_json
+      : null
+  };
+}
 
-  const { apiKey, model } = await getOpenAiSettings();
-  const aiAnswers = await generateHumanizedApplicationAnswers({
-    apiKey,
-    model,
-    questions: list,
-    applicantInfo,
-    jobMeta,
-    resumeText
-  });
+async function loadFormHistory(applicantInfo = {}, jobMeta = {}) {
+  const resume = (await getStoredResumeJson()) || {};
+  const workHistory = buildWorkHistory(resume);
+  const educationHistory = buildEducationHistory(resume, applicantInfo);
 
-  const byId = new Map(aiAnswers.map((a) => [a.id, String(a?.answer || "").trim()]));
-  return list
-    .map((q) => ({ id: q.id, answer: byId.get(q.id) || "" }))
-    .filter((row) => row.answer);
+  const needsSummary = workHistory.filter((job) => String(job.summary || "").trim().length < 80);
+  if (needsSummary.length) {
+    try {
+      const { apiKey, model } = await getOpenAiSettings();
+      if (apiKey) {
+        const result = await generateRoleSummaries({
+          apiKey,
+          model,
+          jobs: workHistory,
+          jobMeta
+        });
+        if (result.usage) {
+          await logLlmCall({
+            purpose: "role-summaries",
+            model,
+            inputTokens: result.usage.prompt_tokens,
+            outputTokens: result.usage.completion_tokens
+          });
+        }
+        const byIndex = new Map((result.summaries || []).map((row) => [row.index, row.summary]));
+        for (const job of workHistory) {
+          const next = String(byIndex.get(job.index) || "").trim();
+          if (next) job.summary = next;
+        }
+        await persistRoleSummaries(workHistory);
+      }
+    } catch {
+      /* summaries are best-effort; bullets fallback remains */
+    }
+  }
+
+  return { workHistory, educationHistory };
+}
+
+async function saveReusableQa({ profileId, question, answer, fieldType, site = "" }) {
+  try {
+    await saveQa({
+      profileId: profileId || "",
+      question,
+      answer,
+      fieldType,
+      source: "ai",
+      site
+    });
+    bumpQaVersion();
+  } catch {
+    /* bank write is best-effort */
+  }
 }
 
 /**
- * Resolve stored answers for novel CHOICE questions (dropdown / checkbox /
- * radio) from the Q&A bank only — never AI. Returns just the ones with a match.
- * @returns {Promise<Array<{ id: string, answer: string }>>}
+ * Answer application questions: Q&A bank first for reusable/simple items,
+ * then OpenAI last resort. Complex JD essays are never stored in the bank.
+ * @returns {Promise<Array<{ id: string, answer: string, source?: string }>>}
  */
-async function resolveChoiceAnswersFromBank(profileId, questions) {
+async function resolveTextAnswers({
+  questions,
+  applicantInfo,
+  jobMeta = {},
+  resumeText = "",
+  profileId = "",
+  applicationBrief = null,
+  site = ""
+}) {
+  const list = (questions || []).filter((q) => q?.id && q?.label);
+  if (!list.length) return [];
+
+  const resolved = [];
+  const stillNeed = [];
+  let bankHits = 0;
+
+  for (const q of list) {
+    if (!isComplexQuestion(q)) {
+      let match = null;
+      try {
+        match = await findQaMatch(profileId, q.label);
+      } catch {
+        match = null;
+      }
+      if (match?.record?.answer) {
+        resolved.push({ id: q.id, answer: match.record.answer, source: "bank" });
+        recordQaUsage(match.record.id).catch(() => {});
+        bankHits += 1;
+        continue;
+      }
+    }
+    stillNeed.push(q);
+  }
+
+  if (stillNeed.length) {
+    const { apiKey, model } = await getOpenAiSettings();
+    const brief = applicationBrief || (await getApplicationBrief());
+    const aiResult = await generateHumanizedApplicationAnswers({
+      apiKey,
+      model,
+      questions: stillNeed,
+      applicantInfo,
+      jobMeta,
+      resumeText,
+      applicationBrief: brief
+    });
+    if (aiResult.usage) {
+      await logLlmCall({
+        purpose: "autofill_text",
+        model,
+        inputTokens: aiResult.usage.prompt_tokens,
+        outputTokens: aiResult.usage.completion_tokens
+      });
+    }
+    const byId = new Map(
+      (aiResult.answers || []).map((a) => [a.id, String(a?.answer || "").trim()])
+    );
+    for (const q of stillNeed) {
+      const answer = byId.get(q.id) || "";
+      if (!answer) continue;
+      resolved.push({ id: q.id, answer, source: "ai" });
+      if (shouldBankAnswer(q, answer, q.fieldType || "text")) {
+        await saveReusableQa({
+          profileId,
+          question: q.label,
+          answer,
+          fieldType: q.fieldType || "text",
+          site
+        });
+      }
+    }
+  }
+
+  resolved.bankHits = bankHits;
+  resolved.aiAnswers = resolved.filter((r) => r.source === "ai").length;
+  return resolved;
+}
+
+/**
+ * Resolve CHOICE questions: Q&A bank first, then AI constrained to options.
+ * AI answers are written back to the bank.
+ */
+async function resolveChoiceAnswers(
+  profileId,
+  questions,
+  applicantInfo = {},
+  jobMeta = {},
+  resumeText = "",
+  { applicationBrief = null, site = "" } = {}
+) {
   const list = (questions || []).filter((q) => q?.id && q?.label);
   const resolved = [];
+  const stillNeed = [];
+  let bankHits = 0;
+
   for (const q of list) {
     let match = null;
     try {
@@ -583,10 +746,61 @@ async function resolveChoiceAnswersFromBank(profileId, questions) {
       match = null;
     }
     if (match?.record?.answer) {
-      resolved.push({ id: q.id, answer: match.record.answer });
+      resolved.push({ id: q.id, answer: match.record.answer, source: "bank" });
       recordQaUsage(match.record.id).catch(() => {});
+      bankHits += 1;
+    } else {
+      stillNeed.push(q);
     }
   }
+
+  if (stillNeed.length) {
+    try {
+      const { apiKey, model } = await getOpenAiSettings();
+      const withOptions = stillNeed.filter((q) => Array.isArray(q.options) && q.options.length);
+      if (withOptions.length) {
+        await setStatus(`Choosing answers for ${withOptions.length} dropdown/radio question(s)...`);
+        const brief = applicationBrief || (await getApplicationBrief());
+        const aiResult = await generateConstrainedChoiceAnswers({
+          apiKey,
+          model,
+          questions: withOptions,
+          applicantInfo,
+          jobMeta,
+          resumeText,
+          applicationBrief: brief
+        });
+        if (aiResult.usage) {
+          await logLlmCall({
+            purpose: "autofill_choice",
+            model,
+            inputTokens: aiResult.usage.prompt_tokens,
+            outputTokens: aiResult.usage.completion_tokens
+          });
+        }
+        const qById = new Map(withOptions.map((q) => [q.id, q]));
+        for (const row of aiResult.answers || []) {
+          if (!row?.id || !row?.answer) continue;
+          resolved.push({ id: row.id, answer: row.answer, source: "ai" });
+          const q = qById.get(row.id);
+          if (q?.label) {
+            await saveReusableQa({
+              profileId,
+              question: q.label,
+              answer: row.answer,
+              fieldType: q.fieldType || "select",
+              site
+            });
+          }
+        }
+      }
+    } catch {
+      /* choice AI is best-effort */
+    }
+  }
+
+  resolved.bankHits = bankHits;
+  resolved.aiAnswers = resolved.filter((r) => r.source === "ai").length;
   return resolved;
 }
 
@@ -600,13 +814,21 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
   const hasAnyValue = Object.values(applicantInfo).some((v) => String(v || "").trim());
   const docs = await getLastGeneratedDocs();
   const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
+  const ctx = await getAutofillAiContext();
+  let history = { workHistory: [], educationHistory: [] };
+  try {
+    history = await loadFormHistory(applicantInfo, ctx.jobMeta);
+  } catch {
+    history = { workHistory: [], educationHistory: [] };
+  }
+  const hasHistory = hasFormHistory(history.workHistory, history.educationHistory);
 
-  if (!hasAnyValue && !hasUploadDocs) {
+  if (!hasAnyValue && !hasUploadDocs && !hasHistory) {
     return {
       ok: false,
       skipped: true,
       error:
-        "No applicant info or generated PDFs found. Edit profile info and/or generate a resume first."
+        "No applicant info, generated PDFs, or resume history found. Edit profile info and/or generate a resume first."
     };
   }
 
@@ -636,6 +858,8 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
     type: "autofill_application",
     applicantInfo,
     credentials,
+    workHistory: history.workHistory,
+    educationHistory: history.educationHistory,
     uploadFiles: {
       resume: docs?.resume || null,
       coverLetter: docs?.coverLetter || null
@@ -645,12 +869,17 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
 
   let aiFilledCount = 0;
   let choiceFilledCount = 0;
+  let bankHits = 0;
+  let llmAnswerCount = 0;
   const unmatched = Array.isArray(result?.unmatchedQuestions) ? result.unmatchedQuestions : [];
   const unmatchedChoice = Array.isArray(result?.unmatchedChoiceQuestions)
     ? result.unmatchedChoiceQuestions
     : [];
 
-  // Reuse stored answers for novel dropdown/checkbox/radio questions (bank only).
+  const site = hostnameFromUrl(tab.url || "");
+  await ensureCostSession(ctx.jobMeta.jdLink || ctx.jobMeta.jobTitle || tab.url || "");
+
+  // Q&A bank first for dropdown/checkbox/radio, then AI last resort (saved back).
   if (unmatchedChoice.length) {
     try {
       const byFrame = new Map();
@@ -660,7 +889,16 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         byFrame.get(fid).push(q);
       }
       for (const [frameId, questions] of byFrame) {
-        const choiceAnswers = await resolveChoiceAnswersFromBank(profileId, questions);
+        const choiceAnswers = await resolveChoiceAnswers(
+          profileId,
+          questions,
+          applicantInfo,
+          ctx.jobMeta,
+          ctx.resumeText,
+          { applicationBrief: ctx.applicationBrief, site }
+        );
+        bankHits += Number(choiceAnswers.bankHits || 0);
+        llmAnswerCount += Number(choiceAnswers.aiAnswers || 0);
         if (!choiceAnswers.length) continue;
         const cRes = await sendMessageToTab(
           tab.id,
@@ -675,14 +913,13 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
   }
 
   if (unmatched.length) {
-    await setStatus(`Generating fresh AI answer(s) for ${unmatched.length} question(s)...`);
+    const needAiCount = unmatched.filter((q) => isComplexQuestion(q)).length;
+    await setStatus(
+      needAiCount
+        ? `Checking Q&A bank, then AI for ${unmatched.length} question(s)...`
+        : `Checking Q&A bank for ${unmatched.length} question(s)...`
+    );
     try {
-      const stored = await chrome.storage.local.get([
-        "last_job_title",
-        "last_company_name",
-        "last_jd_text",
-        "last_response"
-      ]);
       const byFrame = new Map();
       for (const q of unmatched) {
         const fid = q.frameId;
@@ -693,15 +930,16 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         const answers = await resolveTextAnswers({
           questions,
           applicantInfo,
-          jobMeta: {
-            jobTitle: stored.last_job_title || "",
-            companyName: stored.last_company_name || "",
-            jdText: stored.last_jd_text || ""
-          },
-          resumeText: stored.last_response || ""
+          jobMeta: ctx.jobMeta,
+          resumeText: ctx.resumeText,
+          profileId,
+          applicationBrief: ctx.applicationBrief,
+          site
         });
+        bankHits += Number(answers.bankHits || 0);
+        llmAnswerCount += Number(answers.aiAnswers || 0);
         if (!answers.length) continue;
-        await setStatus(`Filling ${answers.length} AI answer(s)...`);
+        await setStatus(`Filling ${answers.length} answer(s)...`);
         const aiResult = await sendMessageToTab(
           tab.id,
           { type: "autofill_ai_answers", answers },
@@ -710,7 +948,11 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         aiFilledCount += Number(aiResult?.filledCount || 0);
       }
     } catch (aiErr) {
-      // Keep profile/file autofill success even if AI Q&A fails.
+      await logFillHits({
+        profileHits: Number(result?.filledCount || 0),
+        bankHits,
+        aiAnswers: llmAnswerCount
+      });
       return {
         ok: Boolean(result?.ok),
         tabId: tab.id,
@@ -718,10 +960,17 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
         ...result,
         aiFilledCount: 0,
         choiceFilledCount,
+        bankHits,
         aiError: String(aiErr?.message || aiErr)
       };
     }
   }
+
+  await logFillHits({
+    profileHits: Number(result?.filledCount || 0),
+    bankHits,
+    aiAnswers: llmAnswerCount
+  });
 
   return {
     ok: Boolean(result?.ok),
@@ -729,62 +978,350 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
     tabUrl: tab.url || "",
     ...result,
     aiFilledCount,
-    choiceFilledCount
+    choiceFilledCount,
+    bankHits
   };
 }
 
 /**
- * Drive a multi-step "Easy Apply" flow (Dice / Jobright) on a tab: fill each
- * step from profile + Q&A bank + AI, advance through the modal, and stop before
- * the final submit (never auto-submits). The content script owns the DOM loop
- * and calls back for answers via `easy_apply_answer_questions`.
+ * Drive multi-step Auto Apply on any ATS / job board:
+ * fill all frames → if Next/Continue (no final Submit) click it → wait for
+ * next page/tab/step → refill. Stops before Submit so the user can review.
  */
-async function startEasyApplyOnTab(profileId, tabId = null) {
-  const applicantInfo = await getApplicantInfo(profileId);
-  const docs = await getLastGeneratedDocs();
+async function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
+function pickBestApplyAction(frameResults = []) {
+  const rank = { next: 1, review: 2, entry: 3, submit: 4 };
+  let best = null;
+  for (const f of frameResults) {
+    if (!f?.action?.type) continue;
+    const cand = {
+      frameId: f.frameId,
+      action: f.action,
+      signature: f.signature || "",
+      href: f.href || "",
+      isApplicationForm: Boolean(f.isApplicationForm)
+    };
+    if (!best) {
+      best = cand;
+      continue;
+    }
+    const br = rank[best.action.type] ?? 9;
+    const cr = rank[cand.action.type] ?? 9;
+    if (cr < br) best = cand;
+    else if (cr === br && cand.isApplicationForm && !best.isApplicationForm) best = cand;
+  }
+  const anyForm = frameResults.some((f) => f?.isApplicationForm);
+  const blockedReason =
+    frameResults.find((f) => f?.blockedReason)?.blockedReason || "";
+  const jobUnavailable =
+    frameResults.find((f) => f?.jobUnavailable)?.jobUnavailable || "";
+  const applyUrls = [];
+  for (const f of frameResults) {
+    for (const u of f?.applyUrls || []) {
+      if (u && !applyUrls.includes(u)) applyUrls.push(u);
+    }
+  }
+  return {
+    best,
+    anyForm,
+    blockedReason,
+    jobUnavailable,
+    applyUrls,
+    signature: best?.signature || frameResults[0]?.signature || "",
+    href: best?.href || frameResults[0]?.href || ""
+  };
+}
+
+async function getApplyActionFromTab(tabId) {
+  await ensureAutofillScript(tabId);
+  const frames = await sendMessageToAllFrames(tabId, { type: "get_apply_action" }, { attempts: 1 });
+  return pickBestApplyAction(frames);
+}
+
+async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
+  const start = Date.now();
+  const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
+
+  while (Date.now() - start < timeoutMs) {
+    await sleepMs(400);
+
+    // New tab opened (common: Apply → Greenhouse / Lever / Workday).
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      if (t.id == null || knownTabIds.has(t.id) || t.id === tabId) continue;
+      const url = t.url || "";
+      if (url && !/^https?:\/\//i.test(url)) continue;
+      try {
+        await awaitTabComplete(t.id, 20000);
+      } catch {
+        /* continue with whatever URL we have */
+      }
+      const fresh = await chrome.tabs.get(t.id).catch(() => null);
+      if (fresh?.id && /^https?:\/\//i.test(fresh.url || "")) {
+        await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
+        return { advanced: true, tabId: fresh.id, reason: "new_tab" };
+      }
+    }
+
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id) return { advanced: false, tabId, reason: "tab_gone" };
+
+    if (tab.url && prevUrl && tab.url !== prevUrl) {
+      if (tab.status === "loading") {
+        try {
+          await awaitTabComplete(tabId, 20000);
+        } catch {
+          /* ignore */
+        }
+      }
+      await sleepMs(500);
+      return { advanced: true, tabId, reason: "url_change" };
+    }
+
+    try {
+      await ensureAutofillScript(tabId);
+      const snap = await sendMessageToTab(tabId, { type: "get_apply_action" }, { attempts: 1 });
+      if (snap?.signature && prevSig && snap.signature !== prevSig) {
+        await sleepMs(300);
+        return { advanced: true, tabId, reason: "dom_change" };
+      }
+      // Also check iframes for signature change
+      const all = await getApplyActionFromTab(tabId);
+      if (all.signature && prevSig && all.signature !== prevSig) {
+        await sleepMs(300);
+        return { advanced: true, tabId, reason: "frame_dom_change" };
+      }
+    } catch {
+      /* page may be mid-navigation */
+    }
+  }
+  return { advanced: false, tabId, reason: "timeout" };
+}
+
+/**
+ * Universal multi-step Auto Apply (Jobright-style): fill → Next if no Submit →
+ * wait for next page/tab → refill. Never auto-clicks final Submit.
+ */
+async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14 } = {}) {
   const tab = tabId
     ? await chrome.tabs.get(tabId).catch(() => null)
     : await getCurrentApplicationTab();
   if (!tab?.id) {
-    return { ok: false, error: "No application tab found. Open the Dice/Jobright job page first." };
+    return { ok: false, error: "No application tab found. Open the job application page first." };
   }
   if (!/^https?:\/\//i.test(tab.url || "")) {
-    return { ok: false, error: "The current tab is not a web page. Open the job page, then run Easy Apply." };
+    return { ok: false, error: "The current tab is not a web page. Open the job page, then run Auto Apply." };
   }
 
+  let currentTabId = tab.id;
   const site = detectSiteFromUrl(tab.url);
-  const stored = await chrome.storage.local.get([
-    "last_job_title",
-    "last_company_name",
-    "last_jd_text"
-  ]);
+  await ensureCostSession(tab.url || "");
+  const summary = {
+    ok: true,
+    site,
+    steps: 0,
+    filled: 0,
+    uploaded: 0,
+    aiFilled: 0,
+    answered: 0,
+    choiceFilled: 0,
+    bankHits: 0,
+    status: "",
+    detail: "",
+    tabId: currentTabId,
+    tabUrl: tab.url || ""
+  };
 
-  const credentials = await getAccountCredentials();
+  let noAdvance = 0;
 
-  await ensureAutofillScript(tab.id);
-  const summary = await sendMessageToTab(
-    tab.id,
-    {
-      type: "easy_apply_run",
-      profileId,
-      site,
-      applicantInfo,
-      credentials,
-      uploadFiles: {
-        resume: docs?.resume || null,
-        coverLetter: docs?.coverLetter || null
-      },
-      jobMeta: {
-        jobTitle: stored.last_job_title || "",
-        companyName: stored.last_company_name || "",
-        jdText: stored.last_jd_text || ""
+  for (let step = 0; step < maxSteps; step += 1) {
+    await setStatus(`Auto Apply: step ${step + 1}/${maxSteps} — checking page...`);
+    await ensureAutofillScript(currentTabId);
+
+    let probe = await getApplyActionFromTab(currentTabId).catch(() => ({
+      best: null,
+      anyForm: false,
+      blockedReason: "",
+      jobUnavailable: "",
+      applyUrls: [],
+      signature: "",
+      href: ""
+    }));
+
+    if (probe.jobUnavailable) {
+      summary.status = "unavailable";
+      summary.detail = probe.jobUnavailable;
+      summary.tabId = currentTabId;
+      return summary;
+    }
+
+    // Not on a form yet: click Easy Apply / Apply, or follow apply URL.
+    if (!probe.anyForm && (!probe.best || probe.best.action.type === "entry")) {
+      const live = await chrome.tabs.get(currentTabId).catch(() => null);
+      const prevUrl = live?.url || "";
+      const prevSig = probe.signature || "";
+
+      if (probe.best?.action?.type === "entry") {
+        await sendMessageToTab(
+          currentTabId,
+          { type: "click_apply_action", preferredType: "entry" },
+          { attempts: 2, frameId: probe.best.frameId }
+        );
+      } else {
+        const entry = await sendMessageToTab(
+          currentTabId,
+          { type: "click_easy_apply_entry" },
+          { attempts: 2 }
+        ).catch(() => null);
+        if (!entry?.clicked && probe.applyUrls?.length) {
+          const nextUrl = String(probe.applyUrls[0] || "").trim();
+          if (nextUrl) {
+            await chrome.tabs.update(currentTabId, { url: nextUrl });
+            await awaitTabComplete(currentTabId, 30000);
+          }
+        } else if (!entry?.clicked && probe.blockedReason) {
+          summary.status = "needs_review";
+          summary.detail = probe.blockedReason;
+          summary.tabId = currentTabId;
+          return summary;
+        }
       }
-    },
-    { attempts: 2 }
-  );
 
-  return { ok: Boolean(summary?.ok ?? true), tabId: tab.id, tabUrl: tab.url || "", site, ...summary };
+      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 12000);
+      currentTabId = advanced.tabId;
+      probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+
+      if (!probe.anyForm && !(probe.best && probe.best.action.type !== "entry")) {
+        let credNote = "";
+        try {
+          const credentials = await getAccountCredentials();
+          if (credentials.email || credentials.username || credentials.password) {
+            const credRes = await sendMessageToTab(
+              currentTabId,
+              { type: "autofill_credentials", credentials },
+              { attempts: 2 }
+            );
+            if (Number(credRes?.filledCount || 0) > 0) {
+              credNote = ` Saved login prefilled (${(credRes.filled || []).join(", ")}) — sign in, then run Auto Apply again.`;
+            }
+          }
+        } catch {
+          /* best-effort */
+        }
+        summary.status = "needs_review";
+        summary.detail =
+          (probe.blockedReason ||
+            "No application form found on this page. Open the apply form, then run Auto Apply.") +
+          credNote;
+        summary.tabId = currentTabId;
+        return summary;
+      }
+    }
+
+    if (probe.blockedReason && !probe.anyForm) {
+      let credNote = "";
+      try {
+        const credentials = await getAccountCredentials();
+        if (credentials.email || credentials.username || credentials.password) {
+          const credRes = await sendMessageToTab(
+            currentTabId,
+            { type: "autofill_credentials", credentials },
+            { attempts: 2 }
+          );
+          if (Number(credRes?.filledCount || 0) > 0) {
+            credNote = ` Saved login prefilled (${(credRes.filled || []).join(", ")}) — sign in, then run Auto Apply again.`;
+          }
+        }
+      } catch {
+        /* best-effort */
+      }
+      summary.status = "needs_review";
+      summary.detail = probe.blockedReason + credNote;
+      summary.tabId = currentTabId;
+      return summary;
+    }
+
+    await setStatus(`Auto Apply: step ${step + 1}/${maxSteps} — filling form...`);
+    const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId);
+    if (fillRes?.skipped && step === 0) {
+      return { ok: false, error: fillRes.error || "Autofill skipped.", ...summary, status: "failed" };
+    }
+    summary.filled += Number(fillRes?.filledCount || 0);
+    summary.uploaded += Number(fillRes?.uploadedCount || 0);
+    summary.aiFilled += Number(fillRes?.aiFilledCount || 0);
+    summary.choiceFilled += Number(fillRes?.choiceFilledCount || 0);
+    summary.bankHits += Number(fillRes?.bankHits || 0);
+    summary.answered += Number(fillRes?.aiFilledCount || 0);
+    summary.steps = step + 1;
+    summary.tabId = currentTabId;
+    summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+
+    probe = await getApplyActionFromTab(currentTabId).catch(() => ({ best: null, anyForm: false }));
+
+    if (!probe.best) {
+      summary.status = probe.anyForm ? "ready_for_review" : "needs_review";
+      summary.detail = probe.anyForm
+        ? "Filled the form. No Next/Submit button detected — please review and submit."
+        : "No application form or action button found on this page.";
+      return summary;
+    }
+
+    if (probe.best.action.type === "submit") {
+      summary.status = "ready_for_review";
+      summary.detail = `Reached the final Submit step (${probe.best.action.text || "Submit"}). Stopped so you can review and submit.`;
+      return summary;
+    }
+
+    // Next / Continue / Review / entry — advance then refill.
+    const live = await chrome.tabs.get(currentTabId).catch(() => null);
+    const prevUrl = live?.url || "";
+    const prevSig = probe.signature || "";
+    const actionType = probe.best.action.type;
+
+    await setStatus(`Auto Apply: clicking ${probe.best.action.text || actionType}...`);
+    const clickRes = await sendMessageToTab(
+      currentTabId,
+      { type: "click_apply_action", preferredType: actionType },
+      { attempts: 2, frameId: probe.best.frameId }
+    ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+    if (clickRes?.isSubmit) {
+      summary.status = "ready_for_review";
+      summary.detail = "Reached the final Submit step. Stopped so you can review and submit.";
+      return summary;
+    }
+
+    const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000);
+    currentTabId = advanced.tabId;
+    summary.tabId = currentTabId;
+
+    if (advanced.advanced) {
+      noAdvance = 0;
+    } else {
+      noAdvance += 1;
+      if (noAdvance >= 2) {
+        summary.status = "needs_review";
+        summary.detail =
+          "Could not advance past this step (a required field or validation likely needs your input).";
+        return summary;
+      }
+    }
+  }
+
+  summary.status = "ready_for_review";
+  summary.detail = "Reached the step limit; please review the remaining steps.";
+  return summary;
+}
+
+/**
+ * Drive a multi-step "Easy Apply" flow on a tab (Dice / Jobright / any ATS).
+ * Uses the universal SW loop so iframe ATS forms and new-tab applies work.
+ */
+async function startEasyApplyOnTab(profileId, tabId = null) {
+  return startMultiStepApplyOnTab(profileId, tabId, { maxSteps: 14 });
 }
 
 /**
@@ -805,7 +1342,8 @@ async function answerManualApplicationQuestion(profileId, questionText) {
     "last_job_title",
     "last_company_name",
     "last_jd_text",
-    "last_response"
+    "last_response",
+    "last_application_brief"
   ]);
 
   const answers = await resolveTextAnswers({
@@ -822,7 +1360,9 @@ async function answerManualApplicationQuestion(profileId, questionText) {
       companyName: stored.last_company_name || "",
       jdText: stored.last_jd_text || ""
     },
-    resumeText: stored.last_response || ""
+    resumeText: stored.last_response || "",
+    profileId,
+    applicationBrief: stored.last_application_brief || null
   });
 
   const answer = String(answers[0]?.answer || "").trim();
@@ -1007,7 +1547,7 @@ function splitCombinedRoleHeadlines(html) {
     const d = dates.trim();
     const t = title.trim();
     const l = location.trim();
-    return `${prefix}<p class="role-company">${c} ${d}</p><p class="role-meta">${t}${
+    return `${prefix}<p class="role-company">${c} | ${d}</p><p class="role-meta">${t}${
       l ? ` | ${l}` : ""
     }</p>`;
   });
@@ -1106,6 +1646,7 @@ p, li {
 ul { margin-top: 0 !important; margin-bottom: 6px !important; }
 li { margin-bottom: 3px !important; }
 h2 + p, h2 + ul, h2 + div, h2 + h3 { margin-top: 3px !important; }
+h2 + p.education { margin-top: 1.15em !important; }
 h3 + p, h3 + ul, .role-meta + p { margin-top: 3px !important; }
 .role-meta + ul { margin-top: 10px !important; }
 a, a:visited {
@@ -1454,7 +1995,7 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
         jobTitle: jobMeta.jobTitle || "",
         companyName: jobMeta.companyName || ""
       });
-      const coverOutput = await chatCompletion({
+      const coverResult = await chatCompletion({
         apiKey,
         model,
         messages: [
@@ -1467,7 +2008,14 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
         ],
         jsonMode: false
       });
+      const coverOutput = coverResult?.content || "";
       if (!coverOutput) throw new Error("Empty cover letter response.");
+      await logLlmCall({
+        purpose: "cover_letter",
+        model,
+        inputTokens: coverResult.usage?.prompt_tokens,
+        outputTokens: coverResult.usage?.completion_tokens
+      });
       await setStatus("Rendering cover letter PDF...");
       await addCoverLetterToBundle(files, coverOutput, {
         name: resumeData?.name,
@@ -1633,10 +2181,73 @@ function buildCoverLetterHtml(rawText, contact = {}) {
 </html>`;
 }
 
+async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
+  const normalized = normalizeSkills(data?.skills);
+  if (hasRenderableSkills(normalized, 3)) {
+    data.skills = normalized;
+    return data;
+  }
+
+  await setStatus("Skills section empty — regenerating skills...");
+  const skillsResult = await chatCompletion({
+    apiKey,
+    model,
+    messages: [
+      {
+        role: "system",
+        content:
+          'Return ONLY JSON: {"skills":[{"category":"","items":""}]}. ' +
+          "Produce 6–9 dense skill categories tailored to the job description and resume. " +
+          "Each items value must be a long comma-separated list of technologies/tools."
+      },
+      {
+        role: "user",
+        content:
+          `Job description:\n${String(jdText || "").slice(0, 8000)}\n\n` +
+          `Resume JSON (for context):\n${JSON.stringify(
+            {
+              name: data?.name,
+              headline: data?.headline,
+              profile: data?.profile,
+              experience: (data?.experience || []).map((j) => ({
+                company: j?.company,
+                title: j?.title,
+                project: j?.project
+              }))
+            },
+            null,
+            2
+          )}`
+      }
+    ],
+    jsonMode: true,
+    temperature: 0.3,
+    maxTokens: 4096
+  });
+
+  await logLlmCall({
+    purpose: "resume-skills-repair",
+    model,
+    inputTokens: skillsResult.usage?.prompt_tokens,
+    outputTokens: skillsResult.usage?.completion_tokens
+  });
+
+  const repaired = extractResumeJson(skillsResult?.content || "");
+  const repairedSkills = normalizeSkills(repaired?.skills);
+  if (!hasRenderableSkills(repairedSkills, 3)) {
+    throw new Error(
+      "Resume Skills section was empty and could not be regenerated. Try generating again."
+    );
+  }
+  data.skills = repairedSkills;
+  return data;
+}
+
 async function runGenerationPipeline({ profileId, jobMeta }) {
   const { apiKey, model } = await getOpenAiSettings();
   const meta = jobMeta || {};
   const resumeOnly = meta.resumeOnly === true;
+  await ensureCostSession(meta.jdLink || meta.jobTitle || "");
 
   await setStatus("Building resume prompt...");
   const resumePrompt = await buildPrompt(profileId, meta.jdText || "", {
@@ -1645,7 +2256,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   });
 
   await setStatus("Calling OpenAI for resume JSON...");
-  const jsonText = await chatCompletion({
+  const resumeResult = await chatCompletion({
     apiKey,
     model,
     messages: [
@@ -1660,13 +2271,27 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jsonMode: true,
     maxTokens: 16384
   });
+  const jsonText = resumeResult?.content || "";
+  await logLlmCall({
+    purpose: "resume",
+    model,
+    inputTokens: resumeResult.usage?.prompt_tokens,
+    outputTokens: resumeResult.usage?.completion_tokens
+  });
 
-  const data = extractResumeJson(jsonText);
+  let data = extractResumeJson(jsonText);
   if (!data) {
     throw new Error(
       "OpenAI response is not valid resume JSON. Try again or check the profile prompt."
     );
   }
+
+  data = await ensureResumeSkills(data, {
+    apiKey,
+    model,
+    jdText: meta.jdText || ""
+  });
+
   const rawText = JSON.stringify(data, null, 2);
   await chrome.storage.local.set({ last_response: rawText });
   await setStatus(
@@ -1681,9 +2306,25 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     runCoverLetter: !resumeOnly
   });
 
+  try {
+    await setStatus("Building application brief for form fill...");
+    const applicantInfo = await getApplicantInfo(profileId);
+    const brief = await generateApplicationBrief({
+      apiKey,
+      model,
+      resumeData: data,
+      jobMeta: meta,
+      applicantInfo
+    });
+    await storeApplicationBrief(brief);
+  } catch {
+    await storeApplicationBrief(null);
+  }
+
+  const costLine = await getCostSummaryText();
   return {
     ...saved,
-    status: `${saved.status} Click Autofill on the application page when ready.`
+    status: `${saved.status} Click Autofill on the application page when ready. ${costLine}`.trim()
   };
 }
 
@@ -1715,7 +2356,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await chrome.storage.local.set({
           generation_status: "Reset complete. Ready for next run.",
           generation_running: false,
-          last_response: ""
+          last_response: "",
+          last_application_brief: null
         });
         safeSendResponse(sendResponse, { ok: true });
       } catch (err) {
@@ -1880,10 +2522,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           `Autofilled ${result.filledCount || 0} field(s)` +
           (result.credentialFilledCount ? `, login ${result.credentialFilled.join("/")}` : "") +
           (result.uploadedCount ? `, uploaded ${result.uploadedCount} file(s)` : "") +
-          (result.choiceFilledCount ? `, reused ${result.choiceFilledCount} saved choice(s)` : "") +
+          (result.bankHits ? `, ${result.bankHits} from Q&A bank` : "") +
+          (result.choiceFilledCount ? `, ${result.choiceFilledCount} choice(s)` : "") +
           (result.aiFilledCount ? `, AI-answered ${result.aiFilledCount} question(s)` : "") +
           (result.aiError ? ` (AI answers failed: ${result.aiError})` : "") +
-          " on the current page.";
+          " on the current page. " +
+          (await getCostSummaryText());
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
@@ -1967,21 +2611,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
         const applicantInfo = await getApplicantInfo(profileId);
-        const stored = await chrome.storage.local.get([
-          "last_job_title",
-          "last_company_name",
-          "last_jd_text",
-          "last_response"
-        ]);
+        const ctx = await getAutofillAiContext();
         const answers = await resolveTextAnswers({
           questions,
           applicantInfo,
-          jobMeta: message.jobMeta || {
-            jobTitle: stored.last_job_title || "",
-            companyName: stored.last_company_name || "",
-            jdText: stored.last_jd_text || ""
-          },
-          resumeText: stored.last_response || ""
+          jobMeta: message.jobMeta || ctx.jobMeta,
+          resumeText: ctx.resumeText,
+          profileId,
+          applicationBrief: ctx.applicationBrief
         });
         safeSendResponse(sendResponse, { ok: true, answers });
       } catch (err) {
@@ -1994,9 +2631,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "easy_apply_choice_answers") {
     (async () => {
       try {
-        const answers = await resolveChoiceAnswersFromBank(
+        const ctx = await getAutofillAiContext();
+        const applicantInfo = await getApplicantInfo(message.profileId);
+        const answers = await resolveChoiceAnswers(
           message.profileId,
-          Array.isArray(message.questions) ? message.questions : []
+          Array.isArray(message.questions) ? message.questions : [],
+          applicantInfo,
+          ctx.jobMeta,
+          ctx.resumeText,
+          { applicationBrief: ctx.applicationBrief }
         );
         safeSendResponse(sendResponse, { ok: true, answers });
       } catch (err) {
@@ -2014,22 +2657,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        await setStatus("Running Easy Apply on the current page...");
-        const result = await startEasyApplyOnTab(profileId);
+        await setStatus("Running Auto Apply on the current page...");
+        const result = await startMultiStepApplyOnTab(profileId);
         if (!result.ok) {
-          await setStatus(`Easy Apply failed: ${result.error}`);
+          await setStatus(`Auto Apply failed: ${result.error}`);
           safeSendResponse(sendResponse, result);
           return;
         }
+        const costLine = await getCostSummaryText();
         const msg =
-          `Easy Apply (${result.site || "site"}): ${result.status || "done"} — ` +
+          `Auto Apply (${result.site || "site"}): ${result.status || "done"} — ` +
           `${result.steps || 0} step(s), filled ${result.filled || 0}, ` +
-          `uploaded ${result.uploaded || 0}, answered ${result.answered || 0}. ${result.detail || ""}`.trim();
+          `bank ${result.bankHits || 0}, AI ${result.aiFilled || 0}. ${result.detail || ""} ${costLine}`.trim();
         await setStatus(msg);
         safeSendResponse(sendResponse, { ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Easy Apply failed: ${error}`);
+        await setStatus(`Auto Apply failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
       }
     })();
@@ -2147,154 +2791,82 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           statusDetail: "Locating application form..."
         });
 
-        // Dice / Jobright use an in-page Easy Apply modal rather than a standalone
-        // form page — drive that flow directly (fills each step, stops before submit).
+        // Universal multi-step Auto Apply (any ATS): fill → Next → refill →
+        // stop before Submit. Also follows Apply URLs / Easy Apply entry.
         const liveTab = await chrome.tabs.get(tabId).catch(() => null);
         const site = detectSiteFromUrl(liveTab?.url || url);
-        if (site === "dice" || site === "jobright") {
-          await setImportedJobStatus(importedJobId, {
-            status: "filling",
-            statusDetail: `Running ${site} Easy Apply...`
-          });
-          await setStatus(`Running ${site} Easy Apply...`);
 
-          const ea = await startEasyApplyOnTab(profileId, tabId);
-          if (!ea.ok && ea.error) throw new Error(ea.error);
-
-          const nextStatus =
-            ea.status === "submitted"
-              ? "completed"
-              : ea.status === "unavailable"
-                ? "unavailable"
-                : ea.status === "needs_review"
-                  ? "needs_review"
-                  : "ready_for_review";
-          await setImportedJobStatus(importedJobId, {
-            status: nextStatus,
-            statusDetail:
-              `Easy Apply (${site}): ${ea.status || "done"}. ` +
-              `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
-              `answered ${ea.answered || 0}. ${ea.detail || ""}`.trim()
-          });
-          await setStatus(`Imported job Easy Apply: ${ea.status || "done"} (no submit).`);
-          return;
-        }
-
-        // Best-effort: probe page for fillable fields; if missing, try candidate Apply URLs.
-        let probe = null;
-        const probeTab = async () => {
-          await ensureAutofillScript(tabId);
-          const res = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
-          return res;
-        };
-
+        // Best-effort: if still on a listing with candidate Apply URLs and no
+        // form, navigate once before the multi-step loop.
         try {
-          probe = await probeTab();
-        } catch {
-          probe = { ok: false, isApplicationForm: false, applyUrls: [] };
-        }
-
-        const visited = new Set([tab?.url]);
-        let tries = 0;
-        while (
-          tries < 2 &&
-          probe &&
-          probe.ok !== false &&
-          !probe.isApplicationForm &&
-          !probe.blockedReason &&
-          !probe.jobUnavailable &&
-          Array.isArray(probe.applyUrls) &&
-          probe.applyUrls.length
-        ) {
-          const nextUrl = String(probe.applyUrls[0] || "").trim();
-          if (!nextUrl || visited.has(nextUrl)) break;
-          visited.add(nextUrl);
-
-          await setImportedJobStatus(importedJobId, {
-            status: "opening_form",
-            statusDetail: "Clicking through to application form..."
-          });
-
-          await chrome.tabs.update(tabId, { url: nextUrl });
-          await awaitTabComplete(tabId, 30000);
-          probe = await probeTab().catch(() => ({
-            ok: false,
-            isApplicationForm: false,
-            applyUrls: []
-          }));
-          tries += 1;
-        }
-
-        // The posting became unavailable while we clicked through: stop and mark it.
-        if (probe?.jobUnavailable) {
-          await setImportedJobStatus(importedJobId, {
-            status: "unavailable",
-            statusDetail: `No longer available: ${probe.jobUnavailable}`
-          });
-          await setStatus(`Imported job unavailable: ${probe.jobUnavailable}`);
-          return;
-        }
-
-        // Stop rather than typing profile answers into a listing page's search
-        // and filter inputs, or into a login / CAPTCHA wall.
-        if (probe?.blockedReason || probe?.isApplicationForm === false) {
-          const reason =
-            probe?.blockedReason ||
-            "No application form found on this page. Open the apply form, then use Autofill.";
-
-          // If it's a sign-in / register wall, prefill saved credentials so the
-          // user only has to submit (we never auto-submit login forms).
-          let credNote = "";
-          try {
-            const credentials = await getAccountCredentials();
-            if (credentials.email || credentials.username || credentials.password) {
-              const credRes = await sendMessageToTab(
-                tabId,
-                { type: "autofill_credentials", credentials },
-                { attempts: 2 }
-              );
-              if (Number(credRes?.filledCount || 0) > 0) {
-                credNote = ` Saved login prefilled (${credRes.filled.join(", ")}) — sign in, then click Autofill.`;
-              }
-            }
-          } catch {
-            /* credential prefill is best-effort */
+          await ensureAutofillScript(tabId);
+          let probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
+          const visited = new Set([liveTab?.url || url].filter(Boolean));
+          let tries = 0;
+          while (
+            tries < 2 &&
+            probe &&
+            probe.ok !== false &&
+            !probe.isApplicationForm &&
+            !probe.blockedReason &&
+            !probe.jobUnavailable &&
+            Array.isArray(probe.applyUrls) &&
+            probe.applyUrls.length
+          ) {
+            const nextUrl = String(probe.applyUrls[0] || "").trim();
+            if (!nextUrl || visited.has(nextUrl)) break;
+            visited.add(nextUrl);
+            await setImportedJobStatus(importedJobId, {
+              status: "opening_form",
+              statusDetail: "Clicking through to application form..."
+            });
+            await chrome.tabs.update(tabId, { url: nextUrl });
+            await awaitTabComplete(tabId, 30000);
+            probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 }).catch(
+              () => ({ ok: false, isApplicationForm: false, applyUrls: [] })
+            );
+            tries += 1;
           }
-
-          await setImportedJobStatus(importedJobId, {
-            status: "needs_review",
-            statusDetail: `${reason}${credNote} Resume and cover letter are saved.`
-          });
-          await setStatus(`Imported job needs review: ${reason}${credNote}`);
-          return;
+          if (probe?.jobUnavailable) {
+            await setImportedJobStatus(importedJobId, {
+              status: "unavailable",
+              statusDetail: `No longer available: ${probe.jobUnavailable}`
+            });
+            await setStatus(`Imported job unavailable: ${probe.jobUnavailable}`);
+            return;
+          }
+        } catch {
+          /* probe/navigate is best-effort; multi-step handles the rest */
         }
 
         await setImportedJobStatus(importedJobId, {
           status: "filling",
-          statusDetail: "Autofilling application form..."
+          statusDetail: `Running Auto Apply (${site})...`
         });
-        await setStatus("Autofilling application form...");
+        await setStatus(`Running Auto Apply (${site})...`);
 
-        const autoRes = await startAutofillOnCurrentPage(profileId, tabId);
+        const ea = await startMultiStepApplyOnTab(profileId, tabId, { maxSteps: 10 });
+        if (!ea.ok && ea.error) throw new Error(ea.error);
 
-        if (autoRes?.skipped) {
-          throw new Error(autoRes.error || "Autofill skipped.");
-        }
-        if (!autoRes?.ok) {
-          throw new Error(autoRes.error || "Autofill failed.");
-        }
-
-        const filledCount = Number(autoRes.filledCount || 0);
-        const uploadedCount = Number(autoRes.uploadedCount || 0);
-        const aiFilledCount = Number(autoRes.aiFilledCount || 0);
-        const choiceFilledCount = Number(autoRes.choiceFilledCount || 0);
-
+        const nextStatus =
+          ea.status === "submitted"
+            ? "completed"
+            : ea.status === "unavailable"
+              ? "unavailable"
+              : ea.status === "needs_review"
+                ? "needs_review"
+                : "ready_for_review";
         await setImportedJobStatus(importedJobId, {
-          status: "ready_for_review",
-          statusDetail: `Autofill complete. Filled ${filledCount} field(s), uploaded ${uploadedCount} file(s), reused ${choiceFilledCount} saved choice(s), AI answered ${aiFilledCount} question(s).`
+          status: nextStatus,
+          statusDetail:
+            `Auto Apply (${site}): ${ea.status || "done"}. ` +
+            `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
+            `bank ${ea.bankHits || 0}, AI ${ea.aiFilled || 0}, choices ${ea.choiceFilled || 0}. ` +
+            `${ea.detail || ""} ${(await getCostSummaryText())}`.trim()
         });
-
-        await setStatus("Imported job ready for review (no submit).");
+        await setStatus(
+          `Imported job Auto Apply: ${ea.status || "done"} (no submit). ${await getCostSummaryText()}`
+        );
       } catch (err) {
         const error = String(err?.message || err);
         await setStatus(`Imported job failed: ${error}`);

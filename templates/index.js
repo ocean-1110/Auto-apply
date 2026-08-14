@@ -1,5 +1,6 @@
 import { classicBlueTemplate } from "./classic-blue.js";
 import { timesClassicTemplate } from "./times-classic.js";
+import { normalizeSkills } from "./shared.js";
 
 /** Built-in resume PDF/HTML templates. Add new files here and register them. */
 export const BUILTIN_TEMPLATES = [classicBlueTemplate, timesClassicTemplate];
@@ -18,6 +19,15 @@ export function getTemplateById(templateId) {
   );
 }
 
+/** Normalize resume JSON fields before rendering. */
+export function normalizeResumeData(data) {
+  if (!data || typeof data !== "object") return data || {};
+  return {
+    ...data,
+    skills: normalizeSkills(data.skills)
+  };
+}
+
 /**
  * Render resume JSON to a full HTML document using the selected template.
  * @param {object} data - Parsed resume JSON
@@ -25,5 +35,5 @@ export function getTemplateById(templateId) {
  */
 export function resumeJsonToHtml(data, templateId) {
   const template = getTemplateById(templateId);
-  return template.render(data || {});
+  return template.render(normalizeResumeData(data));
 }

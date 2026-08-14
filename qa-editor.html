@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Q&amp;A editor — Resume GPT Builder</title>
+    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="profile-editor.css" />
+    <link rel="stylesheet" href="qa-editor.css" />
+  </head>
+  <body class="editor-page">
+    <main class="editor qa-editor">
+      <header class="editor-header">
+        <div class="brand">
+          <img src="icons/j-icon.svg" alt="" class="brand-icon" />
+          <div>
+            <h1>Q&amp;A bank</h1>
+            <p class="subtitle">Reusable answers per profile — used before AI to keep costs down</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="closeBtn" class="secondary compact">Close</button>
+        </div>
+      </header>
+
+      <p id="status" class="editor-status" role="status"></p>
+
+      <section class="card">
+        <h2 class="section-title">Browse</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Show answers for</span>
+            <select id="filterProfile"></select>
+          </label>
+          <label class="field">
+            <span>Field type</span>
+            <select id="filterType">
+              <option value="">All types</option>
+            </select>
+          </label>
+          <label class="field span-2">
+            <span>Search</span>
+            <input id="searchInput" type="search" placeholder="Filter by question or answer" />
+          </label>
+        </div>
+        <p class="hint" id="countHint">0 saved</p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title" id="formTitle">Add Q&amp;A</h2>
+        <p class="hint">
+          Pick the control type used on the job site (dropdown, checkbox, text, etc.). Matching
+          still works if another site uses a different control for the same question.
+        </p>
+        <div class="grid-2">
+          <label class="field span-2">
+            <span>Question</span>
+            <textarea id="formQuestion" rows="2" placeholder="e.g. Are you willing to work on-site?"></textarea>
+          </label>
+          <label class="field span-2">
+            <span>Answer</span>
+            <textarea
+              id="formAnswer"
+              rows="3"
+              placeholder="For dropdowns, the option text to pick. For checkboxes, Yes or No."
+            ></textarea>
+          </label>
+          <label class="field">
+            <span>Field type</span>
+            <select id="formFieldType"></select>
+          </label>
+          <label class="field">
+            <span>Save to</span>
+            <select id="formScope"></select>
+          </label>
+        </div>
+        <div class="qa-toolbar">
+          <button type="button" id="saveBtn" class="compact primary">Save Q&amp;A</button>
+          <button type="button" id="cancelEditBtn" class="secondary compact" hidden>Cancel edit</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="qa-list-header">
+          <h2 class="section-title">Saved answers</h2>
+          <div class="qa-toolbar">
+            <button type="button" id="exportBtn" class="secondary compact">Export</button>
+            <button type="button" id="importBtn" class="secondary compact">Import</button>
+            <button type="button" id="clearBtn" class="secondary danger compact">Clear this bank</button>
+            <input type="file" id="importInput" accept="application/json,.json" hidden />
+          </div>
+        </div>
+        <div class="qa-list qa-editor-list" id="qaList" aria-label="Saved questions and answers"></div>
+      </section>
+    </main>
+    <script type="module" src="qa-editor.js"></script>
+  </body>
+</html>

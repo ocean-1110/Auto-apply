@@ -18,6 +18,7 @@ This extension injects a selected profile's resume prompt + JD into your already
 ## Setup
 
 1. Copy `.env.example` to `.env` and set `OPENAI_API_KEY=sk-...`
+   Optional: `OPENAI_MODEL=gpt-4o-mini` (this is the default).
 2. Open `chrome://extensions`
 3. Enable **Developer mode**
 4. Click **Load unpacked**
@@ -46,9 +47,10 @@ copy/paste the details:
 2. Open the extension panel and click **Scrape open job page**.
 3. Job title, company, JD link, and the full job description are filled in for you
    (plus work model, employment type, salary, and posted date for the sheet row).
-4. The extension then **generates** (resume only, or resume + cover letter) and runs **Easy Apply**
-   automatically (stops before submit). Check **generate only resume** to skip the cover letter
-   and save tokens. Ensure output folder and profile are set first.
+4. The extension then **generates** (resume only, or resume + cover letter) and runs **Auto Apply**
+   automatically through multi-step forms (Next/Continue until the final Submit page, then stops).
+   Check **generate only resume** to skip the cover letter and save tokens. Ensure output folder
+   and profile are set first.
 
 Supported detection:
 
@@ -62,6 +64,37 @@ Supported detection:
 To add another site, append an entry to the `JOB_SCRAPERS` registry in
 `content/autofill.js` with a hostname matcher and a `scrape()` that returns
 `{ jobTitle, companyName, jdLink, jdText, ... }`.
+
+## Auto Apply (multi-step, any site)
+
+**Auto Apply** works like Jobright Easy Apply on any ATS (Greenhouse, Lever, Workday,
+Dice, Jobright, etc.):
+
+1. Detect / open the application form (Easy Apply, Apply, or linked apply URL).
+2. Fill the current step from **profile**, then the **Q&A bank**, then AI only for remaining questions.
+3. Reusable AI answers (dropdowns, checkboxes, short factual text) are saved to the Q&A bank for the next job. JD-specific essays are not stored.
+4. If the page has **Next / Continue / Review** and not a final **Submit**, click it.
+5. Wait for the next step (same-tab SPA, full navigation, iframe, or new tab).
+6. Repeat until **Submit** — then **stop** so you can review and click Submit yourself.
+
+Use the panel button **Auto Apply (multi-step)** or **Alt+Shift+E**. Imported-job Apply
+and **Scrape open job page** use the same flow.
+
+## Cost (GPT-4o-mini + bank-first)
+
+Resume and cover letter use **gpt-4o-mini**. Form fill uses the Q&A bank whenever possible, so a typical later apply has **no autofill LLM calls**.
+
+Approximate USD (list prices; your bill may differ):
+
+| Phase | Previous default (gpt-4o, 2-pass autofill) | Now (mini + bank-first) |
+|-------|--------------------------------------------|-------------------------|
+| Resume + cover letter | ~$0.11 | ~$0.007 |
+| Form fill (warm bank) | ~$0.15 | ~$0 |
+| **Typical full job** | **~$0.26** | **~$0.009** |
+
+After generate or Auto Apply, the panel status includes a line like:
+
+`Filled 12 from profile, 8 from Q&A bank, 2 via AI. This job ~$0.008 (legacy ~$0.26, saved ~$0.25).`
 
 ## CoverLetter prompt
 
@@ -127,9 +160,9 @@ Scheduled captures also show a Chrome notification with the same summary.
 | Shortcut | Action |
 |----------|--------|
 | **Alt+J** | Open extension panel |
-| **Alt+Shift+S** | Scrape open job → generate → Easy Apply |
+| **Alt+Shift+S** | Scrape open job → generate → Auto Apply |
 | **Alt+Shift+G** | Generate resume (& cover letter unless “generate only resume” is checked) |
-| **Alt+Shift+E** | Easy Apply on current Dice/Jobright page |
+| **Alt+Shift+E** | Auto Apply on current page (any ATS; stops before Submit) |
 | **Ctrl+Enter** | Generate (while panel is focused) |
 
 Chrome allows at most **4** extension shortcuts (including Open). Autofill is click-only in the panel.

@@ -64,6 +64,11 @@ const CSS = `
       page-break-inside: avoid;
     }
 
+    section.skills {
+      break-inside: auto;
+      page-break-inside: auto;
+    }
+
     h2 {
       margin: 0 0 5px;
       padding-bottom: 2px;

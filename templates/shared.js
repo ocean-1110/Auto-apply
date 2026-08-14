@@ -48,12 +48,78 @@ export function contactLine(data, { linkColor } = {}) {
   return parts.join(" | ");
 }
 
+/**
+ * Normalize skills from common LLM shapes into [{ category, items }].
+ * Accepts arrays of objects/strings, or a category→items object map.
+ */
+export function normalizeSkills(skills) {
+  if (!skills) return [];
+
+  const toItems = (value) => {
+    if (Array.isArray(value)) {
+      return value
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+        .join(", ");
+    }
+    return String(value ?? "").trim();
+  };
+
+  const fromRow = (row) => {
+    if (row == null) return null;
+    if (typeof row === "string") {
+      const text = row.trim();
+      if (!text) return null;
+      const match = text.match(/^([^:]+):\s*(.+)$/);
+      if (match) {
+        return { category: match[1].trim(), items: match[2].trim() };
+      }
+      return { category: "", items: text };
+    }
+    if (typeof row !== "object" || Array.isArray(row)) return null;
+
+    let category = String(
+      row.category || row.name || row.title || row.label || row.group || ""
+    ).trim();
+    let items = toItems(
+      row.items ?? row.skills ?? row.technologies ?? row.value ?? row.content ?? ""
+    );
+
+    if (!category && !items) {
+      const entries = Object.entries(row).filter(
+        ([key, value]) =>
+          value != null &&
+          String(value).trim() &&
+          !["id", "order", "priority"].includes(String(key).toLowerCase())
+      );
+      if (entries.length === 1) {
+        category = String(entries[0][0] || "").trim();
+        items = toItems(entries[0][1]);
+      }
+    }
+
+    if (!category && !items) return null;
+    return { category, items };
+  };
+
+  if (!Array.isArray(skills) && typeof skills === "object") {
+    return Object.entries(skills)
+      .map(([category, items]) => fromRow({ category, items }))
+      .filter(Boolean);
+  }
+
+  if (!Array.isArray(skills)) return [];
+  return skills.map(fromRow).filter(Boolean);
+}
+
 export function renderSkills(skills) {
-  return (skills || [])
+  return normalizeSkills(skills)
     .map((row) => {
       const category = String(row?.category || "").trim();
       const items = String(row?.items || "").trim();
       if (!category && !items) return "";
+      if (!category) return `<p>${escapeHtml(items)}</p>`;
+      if (!items) return `<p><strong>${escapeHtml(category)}</strong></p>`;
       return `<p><strong>${escapeHtml(category)}:</strong> ${escapeHtml(items)}</p>`;
     })
     .filter(Boolean)
@@ -95,7 +161,11 @@ ${bullets}
     .join("\n");
 }
 
-/** Stacked header: company dates, then title | location (Times-style). */
+/**
+ * Stacked ATS-friendly header (Times-style):
+ *   Company | Dates
+ *   Title | Location
+ */
 export function renderJobsStacked(jobs) {
   return (jobs || [])
     .map((job) => {
@@ -109,10 +179,11 @@ export function renderJobsStacked(jobs) {
         .map((b) => `<li>${escapeHtml(b)}</li>`)
         .join("\n");
 
+      const companyLine = [company, dates].filter(Boolean).join(" | ");
       const roleLine = [title, location].filter(Boolean).join(" | ");
 
       return `<article class="job">
-  <h3 class="role-company">${company} ${dates}</h3>
+  <h3 class="role-company">${companyLine}</h3>
   <p class="role-meta">${roleLine}</p>
   ${project ? `<p class="project">${project}</p>` : ""}
   <ul>

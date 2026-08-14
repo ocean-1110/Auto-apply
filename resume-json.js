@@ -225,6 +225,28 @@ function totalExperienceBullets(data) {
   );
 }
 
+function countRenderableSkills(skills) {
+  if (!skills) return 0;
+  if (Array.isArray(skills)) {
+    return skills.filter((row) => {
+      if (typeof row === "string") return Boolean(row.trim());
+      if (!row || typeof row !== "object") return false;
+      const category = String(row.category || row.name || row.title || "").trim();
+      const items = String(row.items || row.skills || row.technologies || "").trim();
+      if (category || items) return true;
+      return Object.values(row).some((v) => String(v || "").trim());
+    }).length;
+  }
+  if (typeof skills === "object") {
+    return Object.keys(skills).filter((k) => String(skills[k] || "").trim()).length;
+  }
+  return 0;
+}
+
+export function hasRenderableSkills(skills, min = 2) {
+  return countRenderableSkills(skills) >= min;
+}
+
 /** Soft check: enough content to render a resume PDF. */
 export function isUsableResumeJson(data) {
   if (!data || typeof data !== "object") return false;
@@ -232,7 +254,7 @@ export function isUsableResumeJson(data) {
   if (!String(data.profile || "").trim() || String(data.profile).length < 80) return false;
   if (!data.education || !String(data.education.school || "").trim()) return false;
   if (!Array.isArray(data.certifications) || data.certifications.length < 8) return false;
-  if (!Array.isArray(data.skills) || data.skills.length < 2) return false;
+  if (countRenderableSkills(data.skills) < 2) return false;
   if (!Array.isArray(data.experience) || data.experience.length < 6) return false;
   return totalExperienceBullets(data) >= 18;
 }
@@ -241,7 +263,7 @@ export function isCompleteResumeJson(data) {
   if (!isUsableResumeJson(data)) return false;
   if (!String(data.profile || "").trim() || String(data.profile).length < 120) return false;
   if (!Array.isArray(data.certifications) || data.certifications.length < 9) return false;
-  if (!Array.isArray(data.skills) || data.skills.length < 3) return false;
+  if (countRenderableSkills(data.skills) < 3) return false;
   if (totalExperienceBullets(data) < 20) return false;
 
   for (const rule of EXPECTED_BULLET_COUNTS) {
@@ -313,4 +335,5 @@ export function resumeJsonNeedsContinuation(rawText, data) {
   return !isUsableResumeJson(data);
 }
 
-export { resumeJsonToHtml } from "./templates/index.js";
+export { resumeJsonToHtml, normalizeResumeData } from "./templates/index.js";
+export { normalizeSkills } from "./templates/shared.js";

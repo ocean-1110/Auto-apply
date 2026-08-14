@@ -6,7 +6,7 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-10.2";
+  const SCRIPT_BUILD = "2026-08-13.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -33,13 +33,15 @@
     middleName: ["middle name", "middle initial", "mi"],
     preferredName: ["preferred name", "preferred first name", "nickname", "what should we call you"],
     email: ["email", "e-mail", "email address", "work email"],
-    phone: ["phone", "phone number", "mobile", "mobile phone", "cell", "telephone", "tel"],
+    phone: ["phone number", "mobile phone", "cell phone", "telephone number", "primary phone"],
+    phoneDeviceType: ["phone device type", "device type"],
+    phoneCountryCode: ["country phone code", "phone country code", "country code"],
     country: ["country", "country/region"],
-    addressLine1: ["address", "address line 1", "street address", "address 1", "home address"],
+    addressLine1: ["address line 1", "street address", "address 1", "home address", "street"],
     addressLine2: ["address line 2", "address 2", "apartment", "suite", "unit", "apt"],
-    city: ["city", "town"],
-    state: ["state", "province", "state/province", "region"],
-    zipCode: ["zip", "zip code", "postal", "postal code", "zip/postal"],
+    city: ["city", "town", "municipality"],
+    state: ["state", "province", "state/province"],
+    zipCode: ["zip", "zip code", "postal", "postal code", "zip/postal", "post code"],
     cityCountryOfResidence: [
       "city, country of residence",
       "city country of residence",
@@ -48,21 +50,31 @@
     ],
 
     workAuthorized: [
+      "eligible to work in the united states",
+      "eligible to work in the us",
+      "eligible to work",
+      "authorized to work in the united states",
+      "authorized to work in the us",
       "authorized to work",
       "legally authorized",
-      "eligible to work",
+      "legally authorized to work",
       "work authorization",
       "right to work",
       "legally entitled to work"
     ],
     needsSponsorship: [
-      "sponsorship",
-      "visa sponsorship",
+      "require sponsorship or assistance",
       "require sponsorship",
+      "visa sponsorship",
       "need sponsorship",
-      "will you now or in the future require"
+      "will you now or in the future require",
+      "maintain work eligibility",
+      "sponsorship or assistance"
     ],
     postEmploymentRestrictions: [
+      "continuing employment restrictions",
+      "employment restrictions or obligations",
+      "restrictions or obligations with your current or former employer",
       "non-solicitation",
       "non solicitation",
       "non-competition",
@@ -73,6 +85,30 @@
       "post employment",
       "restrictive covenant",
       "subject to any contract"
+    ],
+    workedForCompanyBefore: [
+      "worked for",
+      "worked at",
+      "employed by",
+      "previously employed",
+      "worked in the past",
+      "any subsidiary"
+    ],
+    relatedToEmployee: [
+      "closely related",
+      "close personal relationship",
+      "personal relationship with anyone who currently works",
+      "related to anyone who works"
+    ],
+    governmentEmployee: [
+      "current or former government employee",
+      "government employee",
+      "federal national state local or military"
+    ],
+    governmentEthicsRecusal: [
+      "notified your ethics official",
+      "recused yourself",
+      "ethics official and recused"
     ],
     willingToRelocate: ["relocate", "willing to relocate", "relocation"],
     over18: ["over 18", "at least 18", "18 years of age", "age of majority"],
@@ -102,7 +138,13 @@
     highestDegree: ["highest degree", "degree", "education level", "highest level of education"],
     schoolName: ["school", "university", "college", "institution", "school name"],
     fieldOfStudy: ["field of study", "major", "concentration", "area of study"],
-    graduationDate: ["graduation", "graduation date", "date graduated", "graduated"],
+    graduationDate: [
+      "graduation",
+      "graduation date",
+      "date graduated",
+      "graduated",
+      "graduation year"
+    ],
 
     whyInterested: [
       "why are you interested",
@@ -147,6 +189,129 @@
     disabilityStatus: ["disability", "disabled", "chronic condition"]
   };
 
+  /** Prefer matching on the direct field label, not section headers like "Address". */
+  const FIELD_MATCH_ORDER = [
+    "addressLine2",
+    "addressLine1",
+    "city",
+    "state",
+    "zipCode",
+    "cityCountryOfResidence",
+    "phoneCountryCode",
+    "phoneDeviceType",
+    "phone",
+    "firstName",
+    "lastName",
+    "middleName",
+    "preferredName",
+    "email",
+    "country",
+    "workAuthorized",
+    "needsSponsorship",
+    "postEmploymentRestrictions",
+    "workedForCompanyBefore",
+    "relatedToEmployee",
+    "governmentEmployee",
+    "governmentEthicsRecusal",
+    "willingToRelocate",
+    "over18",
+    "felonyConviction",
+    "felonyExplanation",
+    "yearsExperience",
+    "relevantExperience",
+    "englishLevel",
+    "linkedinUrl",
+    "portfolioUrl",
+    "githubUrl",
+    "highestDegree",
+    "schoolName",
+    "fieldOfStudy",
+    "graduationDate",
+    "salaryExpectation",
+    "earliestStartDate",
+    "whyInterested",
+    "gender",
+    "hispanicLatino",
+    "raceEthnicity",
+    "veteranStatus",
+    "disabilityStatus",
+    "backgroundCheckConsent",
+    "drugTestConsent"
+  ];
+
+  const AUTOCOMPLETE_FIELD_MAP = {
+    "given-name": "firstName",
+    "family-name": "lastName",
+    "additional-name": "middleName",
+    nickname: "preferredName",
+    email: "email",
+    tel: "phone",
+    "tel-national": "phone",
+    "tel-local": "phone",
+    "street-address": "addressLine1",
+    "address-line1": "addressLine1",
+    "address-line2": "addressLine2",
+    "address-level2": "city",
+    "address-level1": "state",
+    "postal-code": "zipCode",
+    "country-name": "country",
+    country: "country"
+  };
+
+  const US_STATE_LABELS = {
+    AL: "Alabama",
+    AK: "Alaska",
+    AZ: "Arizona",
+    AR: "Arkansas",
+    CA: "California",
+    CO: "Colorado",
+    CT: "Connecticut",
+    DE: "Delaware",
+    DC: "District of Columbia",
+    FL: "Florida",
+    GA: "Georgia",
+    HI: "Hawaii",
+    ID: "Idaho",
+    IL: "Illinois",
+    IN: "Indiana",
+    IA: "Iowa",
+    KS: "Kansas",
+    KY: "Kentucky",
+    LA: "Louisiana",
+    ME: "Maine",
+    MD: "Maryland",
+    MA: "Massachusetts",
+    MI: "Michigan",
+    MN: "Minnesota",
+    MS: "Mississippi",
+    MO: "Missouri",
+    MT: "Montana",
+    NE: "Nebraska",
+    NV: "Nevada",
+    NH: "New Hampshire",
+    NJ: "New Jersey",
+    NM: "New Mexico",
+    NY: "New York",
+    NC: "North Carolina",
+    ND: "North Dakota",
+    OH: "Ohio",
+    OK: "Oklahoma",
+    OR: "Oregon",
+    PA: "Pennsylvania",
+    RI: "Rhode Island",
+    SC: "South Carolina",
+    SD: "South Dakota",
+    TN: "Tennessee",
+    TX: "Texas",
+    UT: "Utah",
+    VT: "Vermont",
+    VA: "Virginia",
+    WA: "Washington",
+    WV: "West Virginia",
+    WI: "Wisconsin",
+    WY: "Wyoming"
+  };
+
   /** Fields whose answers should be chosen from a dropdown/list, not typed as free text. */
   const SELECT_LIKE_KEYS = new Set([
     "workAuthorized",
@@ -164,7 +329,13 @@
     "disabilityStatus",
     "englishLevel",
     "highestDegree",
-    "state"
+    "state",
+    "phoneDeviceType",
+    "phoneCountryCode",
+    "workedForCompanyBefore",
+    "relatedToEmployee",
+    "governmentEmployee",
+    "governmentEthicsRecusal"
   ]);
 
   const VALUE_LABELS = {
@@ -176,6 +347,10 @@
     backgroundCheckConsent: { yes: ["Yes"], no: ["No"] },
     drugTestConsent: { yes: ["Yes"], no: ["No"] },
     postEmploymentRestrictions: { yes: ["Yes"], no: ["No"] },
+    workedForCompanyBefore: { yes: ["Yes"], no: ["No"] },
+    relatedToEmployee: { yes: ["Yes"], no: ["No"] },
+    governmentEmployee: { yes: ["Yes"], no: ["No"] },
+    governmentEthicsRecusal: { yes: ["Yes"], no: ["No"] },
     hispanicLatino: { yes: ["Yes"], no: ["No"] },
     gender: {
       female: ["Female", "Woman", "F"],
@@ -248,6 +423,11 @@
       master: ["Master", "Master's", "Masters", "MS", "MA", "MBA"],
       doctorate: ["Doctorate", "PhD", "Ph.D.", "Doctoral"],
       other: ["Other"]
+    },
+    phoneDeviceType: {
+      mobile: ["Mobile", "Cell", "Cell Phone", "Mobile Phone", "Smartphone"],
+      home: ["Home", "Home Phone", "Landline"],
+      work: ["Work", "Work Phone", "Business"]
     }
   };
 
@@ -270,6 +450,28 @@
     if (map && map[raw]) {
       for (const label of map[raw]) {
         if (label && !out.includes(label)) out.push(label);
+      }
+    }
+    if (key === "state") {
+      const code = raw.toUpperCase();
+      const full = US_STATE_LABELS[code];
+      if (full && !out.includes(full)) out.push(full);
+      const byName = Object.entries(US_STATE_LABELS).find(
+        ([, label]) => normalize(label) === normalize(raw)
+      );
+      if (byName && !out.includes(byName[0])) out.push(byName[0]);
+    }
+    if (key === "phoneCountryCode") {
+      if (/united states|usa|\bus\b/i.test(raw)) {
+        for (const label of [
+          "United States of America (+1)",
+          "United States (+1)",
+          "US (+1)",
+          "+1",
+          "United States"
+        ]) {
+          if (!out.includes(label)) out.push(label);
+        }
       }
     }
     if (/^(yes|no)$/i.test(raw)) {
@@ -447,6 +649,187 @@
     return normalize(parts.join(" "));
   }
 
+  function aliasMatchesLabel(aliasNorm, labelNorm) {
+    if (!aliasNorm || !labelNorm) return false;
+    // Phrase aliases may be followed by more words ("eligible to work in the US").
+    if (labelNorm.includes(aliasNorm)) return true;
+    const escaped = aliasNorm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(labelNorm);
+  }
+
+  /**
+   * Extract the question/field label above a control (Workday legend/label, fieldset,
+   * formField containers, aria-labelledby, etc.).
+   */
+  function questionLabelForControl(el) {
+    const candidates = [];
+
+    if (el.id) {
+      try {
+        const byFor = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (byFor) candidates.push(cleanLabelText(byFor.textContent));
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const fieldset = el.closest("fieldset");
+    if (fieldset) {
+      const legend = fieldset.querySelector(":scope > legend");
+      if (legend) candidates.push(cleanLabelText(legend.textContent));
+    }
+
+    // Workday / generic ATS: label or legend inside the same form-field wrapper.
+    let container = el.parentElement;
+    for (let i = 0; i < 8 && container; i += 1) {
+      const autoId = String(container.getAttribute?.("data-automation-id") || "");
+      const isFormBlock =
+        /formfield|form-field|formField|question|applicationquestion|multiselect/i.test(autoId) ||
+        container.tagName === "FIELDSET";
+
+      if (isFormBlock) {
+        for (const labelEl of container.querySelectorAll(
+          ':scope > label, :scope > legend, [data-automation-id="formLabel"], [data-automation-id*="formLabel"], label[data-automation-id]'
+        )) {
+          if (labelEl.contains(el)) continue;
+          candidates.push(cleanLabelText(labelEl.textContent));
+        }
+      }
+
+      const prev = container.previousElementSibling;
+      if (prev && /^(LABEL|LEGEND|P|SPAN|DIV|H\d)$/i.test(prev.tagName)) {
+        const t = cleanLabelText(prev.textContent);
+        if (t.length >= 8 && t.length <= 900) candidates.push(t);
+      }
+      container = container.parentElement;
+    }
+
+    // Walk up: direct-child label/legend in each ancestor.
+    let node = el.parentElement;
+    for (let i = 0; i < 6 && node; i += 1) {
+      for (const labelEl of node.querySelectorAll(":scope > label, :scope > legend")) {
+        if (labelEl.contains(el)) continue;
+        candidates.push(cleanLabelText(labelEl.textContent));
+      }
+      const prev = el.previousElementSibling;
+      if (prev && /^(LABEL|LEGEND|P|SPAN|DIV|H\d)$/i.test(prev.tagName)) {
+        candidates.push(cleanLabelText(prev.textContent));
+      }
+      node = node.parentElement;
+    }
+
+    const labelledBy = el.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      for (const id of labelledBy.split(/\s+/)) {
+        const labelNode = document.getElementById(id);
+        if (labelNode) candidates.push(cleanLabelText(labelNode.textContent));
+      }
+    }
+    const aria = cleanLabelText(el.getAttribute("aria-label") || "");
+    if (aria) candidates.push(aria);
+
+    let best = "";
+    for (const c of candidates) {
+      const t = cleanLabelText(c);
+      if (!t || t.length < 3) continue;
+      if (/^(select one|please select|choose|--|\* indicates a required field)$/i.test(t)) continue;
+      if (t.length > best.length) best = t;
+    }
+    return best;
+  }
+
+  /** Direct field label — uses Workday-aware question label extraction. */
+  function primaryLabelForControl(el) {
+    return normalize(questionLabelForControl(el));
+  }
+
+  function matchApplicantKey(labelNorm, primaryLabelNorm = "") {
+    const primary = primaryLabelNorm || labelNorm;
+    if (!primary && !labelNorm) return null;
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const key of FIELD_MATCH_ORDER) {
+      const aliases = FIELD_ALIASES[key];
+      if (!aliases) continue;
+      for (const alias of aliases) {
+        const a = normalize(alias);
+        if (!a) continue;
+        const onPrimary = primary && aliasMatchesLabel(a, primary);
+        const onFull = labelNorm && aliasMatchesLabel(a, labelNorm);
+        if (!onPrimary && !onFull) continue;
+
+        // Prefer matches on the direct field label over section headers.
+        let score = a.length + (onPrimary ? 1000 : 0);
+
+        // City/state/zip must win over generic address section text.
+        if (["city", "state", "zipCode", "addressLine2"].includes(key)) score += 200;
+        if (key === "addressLine1" && /\b(line 1|street|address 1|home address)\b/.test(primary)) {
+          score += 150;
+        }
+        if (key === "phone" && /\b(extension|device type|country phone code|phone code)\b/.test(primary)) {
+          continue;
+        }
+        if (key === "workAuthorized" && /\bsponsorship\b/.test(primary)) continue;
+        if (key === "needsSponsorship" && /\beligible to work\b/.test(primary) && !/\bsponsorship\b/.test(primary)) {
+          continue;
+        }
+        if (key === "workedForCompanyBefore" && !/\b(worked|employed|subsidiary|past|before)\b/.test(primary)) {
+          continue;
+        }
+        if (key === "relatedToEmployee" && !/\b(related|relationship)\b/.test(primary)) continue;
+        if (key === "governmentEmployee" && !/\bgovernment\b/.test(primary)) continue;
+        if (key === "governmentEthicsRecusal" && !/\b(ethics|recused)\b/.test(primary)) continue;
+
+        if (score > bestScore) {
+          best = key;
+          bestScore = score;
+        }
+      }
+    }
+    return best;
+  }
+
+  function matchApplicantKeyFromControl(el) {
+    const autocomplete = normalize(el.getAttribute("autocomplete") || "");
+    if (autocomplete === "tel-extension") return null;
+    if (AUTOCOMPLETE_FIELD_MAP[autocomplete]) return AUTOCOMPLETE_FIELD_MAP[autocomplete];
+
+    const question = questionLabelForControl(el);
+    const primary = normalize(question);
+    const full = primary || labelTextForControl(el);
+
+    if (/\bextension\b/.test(primary)) return null;
+    if (/\bdevice type\b/.test(primary)) return "phoneDeviceType";
+    if (/\b(country phone code|phone country code|phone code)\b/.test(primary)) {
+      return "phoneCountryCode";
+    }
+
+    // High-confidence Workday / ATS compliance questions (company name varies).
+    if (/\b(require|need)\b/.test(primary) && /\bsponsorship\b/.test(primary)) {
+      return "needsSponsorship";
+    }
+    if (/\b(eligible|legally authorized|authorized)\b/.test(primary) && /\bwork\b/.test(primary)) {
+      return "workAuthorized";
+    }
+    if (/\bcontinuing employment restrictions\b/.test(primary) || /\bemployment restrictions or obligations\b/.test(primary)) {
+      return "postEmploymentRestrictions";
+    }
+    if (/\bhave you worked for\b/.test(primary) && /\b(past|before|previously|subsidiary)\b/.test(primary)) {
+      return "workedForCompanyBefore";
+    }
+    if (/\bclosely related\b/.test(primary) || /\bpersonal relationship\b/.test(primary)) {
+      return "relatedToEmployee";
+    }
+    if (/\bgovernment employee\b/.test(primary)) return "governmentEmployee";
+    if (/\bethics official\b/.test(primary) || /\brecused yourself\b/.test(primary)) {
+      return "governmentEthicsRecusal";
+    }
+
+    return matchApplicantKey(full, primary);
+  }
+
   /**
    * Clearest question text for OpenAI — prefers real labels / previous sibling,
    * skips placeholder noise like "Type here...".
@@ -491,23 +874,6 @@
     if (best) return best.slice(0, 1000);
 
     return cleanLabelText(labelTextForControl(el)).slice(0, 1000);
-  }
-
-  function matchApplicantKey(labelNorm) {
-    if (!labelNorm) return null;
-    let best = null;
-    let bestLen = 0;
-    for (const [key, aliases] of Object.entries(FIELD_ALIASES)) {
-      for (const alias of aliases) {
-        const a = normalize(alias);
-        if (!a) continue;
-        if (labelNorm.includes(a) && a.length > bestLen) {
-          best = key;
-          bestLen = a.length;
-        }
-      }
-    }
-    return best;
   }
 
   function isYesNoValue(value) {
@@ -1041,6 +1407,10 @@
     "workAuthorized",
     "needsSponsorship",
     "postEmploymentRestrictions",
+    "workedForCompanyBefore",
+    "relatedToEmployee",
+    "governmentEmployee",
+    "governmentEthicsRecusal",
     "gender",
     "hispanicLatino",
     "raceEthnicity",
@@ -1071,37 +1441,38 @@
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (el.disabled || el.readOnly) continue;
 
+      if (isHistoryFilled(el)) continue;
       const labelNorm = labelTextForControl(el);
       const questionLabel = questionTextForAi(el);
       if (!labelNorm && !questionLabel) continue;
       if (shouldSkipAiField(el, labelNorm || questionLabel)) continue;
 
       const multiline = isMultilineControl(el);
-      const key = matchApplicantKey(labelNorm);
+      const key = matchApplicantKeyFromControl(el);
       if (key) {
         const known = applicantInfo[key];
         if (known != null && String(known).trim()) continue;
         if (SKIP_AI_KNOWN_KEYS.has(key) || SELECT_LIKE_KEYS.has(key)) continue;
-        const questionLike =
-          looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
-        if (
-          !questionLike &&
-          !multiline &&
-          key !== "whyInterested" &&
-          key !== "relevantExperience"
-        ) {
-          continue;
-        }
-      } else {
-        const questionLike =
-          looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
-        if (!questionLike && !multiline) continue;
-        if (multiline && !questionLike && String(questionLabel || labelNorm).trim().length < 12) {
-          continue;
-        }
       }
 
-      if (questions.length >= 10) break;
+      const labelForCheck = normalize(questionLabel || labelNorm);
+      if (
+        /\b(extension|device type|country phone code|phone code|password|captcha|search)\b/.test(
+          labelForCheck
+        )
+      ) {
+        continue;
+      }
+
+      const questionLike =
+        looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
+      const hasUsefulLabel = String(questionLabel || labelNorm).trim().length >= 3;
+      if (!questionLike && !multiline && !hasUsefulLabel) continue;
+      if (multiline && !questionLike && String(questionLabel || labelNorm).trim().length < 8) {
+        continue;
+      }
+
+      if (questions.length >= 25) break;
 
       const labelForAi = (questionLabel || labelNorm).slice(0, 1000);
       const id = `rbq_${questions.length}_${Math.abs(
@@ -1111,7 +1482,8 @@
       questions.push({
         id,
         label: labelForAi,
-        multiline
+        multiline,
+        fieldType: el.tagName === "TEXTAREA" ? "textarea" : "text"
       });
     }
 
@@ -1155,20 +1527,25 @@
     ];
 
     for (const el of nodes) {
-      if (out.length >= 15) break;
+      if (out.length >= 40) break;
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (el.disabled) continue;
+      if (isHistoryFilled(el)) continue;
       if (isReactSelectInput(el)) continue;
 
-      // Known profile fields are handled by the deterministic autofill loop.
-      if (matchApplicantKey(labelTextForControl(el))) continue;
+      // Known profile / rule fields are handled by the deterministic autofill loop.
+      if (matchApplicantKeyFromControl(el)) continue;
+      if (!isChoiceControlEmpty(el)) continue;
 
       const label = captureQuestionText(el);
       if (!label) continue;
       if (LEARN_SENSITIVE_RE.test(label)) continue;
       const labelNorm = normalize(label);
       if (!labelNorm || labelNorm.length < 6) continue;
+
+      const options = collectControlOptions(el);
+      if (!options.length) continue;
 
       const isGroup = el.type === "radio" || el.type === "checkbox";
       if (isGroup && groupIds.has(labelNorm)) {
@@ -1181,7 +1558,15 @@
       )}`;
       el.setAttribute("data-resume-bot-choice-qid", id);
       if (isGroup) groupIds.set(labelNorm, id);
-      out.push({ id, label: label.slice(0, 1000) });
+      const fieldType =
+        el.tagName === "SELECT"
+          ? "select"
+          : el.type === "checkbox"
+            ? "checkbox"
+            : el.type === "radio"
+              ? "radio"
+              : "select";
+      out.push({ id, label: label.slice(0, 1000), options, fieldType });
     }
 
     return out;
@@ -1395,22 +1780,452 @@
       const first = applicantInfo?.firstName;
       if (first != null && String(first).trim()) return String(first).trim();
     }
+    if (key === "phoneDeviceType") return "mobile";
+    if (key === "phoneCountryCode") {
+      const country = String(applicantInfo?.country || "").trim();
+      if (/united states|usa|\bus\b/i.test(country)) return "United States of America (+1)";
+    }
+    if (key === "cityCountryOfResidence") {
+      const city = String(applicantInfo?.city || "").trim();
+      const state = String(applicantInfo?.state || "").trim();
+      const country = String(applicantInfo?.country || "").trim();
+      const stateLabel = US_STATE_LABELS[state.toUpperCase()] || state;
+      const parts = [city, stateLabel, country].filter(Boolean);
+      if (parts.length) return parts.join(", ");
+    }
+    // Sensible defaults for common yes/no compliance questions when profile is blank.
+    if (key === "workAuthorized") return "yes";
+    if (key === "needsSponsorship") return "no";
+    if (key === "postEmploymentRestrictions") return "no";
+    if (key === "workedForCompanyBefore") return "no";
+    if (key === "relatedToEmployee") return "no";
+    if (key === "governmentEmployee") return "no";
+    if (key === "governmentEthicsRecusal") return "no";
     return "";
   }
 
-  async function autofillApplication(applicantInfo = {}, uploadFiles = {}, credentials = {}) {
+  function isPlaceholderChoiceValue(text) {
+    const t = cleanLabelText(text);
+    return !t || /^(select one|please select|choose|--|-)$/i.test(t);
+  }
+
+  function isChoiceControlEmpty(el) {
+    if (!el) return false;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "select") {
+      const opt = el.options?.[el.selectedIndex];
+      const t = cleanLabelText(opt?.textContent || opt?.value || "");
+      return isPlaceholderChoiceValue(t);
+    }
+    if (el.type === "radio" && el.name) {
+      const checked = document.querySelector(
+        `input[type="radio"][name="${CSS.escape(el.name)}"]:checked`
+      );
+      return !checked;
+    }
+    if (el.type === "checkbox") return !el.checked;
+    return false;
+  }
+
+  function collectControlOptions(el) {
+    const tag = el.tagName.toLowerCase();
+    if (tag === "select") {
+      return [...el.options]
+        .map((o) => cleanLabelText(o.textContent || o.value || ""))
+        .filter((t) => !isPlaceholderChoiceValue(t));
+    }
+    if (el.type === "radio" && el.name) {
+      const opts = [];
+      const seen = new Set();
+      for (const r of document.querySelectorAll(
+        `input[type="radio"][name="${CSS.escape(el.name)}"]`
+      )) {
+        const wrap = r.closest("label");
+        let t = wrap ? cleanLabelText(wrap.textContent) : cleanLabelText(r.value || "");
+        if (wrap) {
+          const clone = wrap.cloneNode(true);
+          clone.querySelectorAll("input").forEach((n) => n.remove());
+          t = cleanLabelText(clone.textContent);
+        }
+        if (!t) t = cleanLabelText(r.getAttribute("aria-label") || r.value || "");
+        const norm = normalize(t);
+        if (!norm || seen.has(norm)) continue;
+        seen.add(norm);
+        opts.push(t);
+      }
+      return opts;
+    }
+    if (el.type === "checkbox") return ["Yes", "No"];
+    return [];
+  }
+
+  /** Second pass: fill empty dropdowns/radios using profile defaults + rule-based keys. */
+  async function fillRemainingChoiceControls(applicantInfo = {}) {
+    const filled = [];
+    const handledRadioGroups = new Set();
+    const nodes = [
+      ...document.querySelectorAll('select, input[type="radio"], input[type="checkbox"]')
+    ];
+
+    for (const el of nodes) {
+      if (el.disabled) continue;
+      if (isHistoryFilled(el)) continue;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (el.type === "radio" && el.name) {
+        if (handledRadioGroups.has(el.name)) continue;
+        handledRadioGroups.add(el.name);
+        if (!isChoiceControlEmpty(el)) continue;
+      } else if (!isChoiceControlEmpty(el)) {
+        continue;
+      }
+
+      const key = matchApplicantKeyFromControl(el);
+      if (!key) continue;
+      const value = resolveApplicantValue(applicantInfo, key);
+      if (!value) continue;
+      if (await fillControl(el, value, key)) {
+        filled.push({ key, label: questionLabelForControl(el) });
+      }
+    }
+    return { filledCount: filled.length, filled };
+  }
+
+  function markHistoryFilled(el) {
+    if (!el) return;
+    el.setAttribute("data-resume-bot-history", "1");
+  }
+
+  function isHistoryFilled(el) {
+    return el?.getAttribute?.("data-resume-bot-history") === "1";
+  }
+
+  function historyContext(el) {
+    const parts = [
+      questionLabelForControl(el),
+      el.getAttribute?.("aria-label") || "",
+      el.getAttribute?.("placeholder") || "",
+      el.name || "",
+      el.id || ""
+    ];
+    let node = el.parentElement;
+    for (let i = 0; i < 4 && node; i += 1) {
+      const aria = node.getAttribute?.("aria-label") || "";
+      if (aria) parts.push(aria);
+      const kid = node.querySelector(
+        ":scope > legend, :scope > label, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > p, :scope > span"
+      );
+      if (kid) parts.push(String(kid.textContent || "").slice(0, 120));
+      node = node.parentElement;
+    }
+    return normalize(parts.filter(Boolean).join(" "));
+  }
+
+  function classifyHistoryField(el, sectionKind) {
+    const type = (el.type || "").toLowerCase();
+    const label = normalize(questionLabelForControl(el) || labelTextForControl(el));
+    const ctx = `${label} ${historyContext(el)}`;
+    const isCheck = type === "checkbox" || type === "radio";
+
+    if (/\b(street|address line|zip|postal|ssn|password|salary|compensation)\b/.test(ctx)) {
+      return null;
+    }
+
+    if (
+      isCheck &&
+      /\b(currently (work|employed)|i currently work|current (job|position|role|employer)|still work here)\b/.test(
+        ctx
+      )
+    ) {
+      return "current";
+    }
+
+    if (sectionKind === "education") {
+      if (/\b(school|university|college|institution)\b/.test(ctx) && !/\b(email|phone)\b/.test(ctx)) {
+        return "school";
+      }
+      if (/\b(field of study|major|concentration|area of study)\b/.test(ctx)) return "fieldOfStudy";
+      if (/\b(degree|diploma)\b/.test(ctx)) return "degree";
+    }
+
+    if (sectionKind === "work") {
+      if (/\b(company|employer|organization|organisation)\b/.test(ctx) && !/\b(email|phone|website)\b/.test(ctx)) {
+        return "company";
+      }
+      if (
+        /^(title|role|position)$/.test(label) ||
+        /\b(job title|position title|role title|title of (the )?(job|role|position)|position held)\b/.test(ctx)
+      ) {
+        return "title";
+      }
+      if (
+        /\b(job location|work location|employment location)\b/.test(ctx) ||
+        (/^(location|city)$/.test(label) && !/\b(address|street|home)\b/.test(ctx))
+      ) {
+        return "location";
+      }
+    }
+
+    const startish = /\b(start|from|begin|beginning|date from)\b/.test(ctx);
+    const endish = /\b(end|to|through|until|till|date to|finish)\b/.test(ctx) && !/\b(together|today)\b/.test(ctx);
+    const monthish =
+      /^(month)$/.test(label) ||
+      /\b(start month|end month|from month|to month|month)\b/.test(ctx);
+    const yearish =
+      /^(year)$/.test(label) ||
+      /\b(start year|end year|from year|to year|year)\b/.test(ctx);
+
+    if (monthish && startish && !endish) return "startMonth";
+    if (monthish && endish && !startish) return "endMonth";
+    if (yearish && startish && !endish) return "startYear";
+    if (yearish && endish && !startish) return "endYear";
+    if (monthish) return "month";
+    if (yearish) return "year";
+
+    if (/\b(start date|from date|begin date|date from|starting date)\b/.test(ctx)) return "startDate";
+    if (/\b(end date|to date|through date|date to|ending date|finish date)\b/.test(ctx)) return "endDate";
+
+    if (
+      el.tagName === "TEXTAREA" ||
+      /\b(description|summary|responsibilities|highlights|duties|role overview|job details)\b/.test(ctx)
+    ) {
+      if (sectionKind === "work" || /\b(job|role|position|experience|employment)\b/.test(ctx)) {
+        return "summary";
+      }
+    }
+
+    return null;
+  }
+
+  function assignDateSlots(slot, kind, el) {
+    if (kind === "month") {
+      if (!slot.startMonth) slot.startMonth = el;
+      else if (!slot.endMonth) slot.endMonth = el;
+      return;
+    }
+    if (kind === "year") {
+      if (!slot.startYear) slot.startYear = el;
+      else if (!slot.endYear) slot.endYear = el;
+      return;
+    }
+    if (!slot[kind]) slot[kind] = el;
+  }
+
+  function collectHistoryGroups(scope, sectionKind) {
+    const root = scope && scope.querySelectorAll ? scope : document;
+    const controls = collectFillableControls().filter((el) => root === document || root.contains(el));
+    const fields = [];
+    for (const el of controls) {
+      const kind = classifyHistoryField(el, sectionKind);
+      if (!kind) continue;
+      fields.push({ el, kind });
+    }
+    if (!fields.length) return [];
+
+    const identity = sectionKind === "education" ? "school" : "company";
+    const groups = [];
+    let slot = {};
+    for (const field of fields) {
+      const startsNew =
+        (field.kind === identity && slot[identity]) ||
+        (field.kind === "title" && slot.title && (slot.company || slot.school));
+      if (startsNew) {
+        groups.push(slot);
+        slot = {};
+      }
+      assignDateSlots(slot, field.kind, field.el);
+    }
+    if (Object.keys(slot).length) groups.push(slot);
+    return groups.filter((g) =>
+      sectionKind === "education" ? g.school || g.degree : g.company || g.title
+    );
+  }
+
+  function findHistorySectionScope(sectionKind) {
+    const re =
+      sectionKind === "education"
+        ? /\b(education|academic|school history|schools)\b/i
+        : /\b(work (history|experience)|employment( history)?|professional experience|experience)\b/i;
+    const nodes = [
+      ...document.querySelectorAll("h1, h2, h3, h4, h5, legend, [role='heading'], label, p, span, div")
+    ];
+    for (const node of nodes) {
+      if (!isElVisible(node)) continue;
+      const text = cleanLabelText(node.textContent || "");
+      if (!text || text.length > 80) continue;
+      if (!re.test(text)) continue;
+      const section = node.closest("section, fieldset, form, [role='group'], [class*='section'], [class*='experience'], [class*='education']");
+      if (section && section.querySelectorAll("input, select, textarea").length >= 2) return section;
+      const parent = node.parentElement;
+      if (parent && parent.querySelectorAll("input, select, textarea").length >= 2) return parent;
+    }
+    return null;
+  }
+
+  function findAddHistoryButton(scope, sectionKind) {
+    const root = scope && scope.querySelectorAll ? scope : document;
+    const re =
+      sectionKind === "education"
+        ? /\badd(\s+(another|an|a))?\s*(education|school|degree|institution)\b|\badd another\b/i
+        : /\badd(\s+(another|an|a))?\s*(job|position|role|experience|employer|work)\b|\badd another\b|\badd an? (item|entry)\b/i;
+    const buttons = [
+      ...root.querySelectorAll('button, a, [role="button"], input[type="button"]')
+    ].filter((el) => isElVisible(el) && isElEnabled(el));
+    return (
+      buttons.find((el) => re.test(elActionText(el))) ||
+      buttons.find((el) => /^add$/i.test(elActionText(el)) && /experience|education|employment|history/i.test(historyContext(el)))
+    );
+  }
+
+  async function ensureHistoryGroups(sectionKind, needed) {
+    const headingScope = findHistorySectionScope(sectionKind);
+    const scope = headingScope || document;
+    let groups = collectHistoryGroups(scope, sectionKind);
+    if (!groups.length) return groups;
+    const want = Math.min(Math.max(1, Number(needed) || 1), 8);
+    if (!headingScope) return groups;
+    for (let i = 0; i < 8 && groups.length < want; i += 1) {
+      const btn = findAddHistoryButton(headingScope, sectionKind);
+      if (!btn) break;
+      scrollElIntoView(btn);
+      btn.click();
+      await sleep(550);
+      groups = collectHistoryGroups(headingScope, sectionKind);
+    }
+    return groups;
+  }
+
+  function historyDateValues(bundle = {}, extra = []) {
+    const out = [];
+    for (const v of [
+      ...(Array.isArray(bundle.candidates) ? bundle.candidates : []),
+      bundle.month,
+      bundle.monthShort,
+      bundle.monthNum,
+      bundle.year,
+      bundle.isoMonth,
+      bundle.isoDate,
+      bundle.display,
+      ...extra
+    ]) {
+      const s = String(v || "").trim();
+      if (s && !out.includes(s)) out.push(s);
+    }
+    return out;
+  }
+
+  async function fillHistoryValue(el, values) {
+    if (!el) return false;
+    const list = Array.isArray(values) ? values : [values];
+    for (const value of list) {
+      if (value == null || String(value).trim() === "") continue;
+      if (await fillControl(el, String(value).trim(), null)) {
+        markHistoryFilled(el);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function fillOneHistoryGroup(slot, entry, sectionKind) {
+    const filled = [];
+    const tryFill = async (kind, values) => {
+      const el = slot[kind];
+      if (!el || isHistoryFilled(el)) return;
+      if (await fillHistoryValue(el, values)) filled.push(kind);
+    };
+
+    if (sectionKind === "education") {
+      await tryFill("school", [entry.school]);
+      await tryFill("degree", [entry.degree]);
+      await tryFill("fieldOfStudy", [entry.fieldOfStudy, entry.degree]);
+    } else {
+      await tryFill("company", [entry.company]);
+      await tryFill("title", [entry.title]);
+      await tryFill("location", [entry.location]);
+      await tryFill("summary", [entry.summary]);
+    }
+
+    await tryFill("startMonth", historyDateValues(entry.start));
+    await tryFill("startYear", [entry.start?.year, entry.start?.display]);
+    await tryFill("startDate", historyDateValues(entry.start));
+    await tryFill("month", historyDateValues(entry.start));
+    await tryFill("year", [entry.start?.year]);
+
+    if (entry.current && slot.current) {
+      const el = slot.current;
+      if (el.type === "checkbox" && !el.checked) el.click();
+      else await fillHistoryValue(el, ["yes", "Yes", "Present"]);
+      markHistoryFilled(el);
+      filled.push("current");
+      await tryFill("endDate", ["Present", "Current"]);
+    } else {
+      await tryFill("endMonth", historyDateValues(entry.end));
+      await tryFill("endYear", [entry.end?.year, entry.end?.display]);
+      await tryFill("endDate", historyDateValues(entry.end));
+    }
+
+    return filled;
+  }
+
+  async function fillHistorySections(workHistory = [], educationHistory = []) {
+    const filled = [];
+    const jobs = Array.isArray(workHistory) ? workHistory : [];
+    const schools = Array.isArray(educationHistory) ? educationHistory : [];
+
+    if (jobs.length) {
+      const groups = await ensureHistoryGroups("work", jobs.length);
+      const count = Math.min(groups.length, jobs.length);
+      for (let i = 0; i < count; i += 1) {
+        const kinds = await fillOneHistoryGroup(groups[i], jobs[i], "work");
+        if (kinds.length) filled.push({ key: `workHistory[${i}]`, label: jobs[i].company || jobs[i].title });
+      }
+    }
+
+    if (schools.length) {
+      const groups = await ensureHistoryGroups("education", schools.length);
+      const use = groups.length ? groups : collectHistoryGroups(document, "education");
+      const count = Math.min(use.length, schools.length);
+      for (let i = 0; i < count; i += 1) {
+        const kinds = await fillOneHistoryGroup(use[i], schools[i], "education");
+        if (kinds.length) filled.push({ key: `education[${i}]`, label: schools[i].school || schools[i].degree });
+      }
+    }
+
+    return filled;
+  }
+
+  function looksLikeHistoryForm() {
+    const work = collectHistoryGroups(document, "work");
+    const edu = collectHistoryGroups(document, "education");
+    return work.length > 0 || edu.length > 0;
+  }
+
+  async function autofillApplication(
+    applicantInfo = {},
+    uploadFiles = {},
+    credentials = {},
+    history = {}
+  ) {
     suppressLearn();
     const filled = [];
+    const historyFilled = await fillHistorySections(history.workHistory, history.educationHistory);
+    for (const row of historyFilled) filled.push(row);
+
     const controls = collectFillableControls();
 
     for (const el of controls) {
+      if (isHistoryFilled(el)) continue;
       const label = labelTextForControl(el);
-      const key = matchApplicantKey(label);
+      const key = matchApplicantKeyFromControl(el);
       if (!key) continue;
       const value = resolveApplicantValue(applicantInfo, key);
       if (!value) continue;
       if (await fillControl(el, value, key)) filled.push({ key, label });
     }
+
+    const choicePass = await fillRemainingChoiceControls(applicantInfo);
+    for (const row of choicePass.filled || []) filled.push(row);
 
     // Fill saved login/sign-up credentials when this page has a Create Login section.
     const creds = {
@@ -1564,7 +2379,7 @@
     let identityFields = 0;
     let filterFields = 0;
     for (const el of controls) {
-      const key = matchApplicantKey(labelTextForControl(el));
+      const key = matchApplicantKeyFromControl(el);
       if (!key) continue;
       if (["firstName", "lastName", "email", "phone", "linkedinUrl", "addressLine1"].includes(key)) {
         identityFields += 1;
@@ -1581,7 +2396,10 @@
     });
 
     const isApplicationForm =
-      hasFileInput || identityFields >= 2 || (hasApplyForm && fillableCount >= 2);
+      hasFileInput ||
+      identityFields >= 2 ||
+      (hasApplyForm && fillableCount >= 2) ||
+      looksLikeHistoryForm();
 
     return {
       ok: true,
@@ -1597,14 +2415,16 @@
     };
   }
 
-  // ---- Easy Apply (multi-step) driver: Dice / Jobright ---------------------
+  // ---- Multi-step Auto Apply (any ATS / Dice / Jobright) ---------------------
 
-  const EASY_NEXT_RE = /\b(next|continue|save\s*(and|&)\s*continue|save and next|proceed)\b/i;
-  const EASY_REVIEW_RE = /\breview\b/i;
+  const EASY_NEXT_RE =
+    /\b(next(\s+step)?|continue|save\s*(and|&)\s*continue|save\s*(and|&)\s*next|agree\s*(and|&)\s*continue|proceed|forward)\b/i;
+  const EASY_REVIEW_RE = /\b(review(\s+(application|answers|info|information))?|preview)\b/i;
   const EASY_SUBMIT_RE =
-    /\b(submit application|submit|apply now|send application|finish|complete application)\b/i;
-  const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss)\b/i;
-  const EASY_ENTRY_RE = /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply now|apply)\b/i;
+    /\b(submit(\s+application)?|send(\s+application)?|finish(\s+application)?|complete(\s+application)?|apply\s+now|confirm\s+(and\s+)?submit)\b/i;
+  const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss|return)\b/i;
+  const EASY_ENTRY_RE =
+    /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply with|apply now|apply)\b/i;
 
   function elActionText(el) {
     return cleanLabelText(
@@ -1653,7 +2473,7 @@
 
   function classifyActionButton(text) {
     const t = String(text || "").trim();
-    if (!t || t.length > 60) return null;
+    if (!t || t.length > 80) return null;
     if (EASY_NEXT_RE.test(t)) return "next";
     if (EASY_REVIEW_RE.test(t)) return "review";
     if (EASY_SUBMIT_RE.test(t)) return "submit";
@@ -1661,8 +2481,9 @@
   }
 
   /**
-   * Pick the forward action. Priority next > review > submit so we advance
-   * through review pages to reach the real submit, then stop there.
+   * Pick the forward action.
+   * If Next/Continue exists, advance; only treat Submit/Apply as final when
+   * there is no Next button (final page of a multi-step form).
    */
   function findActionButton(scope) {
     const scopeEl = scope || getApplyScope();
@@ -1681,14 +2502,19 @@
         continue;
       }
       const cls = classifyActionButton(text);
-      if (cls === "next" && !next) next = btn;
-      else if (cls === "review" && !review) review = btn;
-      else if (cls === "submit" && !submit) submit = btn;
+      if (cls === "next" && !next) next = { type: "next", el: btn, text };
+      else if (cls === "review" && !review) review = { type: "review", el: btn, text };
+      else if (cls === "submit" && !submit) submit = { type: "submit", el: btn, text };
     }
-    if (next) return { type: "next", el: next };
-    if (review) return { type: "review", el: review };
-    if (submit) return { type: "submit", el: submit };
+    if (next) return next;
+    if (review) return review;
+    if (submit) return submit;
     return null;
+  }
+
+  function describeAction(action) {
+    if (!action) return null;
+    return { type: action.type, text: action.text || elActionText(action.el) };
   }
 
   async function clickEasyApplyEntry() {
@@ -1699,11 +2525,11 @@
       /easy apply|1-?click apply|one-?click apply|quick apply/i.test(elActionText(el))
     );
     const target = preferred || controls.find((el) => EASY_ENTRY_RE.test(elActionText(el)));
-    if (!target) return false;
+    if (!target) return { ok: false, clicked: false };
     scrollElIntoView(target);
     target.click();
     await sleep(1200);
-    return true;
+    return { ok: true, clicked: true, text: elActionText(target) };
   }
 
   function stepSignature() {
@@ -1715,12 +2541,110 @@
     return `${location.href}|${heading}|${fields}`;
   }
 
-  async function waitForStepChange(prevSig, timeoutMs = 9000) {
+  function getApplyActionSnapshot() {
+    const probe = probeApplicationForm();
+    let action = findActionButton();
+    // On a job listing (not the form yet), "Apply" / "Apply now" is an entry
+    // control — not the final submit. Remap so the SW can click through.
+    if (action?.type === "submit" && !probe.isApplicationForm) {
+      const t = action.text || elActionText(action.el);
+      if (EASY_ENTRY_RE.test(t)) {
+        action = { type: "entry", el: action.el, text: t };
+      }
+    }
+    return {
+      ok: true,
+      href: location.href,
+      signature: stepSignature(),
+      isApplicationForm: Boolean(probe.isApplicationForm),
+      blockedReason: probe.blockedReason || "",
+      jobUnavailable: probe.jobUnavailable || "",
+      action: describeAction(action),
+      applyUrls: probe.applyUrls || []
+    };
+  }
+
+  async function clickApplyAction(preferredType = "") {
+    const before = getApplyActionSnapshot();
+    let action = findActionButton();
+    if (preferredType === "entry") {
+      const entryRes = await clickEasyApplyEntry();
+      await sleep(400);
+      return {
+        ok: Boolean(entryRes?.clicked),
+        clicked: Boolean(entryRes?.clicked),
+        isSubmit: false,
+        action: entryRes?.clicked ? { type: "entry", text: entryRes.text || "" } : null,
+        before,
+        after: getApplyActionSnapshot()
+      };
+    }
+    if (preferredType) {
+      const scopeEl = getApplyScope();
+      const buttons = [
+        ...scopeEl.querySelectorAll(
+          'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
+        )
+      ].filter((el) => isElVisible(el) && isElEnabled(el));
+      const match = buttons.find((btn) => {
+        const text = elActionText(btn);
+        const cls = classifyActionButton(text);
+        if (preferredType === "entry") return EASY_ENTRY_RE.test(text);
+        return cls === preferredType;
+      });
+      if (match) {
+        action = {
+          type: preferredType,
+          el: match,
+          text: elActionText(match)
+        };
+      }
+    }
+    // Remap listing-page Apply → entry (same as snapshot).
+    if (action?.type === "submit" && !before.isApplicationForm) {
+      const t = action.text || elActionText(action.el);
+      if (EASY_ENTRY_RE.test(t)) {
+        action = { type: "entry", el: action.el, text: t };
+      }
+    }
+    if (!action) {
+      return { ok: false, clicked: false, before, after: before };
+    }
+    // Never auto-click final submit — SW stops for user review.
+    if (action.type === "submit") {
+      return {
+        ok: true,
+        clicked: false,
+        isSubmit: true,
+        action: describeAction(action),
+        before,
+        after: before
+      };
+    }
+    scrollElIntoView(action.el);
+    action.el.click();
+    await sleep(400);
+    return {
+      ok: true,
+      clicked: true,
+      isSubmit: false,
+      action: describeAction(action),
+      before,
+      after: getApplyActionSnapshot()
+    };
+  }
+
+  async function waitForStepChange(prevSig, timeoutMs = 12000) {
     const start = Date.now();
+    const prevHref = location.href;
     while (Date.now() - start < timeoutMs) {
       await sleep(350);
+      if (location.href !== prevHref) {
+        await sleep(500);
+        return true;
+      }
       if (stepSignature() !== prevSig) {
-        await sleep(300); // let the new step settle
+        await sleep(300);
         return true;
       }
     }
@@ -1763,7 +2687,9 @@
     jobMeta = {},
     site = "generic",
     autoSubmit = false,
-    maxSteps = 8
+    maxSteps = 12,
+    workHistory = [],
+    educationHistory = []
   } = {}) {
     const summary = {
       ok: true,
@@ -1815,7 +2741,10 @@
         return summary;
       }
 
-      const fillRes = await autofillApplication(applicantInfo, uploadFiles, credentials);
+      const fillRes = await autofillApplication(applicantInfo, uploadFiles, credentials, {
+        workHistory,
+        educationHistory
+      });
       summary.filled += Number(fillRes.filledCount || 0);
       summary.uploaded += Number(fillRes.uploadedCount || 0);
 
@@ -1896,6 +2825,8 @@
     /\b(password|otp|captcha|ssn|social security|credit card|card number|cvv|routing|account number|search|first name|last name|full name|middle name|legal name|email|e-mail|phone|mobile|telephone|address|street|city|state|province|zip|postal|country|linkedin|github|portfolio|website|date of birth|dob|birthday|salary|compensation|desired pay|expected pay|disability|veteran|military|\brace\b|ethnic|gender|\bsex\b|hispanic|latino|felony|conviction|criminal)\b/i;
 
   function captureQuestionText(el) {
+    const q = questionLabelForControl(el);
+    if (q) return q;
     const fieldset = el.closest("fieldset");
     const legend = fieldset?.querySelector(":scope > legend");
     if (legend) {
@@ -1960,7 +2891,7 @@
     // EEO, salary, ...) → learn into the PROFILE with fill-if-empty semantics so
     // the deterministic autofill reuses it. These are the most common questions
     // and are kept out of the exportable Q&A bank.
-    const profileKey = matchApplicantKey(labelTextForControl(el));
+    const profileKey = matchApplicantKeyFromControl(el);
     if (profileKey) {
       const value = canonicalValueForKey(profileKey, answer);
       if (!value) return;
@@ -1975,12 +2906,13 @@
       return;
     }
 
-    // Only novel CHOICE questions (dropdown / checkbox / radio) are stored for
-    // reuse — their answers are stable across roles. Free-text questions (e.g.
-    // "most challenging project") depend on the role/JD, so those are always
-    // AI-generated per application and never stored here.
+    // Novel questions (dropdown / checkbox / radio / short text) go into the
+    // per-profile Q&A bank. Long essays stay out — those are JD-specific.
     const isChoice = el.tagName === "SELECT" || type === "radio" || type === "checkbox";
-    if (!isChoice) return;
+    if (!isChoice) {
+      if (el.tagName === "TEXTAREA" && answer.length > 160) return;
+      if (answer.length > 400) return;
+    }
 
     const label = captureQuestionText(el);
     if (!label) return;
@@ -1992,12 +2924,23 @@
     if (learnSentByQuestion.get(labelNorm) === answer) return;
     learnSentByQuestion.set(labelNorm, answer);
 
+    const fieldType =
+      el.tagName === "SELECT"
+        ? "select"
+        : el.tagName === "TEXTAREA"
+          ? "textarea"
+          : type === "checkbox"
+            ? "checkbox"
+            : type === "radio"
+              ? "radio"
+              : "text";
+
     try {
       chrome.runtime.sendMessage({
         type: "qa_learn_capture",
         question: label.slice(0, 1000),
         answer: answer.slice(0, 2000),
-        fieldType: "choice",
+        fieldType,
         site: location.hostname
       });
     } catch {
@@ -2791,6 +3734,32 @@
       }
       return true;
     }
+    if (message?.type === "get_apply_action") {
+      try {
+        sendResponse(getApplyActionSnapshot());
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+      return true;
+    }
+    if (message?.type === "click_apply_action") {
+      clickApplyAction(message.preferredType || "")
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "click_easy_apply_entry") {
+      clickEasyApplyEntry()
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "wait_apply_step_change") {
+      waitForStepChange(message.prevSignature || "", Number(message.timeoutMs) || 12000)
+        .then((advanced) => sendResponse({ ok: true, advanced }))
+        .catch((err) => sendResponse({ ok: false, advanced: false, error: String(err?.message || err) }));
+      return true;
+    }
     if (message?.type === "easy_apply_run") {
       runEasyApply({
         applicantInfo: message.applicantInfo || {},
@@ -2799,7 +3768,9 @@
         profileId: message.profileId || "",
         jobMeta: message.jobMeta || {},
         site: message.site || "generic",
-        autoSubmit: Boolean(message.autoSubmit)
+        autoSubmit: Boolean(message.autoSubmit),
+        workHistory: message.workHistory || [],
+        educationHistory: message.educationHistory || []
       })
         .then((summary) => sendResponse(summary))
         .catch((err) => sendResponse({ ok: false, status: "failed", error: String(err?.message || err) }));
@@ -2809,7 +3780,11 @@
     autofillApplication(
       message.applicantInfo || {},
       message.uploadFiles || {},
-      message.credentials || {}
+      message.credentials || {},
+      {
+        workHistory: message.workHistory || [],
+        educationHistory: message.educationHistory || []
+      }
     )
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));

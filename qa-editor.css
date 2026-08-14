@@ -1,0 +1,36 @@
+.qa-editor {
+  max-width: 920px;
+}
+
+.qa-list-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.qa-list-header .section-title {
+  margin: 0;
+}
+
+.qa-editor-list {
+  max-height: none;
+}
+
+.qa-item-a-preview {
+  margin: 0 0 4px;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+.qa-item.is-editing {
+  border-color: #2563eb;
+}
+
+#saveBtn.primary {
+  width: auto;
+  min-width: 120px;
+}

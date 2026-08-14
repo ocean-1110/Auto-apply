@@ -69,7 +69,7 @@
         "default": "Alt+Shift+S",
         "mac": "Alt+Shift+S"
       },
-      "description": "Scrape open job → generate → Easy Apply"
+      "description": "Scrape open job → generate → Auto Apply"
     },
     "generate_docs": {
       "suggested_key": {
@@ -83,7 +83,7 @@
         "default": "Alt+Shift+E",
         "mac": "Alt+Shift+E"
       },
-      "description": "Easy Apply on current Dice/Jobright page"
+      "description": "Auto Apply on current page (multi-step, any site)"
     }
   }
 }
