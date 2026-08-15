@@ -6,7 +6,7 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-13.1";
+  const SCRIPT_BUILD = "2026-08-15.2";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -603,6 +603,14 @@
       .trim();
   }
 
+  function escapeHtmlText(value) {
+    return String(value || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  }
+
   function labelTextForControl(el) {
     const parts = [];
     if (el.id) {
@@ -954,6 +962,7 @@
 
   function looksLikeCombobox(el) {
     if (!el) return false;
+    if (isRichTextEditor(el)) return false;
     if (isReactSelectInput(el)) return true;
     const role = (el.getAttribute("role") || "").toLowerCase();
     if (role === "combobox" || role === "listbox") return true;
@@ -1224,6 +1233,8 @@
       return true;
     }
 
+    if (isRichTextEditor(el)) return fillContentEditable(el, value);
+
     // Non-input combobox buttons / divs / react-select controls
     if (looksLikeCombobox(el) || isReactSelectInput(el) || el.getAttribute("role") === "combobox") {
       return fillCustomDropdown(el, value, key);
@@ -1245,18 +1256,119 @@
   }
 
   function classifyFileInput(el) {
-    const label = labelTextForControl(el);
+    const label = fileFieldContext(el);
     const name = normalize(
       [el.getAttribute("name"), el.getAttribute("id"), el.getAttribute("accept"), label].join(" ")
     );
-    if (/cover\s*letter|covering\s*letter|coverletter/.test(name)) return "coverLetter";
-    if (/\b(resume|cv|curriculum|vitae)\b/.test(name)) return "resume";
-    if (/\bcover\b/.test(name) && !/\b(resume|cv)\b/.test(name)) return "coverLetter";
-    return "resume";
+    if (
+      /cover\s*letter|covering\s*letter|coverletter/.test(name) &&
+      !/\b(attach any|any files|additional files)\b/.test(name) &&
+      !/\bcover letter is not required\b/.test(name)
+    ) {
+      return "coverLetter";
+    }
+    if (
+      /\b(any files|additional files|other files|supporting documents|optional attachment|attach any)\b/.test(
+        name
+      )
+    ) {
+      return "other";
+    }
+    if (/\b(resume|cv|curriculum|vitae|include your resume)\b/.test(name)) return "resume";
+    if (/\brequired\b/.test(name) && /\b(attach|upload|file|pdf)\b/.test(name) && !/\bcover\b/.test(name)) {
+      return "resume";
+    }
+    return "other";
+  }
+
+  function fileFieldRoot(el) {
+    let node = el?.parentElement || null;
+    let last = node;
+    while (node) {
+      const files = node.querySelectorAll?.('input[type="file"]') || [];
+      if (files.length > 1) return last;
+      last = node;
+      const blob = `${node.className || ""} ${node.getAttribute?.("data-testid") || ""} ${
+        node.getAttribute?.("data-automation-id") || ""
+      }`;
+      if (/\b(dropzone|drop-zone|file-upload|fileupload|attachment)\b/i.test(blob)) return node;
+      node = node.parentElement;
+    }
+    return last;
+  }
+
+  function fileFieldContext(el) {
+    const parts = [labelTextForControl(el)];
+    let node = el?.parentElement || null;
+    while (node) {
+      const files = node.querySelectorAll?.('input[type="file"]') || [];
+      if (files.length > 1) break;
+      const clone = node.cloneNode(true);
+      clone
+        .querySelectorAll("input, textarea, select, button, svg, [contenteditable]")
+        .forEach((n) => n.remove());
+      const t = cleanLabelText(clone.textContent).slice(0, 400);
+      if (t) parts.push(t);
+      const blob = parts.join(" ");
+      if (/\b(resume|cv|curriculum|vitae|cover letter|attach any|additional files)\b/i.test(blob)) {
+        break;
+      }
+      node = node.parentElement;
+    }
+    return parts.filter(Boolean).join(" ");
+  }
+
+  function scoreResumeField(label) {
+    const n = normalize(label);
+    let score = 0;
+    if (/\binclude your resume\b/.test(n)) score += 120;
+    if (/\b(resume|cv|curriculum|vitae)\b/.test(n)) score += 60;
+    if (/\brequired\b/.test(n)) score += 25;
+    if (/\b(optional|any files|additional|attach any|not required)\b/.test(n)) score -= 100;
+    return score;
+  }
+
+  function dropzoneForInput(input) {
+    const root = fileFieldRoot(input);
+    if (!root) return input;
+    return (
+      root.querySelector(
+        '[class*="drop"], [class*="Drop"], [data-testid*="drop"], [data-testid*="upload"], [class*="upload"]'
+      ) || root
+    );
+  }
+
+  function dispatchFileDrop(target, file) {
+    if (!target || !file) return false;
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      const fire = (type) => {
+        let event;
+        try {
+          event = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+        } catch {
+          event = new Event(type, { bubbles: true, cancelable: true });
+        }
+        try {
+          Object.defineProperty(event, "dataTransfer", { value: dt });
+        } catch {
+          /* some browsers freeze dataTransfer */
+        }
+        target.dispatchEvent(event);
+      };
+      fire("dragenter");
+      fire("dragover");
+      fire("drop");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function setFileOnInput(input, file) {
     if (!input || !file) return false;
+    let ok = false;
     try {
       const dt = new DataTransfer();
       dt.items.add(file);
@@ -1266,10 +1378,12 @@
       input.dispatchEvent(
         new CustomEvent("file-upload-success", { bubbles: true, detail: { fileName: file.name } })
       );
-      return input.files && input.files.length > 0;
+      ok = Boolean(input.files && input.files.length > 0);
     } catch {
-      return false;
+      ok = false;
     }
+    dispatchFileDrop(dropzoneForInput(input), file);
+    return ok || Boolean(input.files && input.files.length > 0);
   }
 
   function collectFileInputs() {
@@ -1305,33 +1419,45 @@
       return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-file-inputs" }] };
     }
 
+    const classified = inputs.map((input) => ({
+      input,
+      kind: classifyFileInput(input),
+      label: fileFieldContext(input)
+    }));
+
+    const resumeRows = classified
+      .filter((row) => row.kind === "resume")
+      .sort((a, b) => scoreResumeField(b.label) - scoreResumeField(a.label));
+    const coverRows = classified.filter((row) => row.kind === "coverLetter");
+    const targets = [];
+    if (resumeFile && resumeRows.length) targets.push({ ...resumeRows[0], file: resumeFile, kind: "resume" });
+    if (coverFile) {
+      for (const row of coverRows) targets.push({ ...row, file: coverFile, kind: "coverLetter" });
+    }
+
     const used = new WeakSet();
-
-    for (const input of inputs) {
-      const kind = classifyFileInput(input);
-      let file = null;
-      if (kind === "coverLetter" && coverFile) file = coverFile;
-      else if (kind === "resume" && resumeFile) file = resumeFile;
-      else if (kind === "coverLetter" && !coverFile && resumeFile) {
-        skipped.push({ reason: "no-cover-letter-doc", label: labelTextForControl(input) });
-        continue;
-      } else if (resumeFile) file = resumeFile;
-
-      if (!file || used.has(input)) continue;
-      const ok = setFileOnInput(input, file);
+    for (const row of targets) {
+      if (!row.file || used.has(row.input)) continue;
+      const ok = setFileOnInput(row.input, row.file);
       if (ok) {
-        used.add(input);
+        used.add(row.input);
         uploaded.push({
-          kind,
-          fileName: file.name,
-          label: labelTextForControl(input)
+          kind: row.kind,
+          fileName: row.file.name,
+          label: row.label
         });
       } else {
         skipped.push({
           reason: "set-failed",
-          kind,
-          label: labelTextForControl(input)
+          kind: row.kind,
+          label: row.label
         });
+      }
+    }
+
+    for (const row of classified) {
+      if (row.kind === "other") {
+        skipped.push({ reason: "optional-other-files", label: row.label });
       }
     }
 
@@ -1349,7 +1475,7 @@
       return true;
     }
     if (
-      /\b(experience|interested|motivation|challenge|strength|weakness|about yourself|additional|comment|approach|follow.?up)\b/i.test(
+      /\b(experience|interested|motivation|challenge|strength|weakness|about yourself|additional|comment|approach|follow.?up|customization|architecture)\b/i.test(
         t
       )
     ) {
@@ -1358,7 +1484,209 @@
     return false;
   }
 
+  const EDITOR_PLACEHOLDER_RE =
+    /we want to hear from you|please answer based on your own experience|authentic answers help|type here|enter text|write here|your answer|click to (type|enter)|this field is required/i;
+  const GENERIC_CLIENT_PROMPT_RE =
+    /please answer this question from the client/i;
+
+  function isRichTextEditor(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return false;
+    if (el.closest?.('[role="toolbar"], .ql-toolbar, .tox-toolbar, .cke_toolbox, .fr-toolbar')) {
+      return false;
+    }
+    const ce = String(el.getAttribute("contenteditable") || "").toLowerCase();
+    if (ce === "true" || ce === "") return true;
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (role === "textbox" && el.getAttribute("aria-multiline") === "true") return true;
+    const cls = String(el.className || "");
+    return /\b(ql-editor|ck-editor__editable|fr-element|public-DraftEditor-content|ProseMirror|lexical-contenteditable)\b/i.test(
+      cls
+    );
+  }
+
+  function editorPlainText(el) {
+    if (!el) return "";
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      return String(el.value || "").trim();
+    }
+    return cleanLabelText(el.innerText || el.textContent || "");
+  }
+
+  function isEditorEmpty(el) {
+    const t = editorPlainText(el);
+    if (!t) return true;
+    const ph = String(
+      el.getAttribute("data-placeholder") ||
+        el.getAttribute("placeholder") ||
+        el.getAttribute("aria-placeholder") ||
+        ""
+    ).trim();
+    if (ph && normalize(t) === normalize(ph)) return true;
+    if (/^(this field is required\.?|required|\u00a0)$/i.test(t)) return true;
+    if (EDITOR_PLACEHOLDER_RE.test(t) && t.length < 400) return true;
+    return false;
+  }
+
+  function scoreQuestionCandidate(text) {
+    const t = cleanLabelText(text);
+    if (!t || t.length < 8 || t.length > 1200) return -1;
+    if (EDITOR_PLACEHOLDER_RE.test(t) && t.length < 400) return -1;
+    if (/^(this field is required\.?|required)$/i.test(t)) return -1;
+    let score = Math.min(t.length, 220);
+    if (/[?]/.test(t)) score += 80;
+    if (looksLikeQuestionLabel(t)) score += 40;
+    if (GENERIC_CLIENT_PROMPT_RE.test(t) && t.length < 120) score -= 220;
+    if (/please confirm which|certifications you currently hold/i.test(t)) score += 60;
+    return score;
+  }
+
+  function fieldRootForEditor(el) {
+    let node = el?.parentElement || null;
+    let last = el;
+    const editorSel =
+      '[contenteditable="true"], [contenteditable=""], .ql-editor, .ck-editor__editable, .fr-element, .public-DraftEditor-content, .ProseMirror';
+    while (node) {
+      const editors = [...(node.querySelectorAll?.(editorSel) || [])].filter((n) => isRichTextEditor(n));
+      if (editors.length > 1) return last;
+      last = node;
+      const blob = `${node.className || ""} ${node.getAttribute?.("data-automation-id") || ""} ${
+        node.getAttribute?.("data-testid") || ""
+      }`;
+      if (/\b(formfield|form-field|formField|question|applicationquestion|field-wrapper)\b/i.test(blob)) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return last;
+  }
+
+  function questionTextNearEditor(el) {
+    const candidates = [];
+    const push = (value) => {
+      const t = cleanLabelText(value);
+      if (!t) return;
+      const stripped = t
+        .replace(GENERIC_CLIENT_PROMPT_RE, " ")
+        .replace(/\bthis field is required\b/gi, " ")
+        .replace(EDITOR_PLACEHOLDER_RE, " ");
+      const core = cleanLabelText(stripped);
+      if (core) candidates.push(core);
+      candidates.push(t);
+    };
+
+    const root = fieldRootForEditor(el);
+    push(questionTextForAi(el));
+    push(questionLabelForControl(el));
+    push(el.getAttribute("aria-label"));
+    push(el.getAttribute("data-placeholder"));
+
+    if (root) {
+      const clone = root.cloneNode(true);
+      clone.querySelectorAll("input, textarea, select, button, svg, [contenteditable], .ql-editor").forEach((n) => {
+        if (n !== el) n.remove();
+      });
+      push(clone.textContent);
+      for (const hit of root.querySelectorAll(
+        "blockquote, q, em, i, label, legend, h2, h3, h4, p, [class*='question'], [class*='prompt']"
+      )) {
+        if (hit.contains(el) || el.contains(hit)) continue;
+        if (hit.closest("[contenteditable], .ql-editor")) continue;
+        push(hit.textContent);
+      }
+      const prev = root.previousElementSibling;
+      if (prev && !prev.querySelector?.("[contenteditable], .ql-editor, input[type='file']")) {
+        push(prev.textContent);
+      }
+    }
+
+    try {
+      const frame = window.frameElement;
+      if (frame) {
+        push(questionTextForAi(frame));
+        push(questionLabelForControl(frame));
+        push(frame.getAttribute("title"));
+        push(frame.getAttribute("aria-label"));
+        const hostPrev = frame.previousElementSibling;
+        if (hostPrev) push(hostPrev.textContent);
+      }
+    } catch {
+      /* cross-origin iframe */
+    }
+
+    let best = "";
+    let bestScore = -1;
+    for (const c of candidates) {
+      const score = scoreQuestionCandidate(c);
+      if (score > bestScore) {
+        bestScore = score;
+        best = c;
+      }
+    }
+    return String(best || "").slice(0, 1000);
+  }
+
+  function fillContentEditable(el, value) {
+    const text = String(value || "").trim();
+    if (!text || !el) return false;
+    try {
+      el.focus();
+    } catch {
+      /* focus is best-effort */
+    }
+
+    const insertOk = (() => {
+      try {
+        document.execCommand("selectAll", false, null);
+        return document.execCommand("insertText", false, text);
+      } catch {
+        return false;
+      }
+    })();
+
+    const shown = editorPlainText(el);
+    if (!insertOk || !shown || EDITOR_PLACEHOLDER_RE.test(shown)) {
+      const html = text
+        .split(/\n+/)
+        .map((p) => `<p>${escapeHtmlText(p)}</p>`)
+        .join("");
+      try {
+        el.innerHTML = html || `<p>${escapeHtmlText(text)}</p>`;
+      } catch {
+        el.textContent = text;
+      }
+    }
+
+    try {
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, cancelable: true, inputType: "insertText", data: text })
+      );
+    } catch {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    try {
+      el.blur();
+    } catch {
+      /* ignore */
+    }
+
+    const root =
+      el.closest(
+        ".ql-container, .fr-box, .tox-tinymce, .ck-editor, [class*='RichText'], [class*='rich-text'], [class*='editor'], form, fieldset"
+      ) || el.parentElement;
+    if (root) {
+      for (const ta of root.querySelectorAll("textarea")) {
+        setNativeValue(ta, text);
+      }
+    }
+    return !isEditorEmpty(el);
+  }
+
   function isMultilineControl(el) {
+    if (!el) return false;
+    if (isRichTextEditor(el)) return true;
     return el.tagName === "TEXTAREA" || Number(el.rows || 0) > 1;
   }
 
@@ -1390,7 +1718,8 @@
     ) {
       return true;
     }
-    if (String(el.value || "").trim()) return true;
+    if (String(el.value || "").trim() && !isRichTextEditor(el)) return true;
+    if (isRichTextEditor(el) && !isEditorEmpty(el)) return true;
     return false;
   }
 
@@ -1433,17 +1762,41 @@
       return false;
     });
 
-    for (const el of nodes) {
+    const richNodes = [
+      ...document.querySelectorAll(
+        '[contenteditable="true"], [contenteditable=""], [role="textbox"][aria-multiline="true"], .ql-editor, .ck-editor__editable, .fr-element, .public-DraftEditor-content, .ProseMirror'
+      )
+    ].filter((el) => {
+      if (!isRichTextEditor(el)) return false;
+      const inner = el.querySelector(
+        '[contenteditable="true"], .ql-editor, .ProseMirror, .ck-editor__editable, .fr-element'
+      );
+      if (inner && inner !== el) return false;
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 120 || rect.height < 40) return false;
+      } catch {
+        return false;
+      }
+      return true;
+    });
+
+    const all = [...richNodes, ...nodes];
+
+    for (const el of all) {
       // Hard skip Greenhouse / React-Select — never AI-fill dropdown search inputs.
-      if (isReactSelectInput(el) || looksLikeCombobox(el)) continue;
+      if (!isRichTextEditor(el) && (isReactSelectInput(el) || looksLikeCombobox(el))) continue;
 
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (el.disabled || el.readOnly) continue;
 
       if (isHistoryFilled(el)) continue;
+      const rich = isRichTextEditor(el);
+      if (rich && !isEditorEmpty(el)) continue;
+
       const labelNorm = labelTextForControl(el);
-      const questionLabel = questionTextForAi(el);
+      const questionLabel = rich ? questionTextNearEditor(el) : questionTextForAi(el);
       if (!labelNorm && !questionLabel) continue;
       if (shouldSkipAiField(el, labelNorm || questionLabel)) continue;
 
@@ -1465,7 +1818,7 @@
       }
 
       const questionLike =
-        looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm);
+        looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm) || rich;
       const hasUsefulLabel = String(questionLabel || labelNorm).trim().length >= 3;
       if (!questionLike && !multiline && !hasUsefulLabel) continue;
       if (multiline && !questionLike && String(questionLabel || labelNorm).trim().length < 8) {
@@ -1483,7 +1836,8 @@
         id,
         label: labelForAi,
         multiline,
-        fieldType: el.tagName === "TEXTAREA" ? "textarea" : "text"
+        richText: rich,
+        fieldType: rich ? "richtext" : el.tagName === "TEXTAREA" ? "textarea" : "text"
       });
     }
 
@@ -1567,6 +1921,48 @@
               ? "radio"
               : "select";
       out.push({ id, label: label.slice(0, 1000), options, fieldType });
+    }
+
+    const seenLabels = new Set(out.map((q) => normalize(q.label)));
+    const comboNodes = [
+      ...document.querySelectorAll(
+        '[role="combobox"], input.select__input, [aria-haspopup="listbox"]'
+      )
+    ];
+    for (const el of comboNodes) {
+      if (out.length >= 40) break;
+      if (!looksLikeCombobox(el) && !isReactSelectInput(el)) continue;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (el.disabled) continue;
+      if (isHistoryFilled(el)) continue;
+      if (matchApplicantKeyFromControl(el)) continue;
+      if (String(el.value || "").trim() && !isPlaceholderChoiceValue(el.value)) continue;
+
+      const label = captureQuestionText(el);
+      if (!label || LEARN_SENSITIVE_RE.test(label)) continue;
+      const labelNorm = normalize(label);
+      if (!labelNorm || labelNorm.length < 6 || seenLabels.has(labelNorm)) continue;
+
+      const expanded = el.getAttribute("aria-expanded") === "true";
+      const options = expanded
+        ? collectVisibleOptions(document)
+            .map((node) => cleanLabelText(node.textContent))
+            .filter(Boolean)
+            .slice(0, 40)
+        : [];
+
+      const id = `rbc_${out.length}_${Math.abs(
+        Array.from(labelNorm).reduce((n, ch) => (n * 31 + ch.charCodeAt(0)) | 0, 7)
+      )}`;
+      el.setAttribute("data-resume-bot-choice-qid", id);
+      seenLabels.add(labelNorm);
+      out.push({
+        id,
+        label: label.slice(0, 1000),
+        options,
+        fieldType: "combobox"
+      });
     }
 
     return out;
@@ -2666,12 +3062,13 @@
     }
   }
 
-  async function requestChoiceAnswersFromSw(questions, profileId) {
+  async function requestChoiceAnswersFromSw(questions, profileId, site = "") {
     try {
       const res = await chrome.runtime.sendMessage({
         type: "easy_apply_choice_answers",
         questions,
-        profileId
+        profileId,
+        site
       });
       return Array.isArray(res?.answers) ? res.answers : [];
     } catch {
@@ -2753,7 +3150,7 @@
         ? fillRes.unmatchedChoiceQuestions
         : [];
       if (choiceQuestions.length) {
-        const choiceAnswers = await requestChoiceAnswersFromSw(choiceQuestions, profileId);
+        const choiceAnswers = await requestChoiceAnswersFromSw(choiceQuestions, profileId, site);
         if (choiceAnswers.length) {
           const r = await fillChoiceAnswers(choiceAnswers);
           summary.filled += Number(r.filledCount || 0);

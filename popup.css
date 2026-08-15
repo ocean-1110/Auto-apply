@@ -257,14 +257,14 @@ h1 {
 
 .toolbar {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr auto;
   gap: 6px;
   align-items: end;
   margin-bottom: 8px;
 }
 
 .toolbar:has(#deleteProfile:not([hidden])) {
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: 1fr 1fr auto auto;
 }
 
 .toolbar .field {
@@ -476,9 +476,89 @@ button:disabled {
 }
 
 .status-dock .gen-progress,
-.status-dock .save-banner {
+.status-dock .save-banner,
+.status-dock .ats-badge {
   margin: 0 0 6px;
   text-align: left;
+}
+
+.ats-badge {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #111827;
+  cursor: default;
+}
+
+.ats-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.ats-badge strong {
+  font-size: 18px;
+  line-height: 1;
+  color: #e5e7eb;
+}
+
+.ats-badge.is-high {
+  border-color: #166534;
+}
+
+.ats-badge.is-high strong {
+  color: #86efac;
+}
+
+.ats-badge.is-mid {
+  border-color: #854d0e;
+}
+
+.ats-badge.is-mid strong {
+  color: #fde047;
+}
+
+.ats-badge.is-low {
+  border-color: #7f1d1d;
+}
+
+.ats-badge.is-low strong {
+  color: #fca5a5;
+}
+
+.ats-tooltip {
+  display: none;
+  position: absolute;
+  left: 0;
+  top: calc(100% + 6px);
+  z-index: 8;
+  min-width: 260px;
+  max-width: 340px;
+  padding: 8px 10px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.ats-badge:hover .ats-tooltip,
+.ats-badge:focus-within .ats-tooltip {
+  display: block;
+}
+
+.sheet-preset-actions {
+  margin: 6px 0 4px;
 }
 
 .accordion {

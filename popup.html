@@ -62,6 +62,9 @@
               <span>Template</span>
               <select id="templateSelect"></select>
             </label>
+            <button type="button" id="openDashboard" class="secondary compact" title="Application counts and status by profile">
+              Dashboard
+            </button>
             <button type="button" id="deleteProfile" class="secondary danger compact" hidden title="Delete selected profile">
               Delete
             </button>
@@ -90,6 +93,12 @@
                 <span id="saveBannerPath"></span>
               </div>
               <button type="button" id="openSavedFolder" class="compact">Open folder</button>
+            </section>
+
+            <section id="atsScoreBadge" class="ats-badge" hidden>
+              <span class="ats-kicker">ATS</span>
+              <strong id="atsScoreValue">—</strong>
+              <div class="ats-tooltip" id="atsScoreTooltip" role="tooltip"></div>
             </section>
 
             <p id="status" role="status"></p>
@@ -163,6 +172,21 @@
             </summary>
             <div class="accordion-body">
               <label class="field">
+                <span>Saved sheet (per profile)</span>
+                <select id="sheetPresetSelect">
+                  <option value="">— None —</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Sheet nickname</span>
+                <input
+                  id="sheetPresetLabel"
+                  type="text"
+                  placeholder="e.g. Steven Avon applications"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field">
                 <span>Spreadsheet link (open the target tab first, then paste that URL)</span>
                 <input
                   id="spreadsheetUrl"
@@ -192,8 +216,16 @@
                 </label>
                 <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
               </div>
+              <div class="row-split sheet-preset-actions">
+                <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for the selected profile">
+                  Save for this profile
+                </button>
+                <button type="button" id="deleteSheetPreset" class="secondary compact danger" title="Remove the selected saved sheet">
+                  Delete saved
+                </button>
+              </div>
               <p class="hint">
-                Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
+                Save once, then pick the sheet when you switch profiles. The Apps Script URL is stored with each sheet so you do not paste it every time. Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
               </p>
             </div>
           </details>
@@ -261,8 +293,9 @@
             <div class="accordion-body">
               <p class="hint">
                 Reusable answers are stored <strong>per profile</strong> (plus a shared bank).
-                Autofill uses the bank before AI so later jobs stay cheap. Long JD essays are
-                not stored.
+                Autofill uses the bank before AI so later jobs stay cheap. Fields not in the
+                bank show up in the editor as <strong>Needs answers</strong> (type, question,
+                check/select/type). Long JD essays are not stored.
               </p>
               <label class="qa-learn-toggle">
                 <input type="checkbox" id="qaLearnToggle" checked />

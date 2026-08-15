@@ -68,9 +68,13 @@ const COMPLEX_RE =
 /** JD-specific essays — always AI per job, never stored in the Q&A bank. */
 export function isComplexQuestion(q) {
   const label = String(q?.label || "");
-  if (q?.multiline && COMPLEX_RE.test(label)) return true;
+  const longForm = Boolean(
+    q?.multiline || q?.richText || q?.fieldType === "richtext" || q?.fieldType === "textarea"
+  );
+  if (q?.richText || q?.fieldType === "richtext") return true;
+  if (longForm && COMPLEX_RE.test(label)) return true;
   if (label.length > 220 && COMPLEX_RE.test(label)) return true;
-  if (q?.multiline && label.length > 160) return true;
+  if (longForm && label.length > 120) return true;
   return false;
 }
 
@@ -123,6 +127,12 @@ function answersFromJson(raw, list) {
     .filter((row) => row.answer);
 }
 
+function isLongFormQuestion(q) {
+  return Boolean(
+    q?.multiline || q?.richText || q?.fieldType === "richtext" || q?.fieldType === "textarea"
+  );
+}
+
 /**
  * @returns {Promise<{ answers: Array<{ id: string, answer: string }>, usage: object }>}
  */
@@ -135,52 +145,77 @@ export async function generateHumanizedApplicationAnswers({
   resumeText = "",
   applicationBrief = null
 }) {
-  const list = (questions || []).filter((q) => q?.id && q?.label).slice(0, 10);
+  const list = (questions || []).filter((q) => q?.id && q?.label);
   if (!list.length) return { answers: [], usage: null };
 
-  const profile = compactApplicantContext(applicantInfo);
-  const result = await chatCompletion({
-    apiKey,
-    model,
-    jsonMode: true,
-    temperature: 0.65,
-    maxTokens: 1800,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You answer US job-application form questions for a real candidate. " +
-          "Return ONLY valid JSON: {\"answers\":[{\"id\":\"...\",\"answer\":\"...\"}]}. " +
-          "Keep each answer to 1-2 sentences max (a short phrase for tiny fields). " +
-          "For yes/no style answers use Title Case exactly: \"Yes\" or \"No\" (never lowercase). " +
-          "If the question requires a specific opening phrase, begin the answer with that phrase exactly. " +
-          "Ground answers in the candidate resume/profile/brief; prefer real roles, employers, tools, and skills. " +
-          "Do not invent employers, degrees, visas, or tools that contradict the resume/profile. " +
-          "If the resume lacks a specific story the question asks for, give a cautious brief answer based on transferable experience — do not fabricate a detailed false project."
-      },
-      {
-        role: "user",
-        content: JSON.stringify(
-          {
-            ...buildAutofillContext({ jobMeta, resumeText, applicationBrief }),
-            candidateProfile: profile,
-            questions: list.map((q) => ({
-              id: q.id,
-              question: q.label,
-              preferLonger: Boolean(q.multiline)
-            }))
-          },
-          null,
-          2
-        )
-      }
-    ]
-  });
+  const longForm = list.filter(isLongFormQuestion);
+  const short = list.filter((q) => !isLongFormQuestion(q));
+  const chunks = [];
+  for (let i = 0; i < longForm.length; i += 6) chunks.push(longForm.slice(i, i + 6));
+  for (let i = 0; i < short.length; i += 10) chunks.push(short.slice(i, i + 10));
 
-  return {
-    answers: answersFromJson(result.content, list),
-    usage: result.usage
-  };
+  const profile = compactApplicantContext(applicantInfo);
+  const answers = [];
+  let usage = null;
+
+  for (const chunk of chunks) {
+    const hasLongForm = chunk.some(isLongFormQuestion);
+    const result = await chatCompletion({
+      apiKey,
+      model,
+      jsonMode: true,
+      temperature: 0.65,
+      maxTokens: hasLongForm ? 3600 : 1800,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You answer US job-application form questions for a real candidate. " +
+            "Return ONLY valid JSON: {\"answers\":[{\"id\":\"...\",\"answer\":\"...\"}]}. " +
+            "Include an answer object for EVERY question id you were given. " +
+            "For short fields keep each answer to 1-2 sentences (a short phrase for tiny fields). " +
+            "If a question asks which certifications/credentials you hold, name them directly from the resume (or say you do not hold that specific cert). " +
+            "For questions marked preferLonger, write 2-4 short paragraphs (about 90-180 words) in first person, " +
+            "grounded in the resume — concrete tools, employers, and decisions, no buzzword padding. " +
+            "For yes/no style answers use Title Case exactly: \"Yes\" or \"No\" (never lowercase). " +
+            "If the question requires a specific opening phrase, begin the answer with that phrase exactly. " +
+            "Ground answers in the candidate resume/profile/brief; prefer real roles, employers, tools, and skills. " +
+            "Do not invent employers, degrees, visas, or tools that contradict the resume/profile. " +
+            "If the resume lacks a specific story the question asks for, give a cautious brief answer based on transferable experience — do not fabricate a detailed false project. " +
+            "Use plain text only (no markdown headings)."
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              ...buildAutofillContext({ jobMeta, resumeText, applicationBrief }),
+              candidateProfile: profile,
+              questions: chunk.map((q) => ({
+                id: q.id,
+                question: q.label,
+                preferLonger: isLongFormQuestion(q)
+              }))
+            },
+            null,
+            2
+          )
+        }
+      ]
+    });
+    answers.push(...answersFromJson(result.content, chunk));
+    if (result.usage) {
+      usage = usage
+        ? {
+            prompt_tokens: Number(usage.prompt_tokens || 0) + Number(result.usage.prompt_tokens || 0),
+            completion_tokens:
+              Number(usage.completion_tokens || 0) + Number(result.usage.completion_tokens || 0),
+            total_tokens: Number(usage.total_tokens || 0) + Number(result.usage.total_tokens || 0)
+          }
+        : result.usage;
+    }
+  }
+
+  return { answers, usage };
 }
 
 function pickClosestOption(answer, options = []) {

@@ -10,6 +10,11 @@ import {
   exportQa,
   importQa
 } from "./qa-store.js";
+import {
+  getPendingQa,
+  dismissPendingQa,
+  dismissPendingMatchingQuestion
+} from "./pending-qa.js";
 
 const SHARED_ID = "";
 const ALL_ID = "__all__";
@@ -25,6 +30,9 @@ const els = {
   formAnswer: document.getElementById("formAnswer"),
   formFieldType: document.getElementById("formFieldType"),
   formScope: document.getElementById("formScope"),
+  formOptionsHint: document.getElementById("formOptionsHint"),
+  pendingCard: document.getElementById("pendingCard"),
+  pendingList: document.getElementById("pendingList"),
   saveBtn: document.getElementById("saveBtn"),
   cancelEditBtn: document.getElementById("cancelEditBtn"),
   qaList: document.getElementById("qaList"),
@@ -39,7 +47,10 @@ const els = {
 let profiles = [];
 /** @type {object[]} */
 let allRows = [];
+/** @type {object[]} */
+let pendingRows = [];
 let editingId = null;
+let pendingDraftId = null;
 
 function setStatus(message, isError = false) {
   els.status.textContent = message;
@@ -116,17 +127,137 @@ function rowsForView() {
 
 function resetForm() {
   editingId = null;
+  pendingDraftId = null;
   els.formTitle.textContent = "Add Q&A";
   els.saveBtn.textContent = "Save Q&A";
   els.cancelEditBtn.hidden = true;
   els.formQuestion.value = "";
   els.formAnswer.value = "";
+  els.formAnswer.placeholder =
+    "For dropdowns, the option text to pick. For checkboxes, Yes or No.";
   els.formFieldType.value = "text";
+  if (els.formOptionsHint) {
+    els.formOptionsHint.hidden = true;
+    els.formOptionsHint.textContent = "";
+  }
   const view = filterProfileId();
   if (view && view !== ALL_ID) els.formScope.value = view;
 }
 
+function showOptionsHint(draft) {
+  if (!els.formOptionsHint) return;
+  const how = String(draft?.answerHow || "").trim();
+  const options = Array.isArray(draft?.options) ? draft.options.filter(Boolean) : [];
+  if (!how && !options.length) {
+    els.formOptionsHint.hidden = true;
+    els.formOptionsHint.textContent = "";
+    return;
+  }
+  const parts = [];
+  if (how) parts.push(how);
+  if (options.length) parts.push(`Choices: ${options.join(" · ")}`);
+  els.formOptionsHint.textContent = parts.join(" — ");
+  els.formOptionsHint.hidden = false;
+}
+
+function startFromPending(draft) {
+  pendingDraftId = draft.id;
+  editingId = null;
+  els.formTitle.textContent = "Register form field";
+  els.saveBtn.textContent = "Save to Q&A bank";
+  els.cancelEditBtn.hidden = false;
+  els.formQuestion.value = draft.question || "";
+  els.formAnswer.value = "";
+  els.formFieldType.value = normalizeFieldType(draft.fieldType);
+  if (draft.profileId && [...els.formScope.options].some((o) => o.value === draft.profileId)) {
+    els.formScope.value = draft.profileId;
+  }
+  const options = Array.isArray(draft.options) ? draft.options.filter(Boolean) : [];
+  els.formAnswer.placeholder = options.length
+    ? `Enter the answer to store. One of: ${options.join(" | ")}`
+    : draft.answerHow || "Enter the answer to store.";
+  showOptionsHint(draft);
+  els.formAnswer.focus();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function renderPending() {
+  if (!els.pendingCard || !els.pendingList) return;
+  if (!pendingRows.length) {
+    els.pendingCard.hidden = true;
+    els.pendingList.innerHTML = "";
+    return;
+  }
+  els.pendingCard.hidden = false;
+  els.pendingList.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const row of pendingRows) {
+    const item = document.createElement("div");
+    item.className = "pending-item";
+
+    const q = document.createElement("p");
+    q.className = "pending-item-q";
+    q.textContent = row.question;
+    item.appendChild(q);
+
+    const how = document.createElement("p");
+    how.className = "pending-item-how";
+    how.textContent = row.answerHow || fieldTypeLabel(row.fieldType);
+    item.appendChild(how);
+
+    const meta = document.createElement("div");
+    meta.className = "pending-item-meta";
+
+    const typeTag = document.createElement("span");
+    typeTag.className = "qa-source-tag";
+    typeTag.textContent = fieldTypeLabel(row.fieldType);
+    meta.appendChild(typeTag);
+
+    const scope = document.createElement("span");
+    scope.textContent = profileLabel(row.profileId || "");
+    meta.appendChild(scope);
+
+    if (row.site) {
+      const site = document.createElement("span");
+      site.textContent = row.site;
+      meta.appendChild(site);
+    }
+
+    const seen = document.createElement("span");
+    seen.textContent = `seen ${Number(row.timesSeen || 1)}×`;
+    meta.appendChild(seen);
+
+    const actions = document.createElement("div");
+    actions.className = "pending-item-actions";
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "compact primary";
+    add.textContent = "Register";
+    add.addEventListener("click", () => startFromPending(row));
+    actions.appendChild(add);
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "secondary compact";
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", async () => {
+      await dismissPendingQa(row.id);
+      if (pendingDraftId === row.id) resetForm();
+      await reload();
+      setStatus("Dismissed.");
+    });
+    actions.appendChild(dismiss);
+
+    meta.appendChild(actions);
+    item.appendChild(meta);
+    frag.appendChild(item);
+  }
+  els.pendingList.appendChild(frag);
+}
+
 function startEdit(row) {
+  pendingDraftId = null;
   editingId = row.id;
   els.formTitle.textContent = "Edit Q&A";
   els.saveBtn.textContent = "Update Q&A";
@@ -135,6 +266,10 @@ function startEdit(row) {
   els.formAnswer.value = row.answer || "";
   els.formFieldType.value = normalizeFieldType(row.fieldType);
   els.formScope.value = row.profileId || SHARED_ID;
+  if (els.formOptionsHint) {
+    els.formOptionsHint.hidden = true;
+    els.formOptionsHint.textContent = "";
+  }
   els.formQuestion.focus();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -227,7 +362,10 @@ function renderList() {
 }
 
 async function reload() {
-  allRows = await getAllQa(null);
+  const [rows, pending] = await Promise.all([getAllQa(null), getPendingQa(null)]);
+  allRows = rows;
+  pendingRows = pending;
+  renderPending();
   renderList();
 }
 
@@ -240,17 +378,25 @@ async function saveForm() {
   }
 
   const existing = editingId ? allRows.find((r) => r.id === editingId) : null;
+  const pending = pendingDraftId ? pendingRows.find((r) => r.id === pendingDraftId) : null;
   const saved = await saveQa({
     profileId: els.formScope.value || SHARED_ID,
     question,
     answer,
     fieldType: els.formFieldType.value || "text",
     source: "user",
-    site: existing?.site || ""
+    site: existing?.site || pending?.site || ""
   });
 
   if (editingId && saved?.id && saved.id !== editingId) {
     await deleteQa(editingId);
+  }
+
+  const fromPending = pendingDraftId;
+  if (fromPending) {
+    await dismissPendingQa(fromPending);
+  } else {
+    await dismissPendingMatchingQuestion(question, els.formScope.value || "").catch(() => {});
   }
 
   resetForm();
@@ -332,7 +478,7 @@ els.closeBtn.addEventListener("click", () => window.close());
 
 let reloadTimer = 0;
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.qa_bank_version) {
+  if (area === "local" && (changes.qa_bank_version || changes.pending_qa_version)) {
     clearTimeout(reloadTimer);
     reloadTimer = setTimeout(() => {
       reload().catch(() => {});

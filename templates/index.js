@@ -1,6 +1,6 @@
 import { classicBlueTemplate } from "./classic-blue.js";
 import { timesClassicTemplate } from "./times-classic.js";
-import { normalizeSkills } from "./shared.js";
+import { normalizeCerts, normalizeSkills } from "./shared.js";
 
 /** Built-in resume PDF/HTML templates. Add new files here and register them. */
 export const BUILTIN_TEMPLATES = [classicBlueTemplate, timesClassicTemplate];
@@ -24,7 +24,8 @@ export function normalizeResumeData(data) {
   if (!data || typeof data !== "object") return data || {};
   return {
     ...data,
-    skills: normalizeSkills(data.skills)
+    skills: normalizeSkills(data.skills),
+    certifications: normalizeCerts(data.certifications)
   };
 }
 

@@ -185,7 +185,9 @@ function tryParseJson(text) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return -1;
     let score = 0;
     if (Array.isArray(obj.experience)) score += 100000 + obj.experience.length * 100;
-    if (Array.isArray(obj.certifications)) score += 50000;
+    if (Array.isArray(obj.certifications) && obj.certifications.length) {
+      score += 50000;
+    }
     if (typeof obj.profile === "string") score += 25000;
     if (typeof obj.name === "string") score += 1000;
     return score;
@@ -253,7 +255,6 @@ export function isUsableResumeJson(data) {
   if (!String(data.name || "").trim()) return false;
   if (!String(data.profile || "").trim() || String(data.profile).length < 80) return false;
   if (!data.education || !String(data.education.school || "").trim()) return false;
-  if (!Array.isArray(data.certifications) || data.certifications.length < 8) return false;
   if (countRenderableSkills(data.skills) < 2) return false;
   if (!Array.isArray(data.experience) || data.experience.length < 6) return false;
   return totalExperienceBullets(data) >= 18;
@@ -262,7 +263,6 @@ export function isUsableResumeJson(data) {
 export function isCompleteResumeJson(data) {
   if (!isUsableResumeJson(data)) return false;
   if (!String(data.profile || "").trim() || String(data.profile).length < 120) return false;
-  if (!Array.isArray(data.certifications) || data.certifications.length < 9) return false;
   if (countRenderableSkills(data.skills) < 3) return false;
   if (totalExperienceBullets(data) < 20) return false;
 

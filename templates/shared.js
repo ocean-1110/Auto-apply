@@ -126,11 +126,41 @@ export function renderSkills(skills) {
     .join("\n");
 }
 
+export function normalizeCerts(certs) {
+  const list = Array.isArray(certs)
+    ? certs
+    : typeof certs === "string" && certs.trim()
+      ? certs.split(/\n|;/).map((s) => s.trim())
+      : [];
+  return list
+    .map((c) => {
+      if (c == null) return "";
+      if (typeof c === "string") return c.trim();
+      if (typeof c === "object") {
+        return String(
+          c.name || c.title || c.certification || c.label || c.text || ""
+        ).trim();
+      }
+      return String(c).trim();
+    })
+    .filter(Boolean);
+}
+
 export function renderCerts(certs, { listClass = "certifications" } = {}) {
-  const items = (certs || [])
-    .map((c) => `<li>${escapeHtml(c)}</li>`)
-    .join("\n");
-  return `<ul class="${listClass}">${items}</ul>`;
+  const items = normalizeCerts(certs);
+  if (!items.length) return "";
+  return `<ul class="${listClass}">${items.map((c) => `<li>${escapeHtml(c)}</li>`).join("\n")}</ul>`;
+}
+
+/** Omit the whole section when inner HTML is empty (e.g. no certifications). */
+export function renderOptionalSection(title, innerHtml, { className = "" } = {}) {
+  const inner = String(innerHtml || "").trim();
+  if (!inner) return "";
+  const cls = className ? ` class="${escapeHtml(className)}"` : "";
+  return `<section${cls}>
+      <h2>${escapeHtml(title)}</h2>
+      ${inner}
+    </section>`;
 }
 
 /** Flex header: company (location) — title | dates on the right. */

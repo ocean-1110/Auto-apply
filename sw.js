@@ -7,6 +7,7 @@ import {
 } from "./capture-runner.js";
 import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeSkills } from "./resume-json.js";
+import { scoreResumeAgainstJd } from "./ats-score.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import {
   chatCompletion,
@@ -33,11 +34,13 @@ import {
 import { setLastGeneratedDocs, pickUploadDocsFromBundle, getLastGeneratedDocs } from "./upload-assets.js";
 import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, isComplexQuestion, shouldBankAnswer, generateRoleSummaries } from "./ai-answers.js";
 import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
+import { upsertPendingQa, dismissPendingMatchingQuestion } from "./pending-qa.js";
 import {
   generateApplicationBrief,
   getApplicationBrief,
   storeApplicationBrief
 } from "./application-brief.js";
+import { appendApplicationEvent } from "./application-log.js";
 import {
   ensureCostSession,
   logLlmCall,
@@ -322,18 +325,25 @@ async function setImportedJobsById(byId, { bumpVersion = true } = {}) {
   }
 }
 
-async function setImportedJobStatus(jobId, { status, statusDetail = "", markAttempt = false } = {}) {
+async function setImportedJobStatus(jobId, { status, statusDetail = "", markAttempt = false, profileId, completedAt } = {}) {
   if (!jobId) return;
   const byId = await getImportedJobsById();
   const job = byId[jobId];
   if (!job) return;
   const now = Date.now();
+  const nextStatus = status || job.status || "imported";
+  const doneAt =
+    completedAt ||
+    (nextStatus === "completed" && !job.completedAt ? now : job.completedAt) ||
+    undefined;
 
   byId[jobId] = {
     ...job,
-    status: status || job.status || "imported",
+    status: nextStatus,
     statusDetail: statusDetail || job.statusDetail || "",
     updatedAt: now,
+    ...(profileId ? { profileId } : null),
+    ...(doneAt ? { completedAt: doneAt } : null),
     ...(markAttempt ? { attempts: Number(job.attempts || 0) + 1, lastAttemptAt: now } : null)
   };
 
@@ -383,7 +393,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-13.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-15.2";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
 function bumpQaVersion() {
@@ -633,9 +643,16 @@ async function saveReusableQa({ profileId, question, answer, fieldType, site = "
       site
     });
     bumpQaVersion();
+    await dismissPendingMatchingQuestion(question, profileId || "").catch(() => {});
   } catch {
     /* bank write is best-effort */
   }
+}
+
+function queueUnbankedQuestions(profileId, questions, site = "") {
+  const list = (questions || []).filter((q) => q?.label && !isComplexQuestion(q));
+  if (!list.length) return;
+  upsertPendingQa(list, { profileId: profileId || "", site: site || "" }).catch(() => {});
 }
 
 /**
@@ -676,6 +693,8 @@ async function resolveTextAnswers({
     }
     stillNeed.push(q);
   }
+
+  queueUnbankedQuestions(profileId, stillNeed, site);
 
   if (stillNeed.length) {
     const { apiKey, model } = await getOpenAiSettings();
@@ -753,6 +772,8 @@ async function resolveChoiceAnswers(
       stillNeed.push(q);
     }
   }
+
+  queueUnbankedQuestions(profileId, stillNeed, site);
 
   if (stillNeed.length) {
     try {
@@ -2292,12 +2313,17 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jdText: meta.jdText || ""
   });
 
+  const atsReport = scoreResumeAgainstJd(data, {
+    jdText: meta.jdText || "",
+    jobTitle: meta.jobTitle || ""
+  });
+
   const rawText = JSON.stringify(data, null, 2);
-  await chrome.storage.local.set({ last_response: rawText });
+  await chrome.storage.local.set({ last_response: rawText, last_ats_report: atsReport });
   await setStatus(
     resumeOnly
-      ? "Resume JSON ready. Rendering PDF (skipping cover letter)..."
-      : "Resume JSON ready. Rendering PDF + cover letter..."
+      ? `Resume JSON ready (ATS ${atsReport.score}%). Rendering PDF (skipping cover letter)...`
+      : `Resume JSON ready (ATS ${atsReport.score}%). Rendering PDF + cover letter...`
   );
 
   const saved = await saveResumeAndCoverLetter(rawText, data, meta, {
@@ -2357,7 +2383,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           generation_status: "Reset complete. Ready for next run.",
           generation_running: false,
           last_response: "",
-          last_application_brief: null
+          last_application_brief: null,
+          last_ats_report: null
         });
         safeSendResponse(sendResponse, { ok: true });
       } catch (err) {
@@ -2593,6 +2620,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           site: message.site || ""
         });
         bumpQaVersion();
+        await dismissPendingMatchingQuestion(question, selected_profile_id || "").catch(() => {});
         safeSendResponse(sendResponse, { ok: true });
       } catch (err) {
         safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
@@ -2618,7 +2646,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           jobMeta: message.jobMeta || ctx.jobMeta,
           resumeText: ctx.resumeText,
           profileId,
-          applicationBrief: ctx.applicationBrief
+          applicationBrief: ctx.applicationBrief,
+          site: message.site || hostnameFromUrl(message.jobMeta?.jdLink || ctx.jobMeta?.jdLink || "")
         });
         safeSendResponse(sendResponse, { ok: true, answers });
       } catch (err) {
@@ -2639,7 +2668,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           applicantInfo,
           ctx.jobMeta,
           ctx.resumeText,
-          { applicationBrief: ctx.applicationBrief }
+          { applicationBrief: ctx.applicationBrief, site: message.site || hostnameFromUrl(ctx.jobMeta?.jdLink || "") }
         );
         safeSendResponse(sendResponse, { ok: true, answers });
       } catch (err) {
@@ -2670,6 +2699,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           `${result.steps || 0} step(s), filled ${result.filled || 0}, ` +
           `bank ${result.bankHits || 0}, AI ${result.aiFilled || 0}. ${result.detail || ""} ${costLine}`.trim();
         await setStatus(msg);
+        const stored = await chrome.storage.local.get([
+          "last_job_title",
+          "last_company_name",
+          "last_jd_link"
+        ]);
+        await appendApplicationEvent({
+          profileId,
+          jobTitle: stored.last_job_title || "",
+          companyName: stored.last_company_name || "",
+          jdLink: stored.last_jd_link || result.tabUrl || "",
+          status:
+            result.status === "submitted" || result.status === "ready_for_review"
+              ? result.status === "submitted"
+                ? "completed"
+                : "ready_for_review"
+              : result.status || "ready_for_review",
+          source: result.site || "",
+          detail: result.detail || ""
+        });
         safeSendResponse(sendResponse, { ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
@@ -2710,7 +2758,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await setImportedJobStatus(importedJobId, {
           status: "opening",
           statusDetail: "Opening job URL...",
-          markAttempt: true
+          markAttempt: true,
+          profileId
         });
 
         const url = String(jobMeta.jdLink || "").trim();
@@ -2862,7 +2911,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             `Auto Apply (${site}): ${ea.status || "done"}. ` +
             `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
             `bank ${ea.bankHits || 0}, AI ${ea.aiFilled || 0}, choices ${ea.choiceFilled || 0}. ` +
-            `${ea.detail || ""} ${(await getCostSummaryText())}`.trim()
+            `${ea.detail || ""} ${(await getCostSummaryText())}`.trim(),
+          profileId
+        });
+        await appendApplicationEvent({
+          profileId,
+          importedJobId,
+          jobTitle: jobMeta.jobTitle || "",
+          companyName: jobMeta.companyName || "",
+          jdLink: jobMeta.jdLink || url || "",
+          status: nextStatus,
+          source: site,
+          detail: ea.detail || ""
         });
         await setStatus(
           `Imported job Auto Apply: ${ea.status || "done"} (no submit). ${await getCostSummaryText()}`
@@ -2872,7 +2932,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await setStatus(`Imported job failed: ${error}`);
         await setImportedJobStatus(importedJobId, {
           status: "failed",
-          statusDetail: error
+          statusDetail: error,
+          profileId
+        });
+        await appendApplicationEvent({
+          profileId,
+          importedJobId,
+          jobTitle: jobMeta.jobTitle || "",
+          companyName: jobMeta.companyName || "",
+          jdLink: jobMeta.jdLink || "",
+          status: "failed",
+          detail: error
         });
       } finally {
         await chrome.storage.local.set({ generation_running: false });

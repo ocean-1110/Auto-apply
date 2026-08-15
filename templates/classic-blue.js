@@ -4,6 +4,7 @@ import {
   renderCerts,
   renderEducationBlock,
   renderJobsFlex,
+  renderOptionalSection,
   renderSkills,
   wrapHtmlDocument
 } from "./shared.js";
@@ -154,25 +155,13 @@ export const classicBlueTemplate = {
       <p>${escapeHtml(data.profile || "")}</p>
     </section>
 
-    <section>
-      <h2>Education</h2>
-      ${renderEducationBlock(edu)}
-    </section>
+    ${renderOptionalSection("Education", renderEducationBlock(edu))}
 
-    <section>
-      <h2>Certifications</h2>
-      ${renderCerts(data.certifications)}
-    </section>
+    ${renderOptionalSection("Certifications", renderCerts(data.certifications))}
 
-    <section class="skills">
-      <h2>Skills</h2>
-      ${renderSkills(data.skills)}
-    </section>
+    ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
 
-    <section>
-      <h2>Experience</h2>
-      ${renderJobsFlex(data.experience)}
-    </section>
+    ${renderOptionalSection("Experience", renderJobsFlex(data.experience))}
   </main>`
     });
   }

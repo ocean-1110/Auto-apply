@@ -105,5 +105,5 @@ LENGTH AND COMPLETENESS — CRITICAL (API responses tend to undershoot; do not):
 - experience: include EVERY required job with the EXACT bullet counts from the user prompt. Do not drop jobs or bullets.
 - Each experience bullet must be ONE long sentence (~170–240 characters), describing concrete implementation work with technologies and impact — not short vague lines.
 - profile: 5–7 full sentences as specified in the user prompt.
-- certifications: include every certification listed in the user prompt, verbatim.
+- certifications: include every certification listed in the user prompt, verbatim. If the prompt lists none, return an empty array (do not invent any).
 - Finish the entire JSON object in one reply. Do not shorten skills or experience because of length.`;

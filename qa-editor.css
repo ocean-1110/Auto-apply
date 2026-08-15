@@ -19,6 +19,51 @@
   max-height: none;
 }
 
+.pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pending-item {
+  padding: 10px 12px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.pending-item-q {
+  margin: 0 0 6px;
+  font-weight: 700;
+  color: #e5e7eb;
+}
+
+.pending-item-how {
+  margin: 0 0 8px;
+  color: #93c5fd;
+  font-size: 12px;
+}
+
+.pending-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pending-item-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.pending-item-actions button {
+  width: auto;
+  min-width: 0;
+  height: 28px;
+  padding: 4px 10px;
+}
+
 .qa-item-a-preview {
   margin: 0 0 4px;
   color: #cbd5e1;

@@ -25,6 +25,15 @@
 
       <p id="status" class="editor-status" role="status"></p>
 
+      <section class="card" id="pendingCard" hidden>
+        <h2 class="section-title">Needs answers</h2>
+        <p class="hint">
+          Autofill found these form fields that are not in the Q&amp;A bank yet. Register each
+          one with the control type and how to answer (check, select, or type).
+        </p>
+        <div id="pendingList" class="pending-list"></div>
+      </section>
+
       <section class="card">
         <h2 class="section-title">Browse</h2>
         <div class="grid-2">
@@ -74,6 +83,7 @@
             <select id="formScope"></select>
           </label>
         </div>
+        <p class="hint" id="formOptionsHint" hidden></p>
         <div class="qa-toolbar">
           <button type="button" id="saveBtn" class="compact primary">Save Q&amp;A</button>
           <button type="button" id="cancelEditBtn" class="secondary compact" hidden>Cancel edit</button>

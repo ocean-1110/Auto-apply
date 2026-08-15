@@ -5,6 +5,16 @@ import {
 } from "./profiles.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { extractSpreadsheetId, buildSheetRowTsv, getExistingJobLinks } from "./sheets.js";
+import { formatAtsTooltip } from "./ats-score.js";
+import {
+  getSheetPresets,
+  getPresetForProfile,
+  saveSheetPreset,
+  deleteSheetPreset,
+  setProfileSheetPresetId,
+  presetDisplayLabel,
+  validateSheetPreset
+} from "./sheet-presets.js";
 import {
   saveOutputDirectoryHandle,
   getOutputDirectoryName,
@@ -20,6 +30,8 @@ import {
   normalizeJobLink
 } from "./capture-jobs.js";
 import { getQaCount } from "./qa-store.js";
+import { appendApplicationEvent } from "./application-log.js";
+import { getPendingQaCount } from "./pending-qa.js";
 
 const APPS_SCRIPT_SOURCE = `/**
  * Resume GPT Builder — paste into Extensions → Apps Script on your spreadsheet,
@@ -179,9 +191,13 @@ function doGet(e) {
 `;
 
 const statusEl = document.getElementById("status");
+const atsScoreBadgeEl = document.getElementById("atsScoreBadge");
+const atsScoreValueEl = document.getElementById("atsScoreValue");
+const atsScoreTooltipEl = document.getElementById("atsScoreTooltip");
 const profileSelectEl = document.getElementById("profileSelect");
 const templateSelectEl = document.getElementById("templateSelect");
 const deleteProfileBtn = document.getElementById("deleteProfile");
+const openDashboardBtn = document.getElementById("openDashboard");
 const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
 const jdLinkEl = document.getElementById("jdLink");
@@ -194,6 +210,10 @@ const aiQaSectionEl = document.getElementById("aiQaSection");
 const spreadsheetUrlEl = document.getElementById("spreadsheetUrl");
 const sheetTabNameEl = document.getElementById("sheetTabName");
 const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
+const sheetPresetSelectEl = document.getElementById("sheetPresetSelect");
+const sheetPresetLabelEl = document.getElementById("sheetPresetLabel");
+const saveSheetPresetBtn = document.getElementById("saveSheetPreset");
+const deleteSheetPresetBtn = document.getElementById("deleteSheetPreset");
 const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
@@ -252,6 +272,8 @@ const sidebarImportEl = jobsSidebarEl?.querySelector(".sidebar-import") || null;
 
 let profilesCache = [];
 let templatesCache = [];
+let sheetPresetsCache = [];
+let applyingSheetPreset = false;
 let wasGenerationRunning = false;
 
 // Extra job metadata captured by the page scraper (sheet history columns).
@@ -306,6 +328,119 @@ function setStatus(message, kind = "") {
   if (kind === "running" || kind === "done" || kind === "error") {
     statusEl.classList.add(`is-${kind}`);
   }
+}
+
+function renderAtsBadge(report) {
+  if (!atsScoreBadgeEl || !atsScoreValueEl) return;
+  const score = Number(report?.score);
+  if (!Number.isFinite(score)) {
+    atsScoreBadgeEl.hidden = true;
+    return;
+  }
+  atsScoreBadgeEl.hidden = false;
+  atsScoreValueEl.textContent = `${Math.round(score)}%`;
+  atsScoreBadgeEl.classList.remove("is-high", "is-mid", "is-low");
+  atsScoreBadgeEl.classList.add(score >= 85 ? "is-high" : score >= 70 ? "is-mid" : "is-low");
+  if (atsScoreTooltipEl) atsScoreTooltipEl.textContent = formatAtsTooltip(report);
+}
+
+async function refreshAtsBadge() {
+  const data = await chrome.storage.local.get("last_ats_report");
+  renderAtsBadge(data.last_ats_report);
+}
+
+function readSheetFields() {
+  return {
+    id: sheetPresetSelectEl?.value || "",
+    label: (sheetPresetLabelEl?.value || "").trim(),
+    spreadsheetUrl: (spreadsheetUrlEl?.value || "").trim(),
+    sheetName: (sheetTabNameEl?.value || "").trim(),
+    webAppUrl: (sheetsWebAppUrlEl?.value || "").trim()
+  };
+}
+
+function applySheetFields(preset = null, { keepWebApp = true } = {}) {
+  applyingSheetPreset = true;
+  try {
+    if (sheetPresetSelectEl) sheetPresetSelectEl.value = preset?.id || "";
+    if (sheetPresetLabelEl) sheetPresetLabelEl.value = preset?.label || "";
+    if (spreadsheetUrlEl) spreadsheetUrlEl.value = preset?.spreadsheetUrl || "";
+    if (sheetTabNameEl) sheetTabNameEl.value = preset?.sheetName || "";
+    if (sheetsWebAppUrlEl) {
+      const nextUrl = preset?.webAppUrl || (keepWebApp ? sheetsWebAppUrlEl.value : "");
+      sheetsWebAppUrlEl.value = nextUrl || "";
+    }
+  } finally {
+    applyingSheetPreset = false;
+  }
+  syncSheetSummaryNote();
+}
+
+function populateSheetPresetSelect(selectedId = "") {
+  if (!sheetPresetSelectEl) return;
+  const current = selectedId || sheetPresetSelectEl.value || "";
+  sheetPresetSelectEl.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— None —";
+  sheetPresetSelectEl.appendChild(none);
+  for (const preset of sheetPresetsCache) {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = presetDisplayLabel(preset);
+    sheetPresetSelectEl.appendChild(option);
+  }
+  const valid = new Set(sheetPresetsCache.map((p) => p.id));
+  sheetPresetSelectEl.value = valid.has(current) ? current : "";
+}
+
+async function refreshSheetPresets(selectedId = "") {
+  sheetPresetsCache = await getSheetPresets();
+  populateSheetPresetSelect(selectedId);
+}
+
+async function applySheetPresetForProfile(profileId) {
+  const preset = await getPresetForProfile(profileId);
+  applySheetFields(preset, { keepWebApp: !preset });
+  await persistJobFields();
+}
+
+async function onSheetPresetSelectChange() {
+  const id = sheetPresetSelectEl?.value || "";
+  const profileId = profileSelectEl?.value || "";
+  const preset = sheetPresetsCache.find((p) => p.id === id) || null;
+  applySheetFields(preset, { keepWebApp: !preset });
+  if (profileId) await setProfileSheetPresetId(profileId, id);
+  await persistJobFields();
+}
+
+async function saveCurrentSheetPreset() {
+  const profileId = profileSelectEl?.value || "";
+  const fields = readSheetFields();
+  const error = validateSheetPreset(fields);
+  if (error) {
+    setStatus(error, "error");
+    return;
+  }
+  const saved = await saveSheetPreset(fields, { profileId });
+  await refreshSheetPresets(saved.id);
+  applySheetFields(saved);
+  await persistJobFields();
+  setStatus(`Saved sheet "${presetDisplayLabel(saved)}" for this profile.`, "done");
+}
+
+async function deleteCurrentSheetPreset() {
+  const id = sheetPresetSelectEl?.value || "";
+  if (!id) {
+    setStatus("Select a saved sheet to delete.");
+    return;
+  }
+  const preset = sheetPresetsCache.find((p) => p.id === id);
+  await deleteSheetPreset(id);
+  await refreshSheetPresets("");
+  applySheetFields(null, { keepWebApp: true });
+  await persistJobFields();
+  setStatus(`Deleted saved sheet${preset ? `: ${presetDisplayLabel(preset)}` : "."}`);
 }
 
 function updateGenerationProgress({ running, statusText }) {
@@ -977,12 +1112,25 @@ async function patchImportedJobLocally(jobId, patch) {
 }
 
 async function markImportedJobCompleted(jobId) {
+  const profileId = profileSelectEl?.value || "";
   const job = await patchImportedJobLocally(jobId, {
     status: "completed",
     statusDetail: "Completed by user.",
-    completedAt: Date.now()
+    completedAt: Date.now(),
+    ...(profileId ? { profileId } : null)
   });
-  if (job) setStatus(`Marked completed: ${job.jobTitle || jobId}`);
+  if (!job) return;
+  await appendApplicationEvent({
+    profileId: job.profileId || profileId,
+    importedJobId: jobId,
+    jobTitle: job.jobTitle || "",
+    companyName: job.companyName || "",
+    jdLink: job.jdLink || job.url || "",
+    status: "completed",
+    source: job.source || "",
+    detail: "Completed by user."
+  });
+  setStatus(`Marked completed: ${job.jobTitle || jobId}`);
 }
 
 async function setImportedJobUnavailable(jobId, { detail = "Marked no longer available." } = {}) {
@@ -1194,7 +1342,14 @@ async function loadSettings() {
   spreadsheetUrlEl.value = data.spreadsheet_url || "";
   if (sheetTabNameEl) sheetTabNameEl.value = data.sheets_sheet_name || "";
   sheetsWebAppUrlEl.value = data.sheets_web_app_url || "";
+  await refreshSheetPresets();
+  const boundPreset = await getPresetForProfile(profileSelectEl.value);
+  if (boundPreset) {
+    applySheetFields(boundPreset);
+    await persistJobFields();
+  } else populateSheetPresetSelect("");
   syncSheetSummaryNote();
+  await refreshAtsBadge();
 
   if (spreadsheetSectionEl) spreadsheetSectionEl.open = Boolean(data.ui_sheet_section_open);
   if (aiQaSectionEl) aiQaSectionEl.open = Boolean(data.ui_ai_qa_section_open);
@@ -1557,16 +1712,61 @@ async function refreshQaBank() {
   if (!qaBankNoteEl) return;
   try {
     const profileId = profileSelectEl?.value || "";
-    const [profileCount, sharedCount] = await Promise.all([
+    const [profileCount, sharedCount, pendingCount] = await Promise.all([
       getQaCount(profileId),
-      getQaCount("")
+      getQaCount(""),
+      getPendingQaCount(profileId)
     ]);
     const parts = [];
     if (profileCount) parts.push(`${profileCount} this profile`);
     if (sharedCount) parts.push(`${sharedCount} shared`);
+    if (pendingCount) parts.push(`${pendingCount} to register`);
     qaBankNoteEl.textContent = parts.length ? parts.join(" · ") : "0 saved";
   } catch {
     qaBankNoteEl.textContent = "Q&A";
+  }
+}
+
+async function openDashboard() {
+  if (!isExtensionContextValid()) {
+    handleExtensionContextInvalidated();
+    return;
+  }
+
+  const url = new URL(chrome.runtime.getURL("dashboard.html"));
+  const profileId = profileSelectEl?.value || "";
+  if (profileId) url.searchParams.set("profileId", profileId);
+  const href = url.toString();
+
+  try {
+    const win = await chrome.windows.create({
+      url: href,
+      type: "popup",
+      width: 1180,
+      height: 860,
+      focused: true
+    });
+    if (win?.id != null) {
+      await chrome.windows.update(win.id, { focused: true });
+    }
+    setStatus("Opened application dashboard.", "done");
+  } catch (err) {
+    if (isContextInvalidatedError(err)) {
+      handleExtensionContextInvalidated();
+      return;
+    }
+    try {
+      const tab = await chrome.tabs.create({ url: href, active: true });
+      if (tab?.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      setStatus("Opened application dashboard in a browser tab.", "done");
+    } catch (tabErr) {
+      setStatus(
+        `Could not open dashboard: ${String(tabErr?.message || tabErr || err?.message || err)}`,
+        "error"
+      );
+    }
   }
 }
 
@@ -1760,6 +1960,7 @@ async function resetWorkflow() {
     }
     await clearJobFields();
     wasGenerationRunning = false;
+    renderAtsBadge(null);
     setStatus("Cleared. Ready for the next job.");
     setBusy(false);
     jobTitleEl?.focus();
@@ -1858,6 +2059,9 @@ profileSelectEl.addEventListener("change", () => {
   syncDeleteButton();
   saveSelectedProfile(profileSelectEl.value).catch(() => {});
   applyProfileTemplateDefault(profileSelectEl.value).catch(() => {});
+  applySheetPresetForProfile(profileSelectEl.value).catch((err) =>
+    setStatus(String(err?.message || err))
+  );
   refreshQaBank().catch(() => {});
 });
 
@@ -1872,13 +2076,25 @@ for (const el of [
   jdTextEl,
   spreadsheetUrlEl,
   sheetTabNameEl,
-  sheetsWebAppUrlEl
+  sheetsWebAppUrlEl,
+  sheetPresetLabelEl
 ].filter(Boolean)) {
   el.addEventListener("change", () => {
+    if (applyingSheetPreset) return;
     persistJobFields().catch(() => {});
     syncSheetSummaryNote();
   });
 }
+
+sheetPresetSelectEl?.addEventListener("change", () => {
+  onSheetPresetSelectChange().catch((err) => setStatus(String(err?.message || err)));
+});
+saveSheetPresetBtn?.addEventListener("click", () => {
+  saveCurrentSheetPreset().catch((err) => setStatus(String(err?.message || err)));
+});
+deleteSheetPresetBtn?.addEventListener("click", () => {
+  deleteCurrentSheetPreset().catch((err) => setStatus(String(err?.message || err)));
+});
 
 wireAccordion(spreadsheetSectionEl, "ui_sheet_section_open");
 wireAccordion(aiQaSectionEl, "ui_ai_qa_section_open");
@@ -2023,6 +2239,9 @@ csvFileInputEl?.addEventListener("change", async () => {
 easyApplyBtn?.addEventListener("click", () => {
   runEasyApplyOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
 });
+openDashboardBtn?.addEventListener("click", () => {
+  openDashboard().catch((err) => setStatus(String(err.message || err)));
+});
 qaOpenEditorBtn?.addEventListener("click", () => {
   openQaEditor().catch((err) => setStatus(String(err.message || err)));
 });
@@ -2036,7 +2255,7 @@ qaBankSectionEl?.addEventListener("toggle", () => {
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (extensionContextDead || !isExtensionContextValid()) return;
-  if (area === "local" && changes.qa_bank_version) {
+  if (area === "local" && (changes.qa_bank_version || changes.pending_qa_version)) {
     refreshQaBank().catch((err) => {
       if (isContextInvalidatedError(err)) handleExtensionContextInvalidated();
     });
@@ -2170,7 +2389,8 @@ panelPollTimer = setInterval(async () => {
       "imported_jobs_by_id",
       "imported_jobs_order",
       "imported_jobs_selected_id",
-      "imported_jobs_version"
+      "imported_jobs_version",
+      "last_ats_report"
     ]);
 
     const running = Boolean(data.generation_running);
@@ -2179,6 +2399,11 @@ panelPollTimer = setInterval(async () => {
 
     updateGenerationProgress({ running, statusText });
     setBusy(running);
+    if (running) {
+      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+    } else {
+      renderAtsBadge(data.last_ats_report);
+    }
 
     if (wasGenerationRunning && !running) {
       wasGenerationRunning = false;
