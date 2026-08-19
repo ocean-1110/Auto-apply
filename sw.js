@@ -8,6 +8,7 @@ import {
 import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeSkills } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
+import { ensureAtsReadyResume } from "./ats-rewrite.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import {
@@ -2269,17 +2270,57 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jdText: meta.jdText || ""
   });
 
-  const atsReport = scoreResumeAgainstJd(data, {
-    jdText: meta.jdText || "",
-    jobTitle: meta.jobTitle || ""
+  await setStatus("Scoring resume against the job description...");
+  let improved;
+  try {
+    improved = await ensureAtsReadyResume(data, {
+      apiKey,
+      model,
+      jdText: meta.jdText || "",
+      jobTitle: meta.jobTitle || "",
+      companyName: meta.companyName || "",
+      setStatus
+    });
+    data = improved.data || data;
+  } catch (rewriteErr) {
+    await setStatus(
+      `ATS rewrite skipped (${String(rewriteErr?.message || rewriteErr)}). Using the generated resume.`
+    );
+    improved = {
+      data,
+      atsReport: scoreResumeAgainstJd(data, {
+        jdText: meta.jdText || "",
+        jobTitle: meta.jobTitle || ""
+      })
+    };
+  }
+
+  data = await ensureResumeSkills(data, {
+    apiKey,
+    model,
+    jdText: meta.jdText || ""
   });
+
+  const atsReport = {
+    ...scoreResumeAgainstJd(data, {
+      jdText: meta.jdText || "",
+      jobTitle: meta.jobTitle || ""
+    }),
+    rewritten: Boolean(improved?.atsReport?.rewritten),
+    rewriteAttempts: Number(improved?.atsReport?.rewriteAttempts || 0),
+    previousScore: improved?.atsReport?.previousScore,
+    rewriteIssues: improved?.atsReport?.rewriteIssues || []
+  };
 
   const rawText = JSON.stringify(data, null, 2);
   await chrome.storage.local.set({ last_response: rawText, last_ats_report: atsReport });
+  const rewriteNote = atsReport.rewritten
+    ? ` Rewritten for ATS (was ${Math.round(Number(atsReport.previousScore))}%).`
+    : "";
   await setStatus(
     resumeOnly
-      ? `Resume JSON ready (ATS ${atsReport.score}%). Rendering PDF (skipping cover letter)...`
-      : `Resume JSON ready (ATS ${atsReport.score}%). Rendering PDF + cover letter...`
+      ? `Resume JSON ready (ATS ${atsReport.score}%).${rewriteNote} Rendering PDF (skipping cover letter)...`
+      : `Resume JSON ready (ATS ${atsReport.score}%).${rewriteNote} Rendering PDF + cover letter...`
   );
 
   const saved = await saveResumeAndCoverLetter(rawText, data, meta, {

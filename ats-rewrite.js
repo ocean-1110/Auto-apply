@@ -1,0 +1,364 @@
+/**
+ * After resume JSON is generated, score it against the JD.
+ * If ATS < 70 or the resume is not realistic, rewrite once or twice, then
+ * the caller renders PDF from the resulting JSON as usual.
+ */
+
+import { chatCompletion } from "./openai.js";
+import { extractResumeJson } from "./resume-json.js";
+import { scoreResumeAgainstJd } from "./ats-score.js";
+import { logLlmCall } from "./cost-tracker.js";
+
+export const ATS_REWRITE_MIN_SCORE = 70;
+const MAX_REWRITE_ATTEMPTS = 2;
+
+const REWRITE_RULES = `
+Rewrite this resume so it would pass a US ATS screen AND still read like a real career history.
+
+RULES:
+- Write the resume as though it existed before the candidate saw this job posting.
+- Do not make the resume appear custom-written for a single company. Never name the hiring company.
+- When a technology family contains many related capabilities, summarize them naturally rather than enumerating every feature.
+- Allow recruiters to infer adjacent expertise; do not dump every JD keyword into every bullet.
+- The resume should sound like an experienced engineer describing work completed over many years, not answering an exam.
+- Role titles should be aligned with the role in the JD, with a natural career arc: earlier roles more junior / narrower, later roles closer to the target seniority and scope.
+- Experience in each role must be appropriate for that point in the candidate's career — do not give the earliest job the same scope as the current one.
+- Keep bullets as one long sentence each (~170–240 characters), concrete, with tools and impact.
+- Skills: 6–9 categories. Dense comma-separated items. Mix JD-relevant tools with adjacent/broader stack so it does not mirror the JD.
+- Profile: 5–7 sentences, professional, not a paraphrase of the JD.
+- Do not invent employers, dates, education, certifications, or contact details.
+- If certifications are empty, keep them empty.
+- Return ONLY valid JSON in the same schema as the input resume.
+`.trim();
+
+function normalizeName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function parseJsonObject(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function localRealismIssues(data, { jdText = "", jobTitle = "", companyName = "", atsReport } = {}) {
+  const issues = [];
+  const resumeBlob = JSON.stringify(data || {}).toLowerCase();
+  const company = String(companyName || "").trim();
+  if (company.length >= 5) {
+    const own = new Set(
+      (data?.experience || []).map((j) => normalizeName(j?.company)).filter(Boolean)
+    );
+    const companyKey = normalizeName(company);
+    if (companyKey && !own.has(companyKey) && resumeBlob.includes(company.toLowerCase())) {
+      issues.push(`Mentions the target employer (${company}); the resume looks written for this posting.`);
+    }
+  }
+
+  if (Number(atsReport?.titleMatch) < 40 && String(jobTitle || "").trim()) {
+    issues.push(`Role titles are weakly aligned with the JD title (${jobTitle}).`);
+  }
+
+  const jd = String(jdText || "").toLowerCase();
+  const bullets = (data?.experience || [])
+    .flatMap((j) => (Array.isArray(j?.bullets) ? j.bullets : []))
+    .join(" ")
+    .toLowerCase();
+  if (jd.length > 200 && bullets.length > 200) {
+    const jdChunks = jd
+      .split(/[.;\n]/)
+      .map((s) => s.replace(/[^a-z0-9+#./ ]+/g, " ").replace(/\s+/g, " ").trim())
+      .filter((s) => s.length >= 40 && s.length <= 120);
+    let copied = 0;
+    for (const chunk of jdChunks.slice(0, 12)) {
+      const probe = chunk.slice(0, 48);
+      if (probe.length >= 28 && bullets.includes(probe)) copied += 1;
+    }
+    if (copied >= 2) {
+      issues.push("Experience bullets echo JD phrasing instead of sounding like prior work.");
+    }
+  }
+
+  const titles = (data?.experience || []).map((j) => normalizeName(j?.title)).filter(Boolean);
+  const uniqueTitles = new Set(titles);
+  if (titles.length >= 3 && uniqueTitles.size === 1) {
+    issues.push("Every role uses the same title; career growth is not visible.");
+  }
+
+  return issues;
+}
+
+function compactForJudge(data) {
+  return {
+    headline: data?.headline || "",
+    profile: String(data?.profile || "").slice(0, 900),
+    skills: (data?.skills || []).slice(0, 9).map((row) =>
+      typeof row === "string"
+        ? row
+        : `${row?.category || ""}: ${String(row?.items || "").slice(0, 180)}`
+    ),
+    experience: (data?.experience || []).map((job) => ({
+      title: job?.title || "",
+      company: job?.company || "",
+      dates: job?.dates || "",
+      bullets: (job?.bullets || []).slice(0, 3)
+    }))
+  };
+}
+
+function applyLockedIdentity(original, rewritten) {
+  if (!rewritten || typeof rewritten !== "object") return original;
+  const origJobs = Array.isArray(original?.experience) ? original.experience : [];
+  const newJobs = Array.isArray(rewritten.experience) ? rewritten.experience : [];
+
+  const experience = origJobs.map((src, index) => {
+    const byCompany = newJobs.find(
+      (j) => normalizeName(j?.company) && normalizeName(j.company) === normalizeName(src.company)
+    );
+    const match = byCompany || newJobs[index] || {};
+    const bullets = Array.isArray(match.bullets) && match.bullets.filter(Boolean).length
+      ? match.bullets
+      : src.bullets;
+    return {
+      ...src,
+      title: String(match.title || src.title || "").trim(),
+      project: match.project != null ? match.project : src.project,
+      bullets
+    };
+  });
+
+  return {
+    ...original,
+    headline: String(rewritten.headline || original.headline || "").trim(),
+    profile: String(rewritten.profile || original.profile || "").trim() || original.profile,
+    skills: rewritten.skills || original.skills,
+    experience
+  };
+}
+
+function withAtsMeta(report, extra = {}) {
+  return { ...(report || {}), ...extra };
+}
+
+async function judgeResumeRealism(data, { apiKey, model, jdText, jobTitle, atsReport }) {
+  const result = await chatCompletion({
+    apiKey,
+    model,
+    jsonMode: true,
+    temperature: 0.1,
+    maxTokens: 700,
+    messages: [
+      {
+        role: "system",
+        content:
+          'Return ONLY JSON: {"realistic":true,"customWrittenForThisJob":false,"issues":[]}. ' +
+          "realistic=false if titles/scope do not fit a real career arc, bullets sound like JD answers, " +
+          "or tech families are dumped feature-by-feature. customWrittenForThisJob=true if it would be obvious " +
+          "this document was built for one posting."
+      },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            jobTitle: jobTitle || "",
+            atsScore: atsReport?.score,
+            titleMatch: atsReport?.titleMatch,
+            missingKeywords: atsReport?.missing || [],
+            jobDescriptionExcerpt: String(jdText || "").slice(0, 3500),
+            resume: compactForJudge(data)
+          },
+          null,
+          2
+        )
+      }
+    ]
+  });
+
+  await logLlmCall({
+    purpose: "resume-ats-judge",
+    model,
+    inputTokens: result.usage?.prompt_tokens,
+    outputTokens: result.usage?.completion_tokens
+  });
+
+  const parsed = parseJsonObject(result.content) || {};
+  return {
+    realistic: parsed.realistic !== false,
+    customWrittenForThisJob: parsed.customWrittenForThisJob === true,
+    issues: Array.isArray(parsed.issues) ? parsed.issues.map((x) => String(x || "").trim()).filter(Boolean) : []
+  };
+}
+
+async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, companyName, atsReport, issues }) {
+  const locked = {
+    name: data?.name,
+    location: data?.location,
+    email: data?.email,
+    phone: data?.phone,
+    linkedin: data?.linkedin,
+    education: data?.education,
+    certifications: Array.isArray(data?.certifications) ? data.certifications : [],
+    experienceLock: (data?.experience || []).map((job) => ({
+      company: job?.company || "",
+      location: job?.location || "",
+      dates: job?.dates || "",
+      keepBulletCount: Array.isArray(job?.bullets) ? job.bullets.length : 8
+    }))
+  };
+
+  const result = await chatCompletion({
+    apiKey,
+    model,
+    jsonMode: true,
+    temperature: 0.45,
+    maxTokens: 16384,
+    messages: [
+      { role: "system", content: REWRITE_RULES },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            targetJobTitle: jobTitle || "",
+            doNotNameThisCompany: companyName || "",
+            atsScore: atsReport?.score,
+            titleMatch: atsReport?.titleMatch,
+            skillsCoverage: atsReport?.skillsCoverage,
+            keywordCoverage: atsReport?.keywordCoverage,
+            missingKeywords: atsReport?.missing || [],
+            issuesToFix: issues || [],
+            lockedIdentity: locked,
+            currentResume: data,
+            jobDescription: String(jdText || "").slice(0, 8000)
+          },
+          null,
+          2
+        )
+      },
+      {
+        role: "user",
+        content:
+          "Return the COMPLETE rewritten resume JSON now. Keep lockedIdentity employers, dates, education, contact, and certification list. Align the latest title with the target job title; earlier titles should show career growth."
+      }
+    ]
+  });
+
+  await logLlmCall({
+    purpose: "resume-ats-rewrite",
+    model,
+    inputTokens: result.usage?.prompt_tokens,
+    outputTokens: result.usage?.completion_tokens
+  });
+
+  const next = extractResumeJson(result.content || "");
+  if (!next) return null;
+  return applyLockedIdentity(data, next);
+}
+
+function needsRewrite(atsReport, localIssues, judge) {
+  if (Number(atsReport?.score) < ATS_REWRITE_MIN_SCORE) return true;
+  if (localIssues.length) return true;
+  if (judge && (judge.realistic === false || judge.customWrittenForThisJob === true)) return true;
+  return false;
+}
+
+/**
+ * @returns {Promise<{ data: object, atsReport: object }>}
+ */
+export async function ensureAtsReadyResume(
+  data,
+  { apiKey, model, jdText = "", jobTitle = "", companyName = "", setStatus } = {}
+) {
+  const scoreOpts = { jdText, jobTitle };
+  let current = data;
+  let atsReport = scoreResumeAgainstJd(current, scoreOpts);
+  const previousScore = atsReport.score;
+
+  const status = async (text) => {
+    if (typeof setStatus === "function") await setStatus(text);
+  };
+
+  let localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
+  let judge = null;
+  if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length) {
+    await status(`ATS ${atsReport.score}% — checking that the resume still reads as a realistic career...`);
+    try {
+      judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
+    } catch {
+      judge = null;
+    }
+  }
+
+  if (!needsRewrite(atsReport, localIssues, judge)) {
+    return {
+      data: current,
+      atsReport: withAtsMeta(atsReport, { rewritten: false, rewriteAttempts: 0 })
+    };
+  }
+
+  const collectedIssues = [
+    ...localIssues,
+    ...(judge?.issues || []),
+    atsReport.score < ATS_REWRITE_MIN_SCORE
+      ? `ATS score ${atsReport.score} is below ${ATS_REWRITE_MIN_SCORE}.`
+      : ""
+  ].filter(Boolean);
+
+  let attempts = 0;
+  while (attempts < MAX_REWRITE_ATTEMPTS && needsRewrite(atsReport, localIssues, judge)) {
+    attempts += 1;
+    await status(
+      `ATS ${atsReport.score}% — rewriting resume for ATS coverage and realistic career growth (pass ${attempts}/${MAX_REWRITE_ATTEMPTS})...`
+    );
+    const rewritten = await rewriteResumeJson(current, {
+      apiKey,
+      model,
+      jdText,
+      jobTitle,
+      companyName,
+      atsReport,
+      issues: collectedIssues
+    });
+    if (!rewritten) break;
+    current = rewritten;
+    atsReport = scoreResumeAgainstJd(current, scoreOpts);
+    localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
+    judge = null;
+    if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length && attempts < MAX_REWRITE_ATTEMPTS) {
+      try {
+        judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
+      } catch {
+        judge = null;
+      }
+    }
+    if (!needsRewrite(atsReport, localIssues, judge)) break;
+    collectedIssues.push(
+      `After rewrite ${attempts}: ATS ${atsReport.score}. Missing: ${(atsReport.missing || []).join(", ")}`
+    );
+  }
+
+  return {
+    data: current,
+    atsReport: withAtsMeta(atsReport, {
+      rewritten: attempts > 0,
+      rewriteAttempts: attempts,
+      previousScore,
+      rewriteIssues: collectedIssues.slice(0, 8)
+    })
+  };
+}

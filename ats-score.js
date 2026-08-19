@@ -235,5 +235,8 @@ export function formatAtsTooltip(report) {
   if (report.missing?.length) {
     lines.push(`Missing: ${report.missing.slice(0, 6).join(", ")}`);
   }
+  if (report.rewritten && Number.isFinite(Number(report.previousScore))) {
+    lines.push(`Rewritten for ATS (was ${Math.round(Number(report.previousScore))}%)`);
+  }
   return lines.join("\n");
 }
