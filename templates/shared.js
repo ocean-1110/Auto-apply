@@ -224,6 +224,40 @@ ${bullets}
     .join("\n");
 }
 
+/**
+ * US recruiter standard:
+ *   Title                                          Dates
+ *   Company · Location
+ */
+export function renderJobsUs(jobs) {
+  return (jobs || [])
+    .map((job) => {
+      const company = escapeHtml(job.company || "");
+      const location = escapeHtml(job.location || "");
+      const title = escapeHtml(job.title || "");
+      const dates = escapeHtml(job.dates || "");
+      const project = escapeHtml(job.project || "");
+      const bullets = (job.bullets || [])
+        .filter(Boolean)
+        .map((b) => `<li>${escapeHtml(b)}</li>`)
+        .join("\n");
+      const companyLine = [company, location].filter(Boolean).join(" · ");
+
+      return `<article class="job">
+  <div class="job-header">
+    <span class="role">${title}</span>
+    <span class="date">${dates}</span>
+  </div>
+  ${companyLine ? `<p class="company">${companyLine}</p>` : ""}
+  ${project ? `<p class="project">${project}</p>` : ""}
+  <ul>
+${bullets}
+  </ul>
+</article>`;
+    })
+    .join("\n");
+}
+
 /** School on one line; degree and year on one ATS-friendly line. */
 export function renderEducationBlock(edu = {}) {
   const school = escapeHtml(edu.school || "");

@@ -26,22 +26,22 @@
 }
 
 .pending-item {
-  padding: 10px 12px;
-  border: 1px solid #334155;
-  border-radius: 8px;
-  background: #0f172a;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg0);
 }
 
 .pending-item-q {
   margin: 0 0 6px;
   font-weight: 700;
-  color: #e5e7eb;
+  color: var(--ink);
 }
 
 .pending-item-how {
   margin: 0 0 8px;
-  color: #93c5fd;
-  font-size: 12px;
+  color: var(--sky);
+  font-size: 13px;
 }
 
 .pending-item-meta {
@@ -60,19 +60,20 @@
 .pending-item-actions button {
   width: auto;
   min-width: 0;
-  height: 28px;
+  height: 30px;
   padding: 4px 10px;
 }
 
 .qa-item-a-preview {
   margin: 0 0 4px;
-  color: #cbd5e1;
+  color: var(--muted);
   white-space: pre-wrap;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .qa-item.is-editing {
-  border-color: #2563eb;
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
 }
 
 #saveBtn.primary {

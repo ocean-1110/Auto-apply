@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Preview — Resume GPT Builder</title>
+    <link rel="stylesheet" href="preview.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Resume GPT Builder</p>
+          <h1>Document preview</h1>
+          <p class="lede" id="jobHint">Generate a resume to preview it here instantly.</p>
+        </div>
+        <div class="hero-actions">
+          <label class="filter">
+            <span>Template</span>
+            <select id="templateSelect"></select>
+          </label>
+          <button type="button" id="printBtn" class="ghost">Print</button>
+          <button type="button" id="refreshBtn" class="ghost">Refresh</button>
+          <button type="button" id="closeBtn" class="ghost">Close</button>
+        </div>
+      </header>
+
+      <div class="tabs" role="tablist">
+        <button type="button" id="tabResume" class="tab is-active" role="tab">Resume</button>
+        <button type="button" id="tabCover" class="tab" role="tab">Cover letter</button>
+      </div>
+
+      <p id="genBanner" class="gen-banner" hidden>Generating resume… preview will update when it is ready.</p>
+      <p id="emptyState" class="empty" hidden></p>
+      <iframe id="previewFrame" class="preview-frame" title="Document preview"></iframe>
+    </div>
+    <script type="module" src="preview.js"></script>
+  </body>
+</html>

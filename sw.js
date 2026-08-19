@@ -1,4 +1,4 @@
-import { appendJobToSpreadsheet } from "./sheets.js";
+﻿import { appendJobToSpreadsheet } from "./sheets.js";
 import {
   ensureCaptureAlarm,
   registerCaptureAlarmListener,
@@ -9,6 +9,7 @@ import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeSkills } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
+import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import {
   chatCompletion,
   DEFAULT_OPENAI_MODEL,
@@ -58,8 +59,8 @@ let panelWindowId = null;
 // (a popup-type window) that steals focus when they click a button in it.
 let lastFocusedNormalWindowId = null;
 
-const PANEL_WIDTH = 1000;
-const PANEL_HEIGHT = 760;
+const PANEL_WIDTH = 1280;
+const PANEL_HEIGHT = 900;
 const PANEL_WINDOW_ID_KEY = "panel_window_id";
 const PANEL_URL = () => chrome.runtime.getURL("popup.html");
 
@@ -393,7 +394,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-15.2";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-18.1";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
 function bumpQaVersion() {
@@ -1006,11 +1007,55 @@ async function startAutofillOnCurrentPage(profileId, tabId = null) {
 
 /**
  * Drive multi-step Auto Apply on any ATS / job board:
- * fill all frames → if Next/Continue (no final Submit) click it → wait for
- * next page/tab/step → refill. Stops before Submit so the user can review.
+ * fill all frames â†’ if Next/Continue (no final Submit) click it â†’ wait for
+ * next page/tab/step â†’ refill. Stops before Submit so the user can review.
  */
 async function sleepMs(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function isHttpUrl(url) {
+  return /^https?:\/\//i.test(String(url || ""));
+}
+
+/** Wait for load + a short SPA settle so the job/apply page is actually visible. */
+async function waitForPageReady(tabId, timeoutMs = 30000) {
+  await awaitTabComplete(tabId, timeoutMs);
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id) return;
+    if (tab.status === "complete" && isHttpUrl(tab.url) && tab.url !== "about:blank") {
+      try {
+        const [{ result } = {}] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => Boolean(document.body && String(document.body.innerText || "").trim().length > 20)
+        });
+        if (result) {
+          await sleepMs(500);
+          return;
+        }
+      } catch {
+        await sleepMs(400);
+        return;
+      }
+    }
+    await sleepMs(300);
+  }
+  await sleepMs(400);
+}
+
+async function navigateTabToUrl(tabId, url) {
+  const next = String(url || "").trim();
+  if (!isHttpUrl(next)) return false;
+  const live = await chrome.tabs.get(tabId).catch(() => null);
+  if (live?.url && normalizeUrlForMatch(live.url) === normalizeUrlForMatch(next)) {
+    await waitForPageReady(tabId);
+    return true;
+  }
+  await chrome.tabs.update(tabId, { url: next });
+  await waitForPageReady(tabId);
+  return true;
 }
 
 function pickBestApplyAction(frameResults = []) {
@@ -1069,36 +1114,48 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
   while (Date.now() - start < timeoutMs) {
     await sleepMs(400);
 
-    // New tab opened (common: Apply → Greenhouse / Lever / Workday).
+    // Apply links often use target=_blank. Fold that new tab back into THIS tab
+    // so we never leave two copies of the same application page.
     const tabs = await chrome.tabs.query({});
     for (const t of tabs) {
       if (t.id == null || knownTabIds.has(t.id) || t.id === tabId) continue;
-      const url = t.url || "";
-      if (url && !/^https?:\/\//i.test(url)) continue;
+      const rawUrl = t.url || t.pendingUrl || "";
+      if (rawUrl && !isHttpUrl(rawUrl)) {
+        knownTabIds.add(t.id);
+        continue;
+      }
       try {
         await awaitTabComplete(t.id, 20000);
       } catch {
         /* continue with whatever URL we have */
       }
       const fresh = await chrome.tabs.get(t.id).catch(() => null);
-      if (fresh?.id && /^https?:\/\//i.test(fresh.url || "")) {
-        await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
-        return { advanced: true, tabId: fresh.id, reason: "new_tab" };
+      const newUrl = fresh?.url || "";
+      if (!fresh?.id || !isHttpUrl(newUrl)) {
+        if (fresh?.id) knownTabIds.add(fresh.id);
+        continue;
       }
+      const orig = await chrome.tabs.get(tabId).catch(() => null);
+      const origUrl = orig?.url || "";
+      if (orig?.id && normalizeUrlForMatch(origUrl) !== normalizeUrlForMatch(newUrl)) {
+        await navigateTabToUrl(tabId, newUrl);
+      } else {
+        await waitForPageReady(tabId).catch(() => {});
+      }
+      await chrome.tabs.remove(fresh.id).catch(() => {});
+      await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+      return { advanced: true, tabId, reason: "merged_new_tab" };
     }
 
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) return { advanced: false, tabId, reason: "tab_gone" };
 
     if (tab.url && prevUrl && tab.url !== prevUrl) {
-      if (tab.status === "loading") {
-        try {
-          await awaitTabComplete(tabId, 20000);
-        } catch {
-          /* ignore */
-        }
+      try {
+        await waitForPageReady(tabId);
+      } catch {
+        await sleepMs(500);
       }
-      await sleepMs(500);
       return { advanced: true, tabId, reason: "url_change" };
     }
 
@@ -1123,8 +1180,8 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
 }
 
 /**
- * Universal multi-step Auto Apply (Jobright-style): fill → Next if no Submit →
- * wait for next page/tab → refill. Never auto-clicks final Submit.
+ * Universal multi-step Auto Apply (Jobright-style): fill â†’ Next if no Submit â†’
+ * wait for next page/tab â†’ refill. Never auto-clicks final Submit.
  */
 async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14 } = {}) {
   const tab = tabId
@@ -1136,6 +1193,8 @@ async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14
   if (!/^https?:\/\//i.test(tab.url || "")) {
     return { ok: false, error: "The current tab is not a web page. Open the job page, then run Auto Apply." };
   }
+
+  await waitForPageReady(tab.id);
 
   let currentTabId = tab.id;
   const site = detectSiteFromUrl(tab.url);
@@ -1186,22 +1245,27 @@ async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14
       const prevSig = probe.signature || "";
 
       if (probe.best?.action?.type === "entry") {
-        await sendMessageToTab(
+        const clickRes = await sendMessageToTab(
           currentTabId,
           { type: "click_apply_action", preferredType: "entry" },
           { attempts: 2, frameId: probe.best.frameId }
         );
+        if (clickRes?.navigateUrl) {
+          await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+        }
       } else {
         const entry = await sendMessageToTab(
           currentTabId,
           { type: "click_easy_apply_entry" },
           { attempts: 2 }
         ).catch(() => null);
-        if (!entry?.clicked && probe.applyUrls?.length) {
+        if (entry?.navigateUrl) {
+          await navigateTabToUrl(currentTabId, entry.navigateUrl);
+        } else if (!entry?.clicked && probe.applyUrls?.length) {
           const nextUrl = String(probe.applyUrls[0] || "").trim();
-          if (nextUrl) {
-            await chrome.tabs.update(currentTabId, { url: nextUrl });
-            await awaitTabComplete(currentTabId, 30000);
+          const liveUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || "";
+          if (nextUrl && normalizeUrlForMatch(nextUrl) !== normalizeUrlForMatch(liveUrl)) {
+            await navigateTabToUrl(currentTabId, nextUrl);
           }
         } else if (!entry?.clicked && probe.blockedReason) {
           summary.status = "needs_review";
@@ -1313,6 +1377,9 @@ async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14
       summary.status = "ready_for_review";
       summary.detail = "Reached the final Submit step. Stopped so you can review and submit.";
       return summary;
+    }
+    if (clickRes?.navigateUrl) {
+      await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
     }
 
     const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000);
@@ -2050,6 +2117,12 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
     } catch (coverErr) {
       coverLetterWarning = `, but cover letter failed: ${String(coverErr?.message || coverErr)}`;
     }
+  } else {
+    try {
+      await chrome.storage.local.remove("last_cover_letter_response");
+    } catch {
+      // ignore
+    }
   }
 
   const savedDir = await commitOutputBundle(folderName, files);
@@ -2083,123 +2156,6 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
   }
 
   return { savedDir, status };
-}
-
-function coverLetterTextToParagraphs(raw) {
-  let s = String(raw || "");
-
-  // If the model returned HTML anyway, convert block boundaries to newlines, then strip tags.
-  if (/<\/?[a-z][^>]*>/i.test(s)) {
-    s = s
-      .replace(/<\s*br\s*\/?>/gi, "\n")
-      .replace(/<\/\s*(p|div|h[1-6]|li|section|article)\s*>/gi, "\n\n")
-      .replace(/<[^>]+>/g, "")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&nbsp;/g, " ");
-  }
-
-  // Strip markdown code fences if present.
-  s = s.replace(/```[a-z]*\s*/gi, "").replace(/```/g, "");
-
-  return s
-    .split(/\n\s*\n+/)
-    .map((p) => p.replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, " ").trim())
-    .filter(Boolean);
-}
-
-function cleanCoverLetterParagraphs(paragraphs, name) {
-  const nameLc = String(name || "").toLowerCase().trim();
-  const firstNameLc = nameLc.split(/\s+/)[0] || "";
-  const closingRe = /^(sincerely|regards|best regards|kind regards|warm regards|best|respectfully|thank you)\b[,.]?$/i;
-
-  return paragraphs.filter((p) => {
-    const lc = p.toLowerCase().trim();
-    if (!lc) return false;
-    if (closingRe.test(lc)) return false; // local signature adds this
-    if (nameLc && lc === nameLc) return false; // trailing full-name line
-    if (firstNameLc && lc === firstNameLc) return false; // trailing first-name line
-    if (/^(email|phone|linkedin|mobile|tel)\s*:/i.test(p)) return false; // contact echoes
-    return true;
-  });
-}
-
-// Replace every markdown link `[text](url)` with its destination URL.
-function stripMarkdownLink(value) {
-  return String(value || "")
-    .replace(/\[([^\]]*)\]\(([^)]+)\)/g, (_match, _text, url) => url)
-    .trim();
-}
-
-function buildCoverLetterHtml(rawText, contact = {}) {
-  const esc = (v) =>
-    String(v || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;");
-
-  const name = String(contact.name || "Steven Avon").trim();
-  const paragraphs = cleanCoverLetterParagraphs(coverLetterTextToParagraphs(rawText), name);
-
-  const headerParts = [`<p class="cl-name">${esc(name)}</p>`];
-  if (contact.headline) headerParts.push(`<p class="cl-headline">${esc(contact.headline)}</p>`);
-
-  const contactParts = [];
-  if (contact.location) contactParts.push(esc(contact.location));
-  if (contact.phone) contactParts.push(esc(contact.phone));
-  if (contact.email) {
-    const email = stripMarkdownLink(contact.email).replace(/^mailto:/i, "").trim();
-    contactParts.push(`<a href="mailto:${esc(email)}">${esc(email)}</a>`);
-  }
-  if (contact.linkedin) {
-    const url = stripMarkdownLink(contact.linkedin).replace(/\/+$/, "").trim();
-    const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-    contactParts.push(`<a href="${esc(href)}">${esc(href)}</a>`);
-  }
-  if (contactParts.length) {
-    headerParts.push(`<p class="cl-contact">${contactParts.join(" | ")}</p>`);
-  }
-
-  const bodyHtml = paragraphs.map((p) => `<p>${esc(p)}</p>`).join("\n");
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<style>
-  @page { size: A4; margin: 18mm; }
-  body {
-    font-family: "Times New Roman", Times, serif;
-    font-size: 11pt;
-    line-height: 1.45;
-    color: #000;
-    margin: 0;
-  }
-  .cl-header { margin-bottom: 16px; text-align: center; }
-  .cl-header p { text-align: center; }
-  .cl-name { font-size: 16pt; font-weight: 700; margin: 0 0 2px 0; }
-  .cl-headline { font-weight: 700; margin: 0 0 6px 0; }
-  .cl-contact { margin: 0; font-size: 10.5pt; }
-  p { margin: 0 0 12px 0; text-align: justify; }
-  .signature { margin-top: 6px; }
-  .signature p { margin: 0; text-align: left; }
-  .signature .cl-name-sign { font-weight: 700; }
-</style>
-</head>
-<body>
-  <div class="cl-header">
-    ${headerParts.join("\n    ")}
-  </div>
-  ${bodyHtml}
-  <div class="signature">
-    <p>Sincerely,</p>
-    <p class="cl-name-sign">${esc(name)}</p>
-  </div>
-</body>
-</html>`;
 }
 
 async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
@@ -2779,14 +2735,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               .update(existingTab.windowId, { focused: true })
               .catch(() => {});
           }
-          if (existingTab.status !== "complete") {
-            await awaitTabComplete(tabId, 30000);
-          }
+          await waitForPageReady(tabId);
         } else {
           const tab = await chrome.tabs.create({ url, active: true });
           tabId = tab?.id;
           if (!tabId) throw new Error("Failed to open browser tab.");
-          await awaitTabComplete(tabId, 30000);
+          await waitForPageReady(tabId);
         }
 
         // Stop early if the posting is gone (expired / filled / removed / 404) so
@@ -2837,45 +2791,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         await setImportedJobStatus(importedJobId, {
           status: "opening_form",
-          statusDetail: "Locating application form..."
+          statusDetail: "Waiting for the job page, then Auto Apply..."
         });
 
-        // Universal multi-step Auto Apply (any ATS): fill → Next → refill →
-        // stop before Submit. Also follows Apply URLs / Easy Apply entry.
         const liveTab = await chrome.tabs.get(tabId).catch(() => null);
-        const site = detectSiteFromUrl(liveTab?.url || url);
+        if (!liveTab?.id) {
+          throw new Error("The job tab was closed before Auto Apply could start.");
+        }
+        tabId = liveTab.id;
+        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+        await waitForPageReady(tabId);
+        const site = detectSiteFromUrl(liveTab.url || url);
 
-        // Best-effort: if still on a listing with candidate Apply URLs and no
-        // form, navigate once before the multi-step loop.
         try {
           await ensureAutofillScript(tabId);
-          let probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
-          const visited = new Set([liveTab?.url || url].filter(Boolean));
-          let tries = 0;
-          while (
-            tries < 2 &&
-            probe &&
-            probe.ok !== false &&
-            !probe.isApplicationForm &&
-            !probe.blockedReason &&
-            !probe.jobUnavailable &&
-            Array.isArray(probe.applyUrls) &&
-            probe.applyUrls.length
-          ) {
-            const nextUrl = String(probe.applyUrls[0] || "").trim();
-            if (!nextUrl || visited.has(nextUrl)) break;
-            visited.add(nextUrl);
-            await setImportedJobStatus(importedJobId, {
-              status: "opening_form",
-              statusDetail: "Clicking through to application form..."
-            });
-            await chrome.tabs.update(tabId, { url: nextUrl });
-            await awaitTabComplete(tabId, 30000);
-            probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 }).catch(
-              () => ({ ok: false, isApplicationForm: false, applyUrls: [] })
-            );
-            tries += 1;
-          }
+          const probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
           if (probe?.jobUnavailable) {
             await setImportedJobStatus(importedJobId, {
               status: "unavailable",
@@ -2885,7 +2815,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             return;
           }
         } catch {
-          /* probe/navigate is best-effort; multi-step handles the rest */
+          /* availability probe is best-effort; Auto Apply handles the rest */
         }
 
         await setImportedJobStatus(importedJobId, {

@@ -1,9 +1,14 @@
 import { classicBlueTemplate } from "./classic-blue.js";
 import { timesClassicTemplate } from "./times-classic.js";
+import { US_MARKET_TEMPLATES } from "./us-market.js";
 import { normalizeCerts, normalizeSkills } from "./shared.js";
 
 /** Built-in resume PDF/HTML templates. Add new files here and register them. */
-export const BUILTIN_TEMPLATES = [classicBlueTemplate, timesClassicTemplate];
+export const BUILTIN_TEMPLATES = [
+  classicBlueTemplate,
+  timesClassicTemplate,
+  ...US_MARKET_TEMPLATES
+];
 
 export const DEFAULT_TEMPLATE_ID = classicBlueTemplate.id;
 

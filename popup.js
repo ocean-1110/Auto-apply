@@ -197,6 +197,7 @@ const atsScoreTooltipEl = document.getElementById("atsScoreTooltip");
 const profileSelectEl = document.getElementById("profileSelect");
 const templateSelectEl = document.getElementById("templateSelect");
 const deleteProfileBtn = document.getElementById("deleteProfile");
+const openPreviewBtn = document.getElementById("openPreview");
 const openDashboardBtn = document.getElementById("openDashboard");
 const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
@@ -1727,6 +1728,60 @@ async function refreshQaBank() {
   }
 }
 
+let previewWindowId = null;
+
+async function openPreview({ silent = false } = {}) {
+  if (!isExtensionContextValid()) {
+    handleExtensionContextInvalidated();
+    return;
+  }
+
+  const href = chrome.runtime.getURL("preview.html");
+
+  if (previewWindowId != null) {
+    try {
+      await chrome.windows.update(previewWindowId, { focused: true });
+      if (!silent) setStatus("Opened document preview.", "done");
+      return;
+    } catch {
+      previewWindowId = null;
+    }
+  }
+
+  try {
+    const win = await chrome.windows.create({
+      url: href,
+      type: "popup",
+      width: 1180,
+      height: 900,
+      focused: true
+    });
+    if (win?.id != null) {
+      previewWindowId = win.id;
+      await chrome.windows.update(win.id, { focused: true });
+    }
+    if (!silent) setStatus("Opened document preview.", "done");
+  } catch (err) {
+    if (isContextInvalidatedError(err)) {
+      handleExtensionContextInvalidated();
+      return;
+    }
+    try {
+      const tab = await chrome.tabs.create({ url: href, active: true });
+      if (tab?.windowId != null) {
+        previewWindowId = tab.windowId;
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+      if (!silent) setStatus("Opened document preview in a browser tab.", "done");
+    } catch (tabErr) {
+      setStatus(
+        `Could not open preview: ${String(tabErr?.message || tabErr || err?.message || err)}`,
+        "error"
+      );
+    }
+  }
+}
+
 async function openDashboard() {
   if (!isExtensionContextValid()) {
     handleExtensionContextInvalidated();
@@ -2239,6 +2294,12 @@ csvFileInputEl?.addEventListener("change", async () => {
 easyApplyBtn?.addEventListener("click", () => {
   runEasyApplyOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
 });
+openPreviewBtn?.addEventListener("click", () => {
+  openPreview().catch((err) => setStatus(String(err.message || err)));
+});
+chrome.windows?.onRemoved?.addListener((windowId) => {
+  if (windowId === previewWindowId) previewWindowId = null;
+});
 openDashboardBtn?.addEventListener("click", () => {
   openDashboard().catch((err) => setStatus(String(err.message || err)));
 });
@@ -2390,7 +2451,8 @@ panelPollTimer = setInterval(async () => {
       "imported_jobs_order",
       "imported_jobs_selected_id",
       "imported_jobs_version",
-      "last_ats_report"
+      "last_ats_report",
+      "last_resume_json"
     ]);
 
     const running = Boolean(data.generation_running);

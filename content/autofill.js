@@ -6,7 +6,7 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-15.2";
+  const SCRIPT_BUILD = "2026-08-18.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -668,82 +668,86 @@
   /**
    * Extract the question/field label above a control (Workday legend/label, fieldset,
    * formField containers, aria-labelledby, etc.).
+   * Prefer the closest short field label — never the longest ancestor blob, which
+   * used to steal a nearby Yes/No question and fill "Yes" into First name.
    */
   function questionLabelForControl(el) {
-    const candidates = [];
+    const ranked = [];
+
+    function add(text, score) {
+      const t = cleanLabelText(text);
+      if (!t || t.length < 2) return;
+      if (/^(select one|please select|choose|--|\* indicates a required field)$/i.test(t)) return;
+      let s = score;
+      if (t.length > 160) s -= 500;
+      else if (t.length > 80) s -= 140;
+      else if (t.length <= 40) s += 50;
+      ranked.push({ t, s });
+    }
 
     if (el.id) {
       try {
         const byFor = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-        if (byFor) candidates.push(cleanLabelText(byFor.textContent));
+        if (byFor) add(byFor.textContent, 1200);
       } catch {
         /* ignore */
       }
     }
 
-    const fieldset = el.closest("fieldset");
-    if (fieldset) {
-      const legend = fieldset.querySelector(":scope > legend");
-      if (legend) candidates.push(cleanLabelText(legend.textContent));
+    const wrapping = el.closest("label");
+    if (wrapping) {
+      const clone = wrapping.cloneNode(true);
+      clone.querySelectorAll("input, textarea, select, button").forEach((n) => n.remove());
+      add(clone.textContent, 1100);
     }
 
-    // Workday / generic ATS: label or legend inside the same form-field wrapper.
-    let container = el.parentElement;
-    for (let i = 0; i < 8 && container; i += 1) {
-      const autoId = String(container.getAttribute?.("data-automation-id") || "");
-      const isFormBlock =
-        /formfield|form-field|formField|question|applicationquestion|multiselect/i.test(autoId) ||
-        container.tagName === "FIELDSET";
-
-      if (isFormBlock) {
-        for (const labelEl of container.querySelectorAll(
-          ':scope > label, :scope > legend, [data-automation-id="formLabel"], [data-automation-id*="formLabel"], label[data-automation-id]'
-        )) {
-          if (labelEl.contains(el)) continue;
-          candidates.push(cleanLabelText(labelEl.textContent));
-        }
-      }
-
-      const prev = container.previousElementSibling;
-      if (prev && /^(LABEL|LEGEND|P|SPAN|DIV|H\d)$/i.test(prev.tagName)) {
-        const t = cleanLabelText(prev.textContent);
-        if (t.length >= 8 && t.length <= 900) candidates.push(t);
-      }
-      container = container.parentElement;
-    }
-
-    // Walk up: direct-child label/legend in each ancestor.
-    let node = el.parentElement;
-    for (let i = 0; i < 6 && node; i += 1) {
-      for (const labelEl of node.querySelectorAll(":scope > label, :scope > legend")) {
-        if (labelEl.contains(el)) continue;
-        candidates.push(cleanLabelText(labelEl.textContent));
-      }
-      const prev = el.previousElementSibling;
-      if (prev && /^(LABEL|LEGEND|P|SPAN|DIV|H\d)$/i.test(prev.tagName)) {
-        candidates.push(cleanLabelText(prev.textContent));
-      }
-      node = node.parentElement;
-    }
+    add(el.getAttribute("aria-label") || "", 1050);
+    add(el.getAttribute("placeholder") || "", 500);
 
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
       for (const id of labelledBy.split(/\s+/)) {
         const labelNode = document.getElementById(id);
-        if (labelNode) candidates.push(cleanLabelText(labelNode.textContent));
+        if (labelNode) add(labelNode.textContent, 1000);
       }
     }
-    const aria = cleanLabelText(el.getAttribute("aria-label") || "");
-    if (aria) candidates.push(aria);
 
-    let best = "";
-    for (const c of candidates) {
-      const t = cleanLabelText(c);
-      if (!t || t.length < 3) continue;
-      if (/^(select one|please select|choose|--|\* indicates a required field)$/i.test(t)) continue;
-      if (t.length > best.length) best = t;
+    const prev = el.previousElementSibling;
+    if (prev && /^(LABEL|LEGEND|P|SPAN|DIV|H\d)$/i.test(prev.tagName)) {
+      add(prev.textContent, 900);
     }
-    return best;
+
+    const type = (el.type || "").toLowerCase();
+    const isChoice = type === "radio" || type === "checkbox";
+    const fieldset = el.closest("fieldset");
+    if (fieldset) {
+      const legend = fieldset.querySelector(":scope > legend");
+      if (legend) add(legend.textContent, isChoice ? 850 : 350);
+    }
+
+    let container = el.parentElement;
+    for (let depth = 0; depth < 4 && container; depth += 1) {
+      const autoId = String(container.getAttribute?.("data-automation-id") || "");
+      const isFormBlock =
+        /formfield|form-field|formField|question|applicationquestion|multiselect/i.test(autoId) ||
+        container.tagName === "FIELDSET";
+      if (isFormBlock) {
+        for (const labelEl of container.querySelectorAll(
+          ':scope > label, :scope > legend, [data-automation-id="formLabel"], [data-automation-id*="formLabel"], label[data-automation-id]'
+        )) {
+          if (labelEl.contains(el)) continue;
+          add(labelEl.textContent, 800 - depth * 80);
+        }
+      }
+      for (const labelEl of container.querySelectorAll(":scope > label, :scope > legend")) {
+        if (labelEl.contains(el)) continue;
+        add(labelEl.textContent, 720 - depth * 80);
+      }
+      container = container.parentElement;
+    }
+
+    ranked.sort((a, b) => b.s - a.s);
+    return ranked[0]?.t || "";
   }
 
   /** Direct field label — uses Workday-aware question label extraction. */
@@ -814,24 +818,24 @@
       return "phoneCountryCode";
     }
 
-    // High-confidence Workday / ATS compliance questions (company name varies).
-    if (/\b(require|need)\b/.test(primary) && /\bsponsorship\b/.test(primary)) {
+    const shortPrimary = primary && primary.length <= 180;
+    if (shortPrimary && /\b(require|need)\b/.test(primary) && /\bsponsorship\b/.test(primary)) {
       return "needsSponsorship";
     }
-    if (/\b(eligible|legally authorized|authorized)\b/.test(primary) && /\bwork\b/.test(primary)) {
+    if (shortPrimary && /\b(eligible|legally authorized|authorized)\b/.test(primary) && /\bwork\b/.test(primary)) {
       return "workAuthorized";
     }
-    if (/\bcontinuing employment restrictions\b/.test(primary) || /\bemployment restrictions or obligations\b/.test(primary)) {
+    if (shortPrimary && (/\bcontinuing employment restrictions\b/.test(primary) || /\bemployment restrictions or obligations\b/.test(primary))) {
       return "postEmploymentRestrictions";
     }
-    if (/\bhave you worked for\b/.test(primary) && /\b(past|before|previously|subsidiary)\b/.test(primary)) {
+    if (shortPrimary && /\bhave you worked for\b/.test(primary) && /\b(past|before|previously|subsidiary)\b/.test(primary)) {
       return "workedForCompanyBefore";
     }
-    if (/\bclosely related\b/.test(primary) || /\bpersonal relationship\b/.test(primary)) {
+    if (shortPrimary && (/\bclosely related\b/.test(primary) || /\bpersonal relationship\b/.test(primary))) {
       return "relatedToEmployee";
     }
-    if (/\bgovernment employee\b/.test(primary)) return "governmentEmployee";
-    if (/\bethics official\b/.test(primary) || /\brecused yourself\b/.test(primary)) {
+    if (shortPrimary && /\bgovernment employee\b/.test(primary)) return "governmentEmployee";
+    if (shortPrimary && (/\bethics official\b/.test(primary) || /\brecused yourself\b/.test(primary))) {
       return "governmentEthicsRecusal";
     }
 
@@ -1196,6 +1200,35 @@
     if (value == null || String(value).trim() === "") return false;
     if (el.disabled || el.readOnly) return false;
     const tag = el.tagName.toLowerCase();
+    const label = questionLabelForControl(el) || labelTextForControl(el);
+    const identityLabel =
+      /\b(first name|last name|given name|surname|family name|middle name|preferred name|email|e-mail|phone|mobile|linkedin|address|city|state|zip|postal|country)\b/i.test(
+        label
+      );
+    const identityKey = [
+      "firstName",
+      "lastName",
+      "middleName",
+      "preferredName",
+      "email",
+      "phone",
+      "addressLine1",
+      "addressLine2",
+      "city",
+      "state",
+      "zipCode",
+      "country",
+      "linkedinUrl"
+    ].includes(key);
+    if (
+      isYesNoValue(value) &&
+      (identityKey || identityLabel) &&
+      tag !== "select" &&
+      el.type !== "checkbox" &&
+      el.type !== "radio"
+    ) {
+      return false;
+    }
 
     if (tag === "select") return fillSelect(el, value, key);
 
@@ -1859,6 +1892,15 @@
         continue;
       }
       if (/^(yes|no)([.,!]|$)/i.test(answer)) {
+        const label = questionLabelForControl(el) || labelTextForControl(el);
+        const isChoice = el.type === "checkbox" || el.type === "radio" || el.tagName === "SELECT";
+        const yesNoQ =
+          /^(are you|do you|have you|will you|can you|did you|were you)\b/i.test(label) ||
+          /\b(yes or no|y\/n)\b/i.test(label);
+        if (!isChoice && !yesNoQ) {
+          el.removeAttribute("data-resume-bot-qid");
+          continue;
+        }
         answer = answer.charAt(0).toUpperCase() + answer.slice(1);
       }
       if (await fillControl(el, answer, null)) {
@@ -2661,6 +2703,12 @@
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) return;
       if (seen.has(url)) return;
+      try {
+        const here = location.href.replace(/#.*$/, "");
+        if (url.replace(/#.*$/, "") === here) return;
+      } catch {
+        /* ignore */
+      }
       seen.add(url);
       applyUrls.push(url);
     }
@@ -2913,19 +2961,52 @@
     return { type: action.type, text: action.text || elActionText(action.el) };
   }
 
+  async function clickKeepingSameTab(el) {
+    if (!el) return { clicked: false, navigateUrl: "" };
+    let capturedUrl = "";
+    const origOpen = window.open;
+    window.open = function (url) {
+      capturedUrl = String(url || "");
+      return null;
+    };
+    try {
+      if (el.tagName === "A") {
+        const href = String(el.href || "").trim();
+        const target = String(el.getAttribute("target") || "").toLowerCase();
+        if (/^https?:/i.test(href) && (target === "_blank" || target === "blank")) {
+          return { clicked: false, navigateUrl: href };
+        }
+        el.setAttribute("target", "_self");
+      }
+      scrollElIntoView(el);
+      el.click();
+      await sleep(400);
+      if (/^https?:/i.test(capturedUrl)) {
+        return { clicked: false, navigateUrl: capturedUrl };
+      }
+      return { clicked: true, navigateUrl: "" };
+    } finally {
+      window.open = origOpen;
+    }
+  }
+
   async function clickEasyApplyEntry() {
-    const controls = [...document.querySelectorAll('button, a, [role="button"]')].filter(
+    const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
       (el) => isElVisible(el) && isElEnabled(el)
     );
     const preferred = controls.find((el) =>
       /easy apply|1-?click apply|one-?click apply|quick apply/i.test(elActionText(el))
     );
     const target = preferred || controls.find((el) => EASY_ENTRY_RE.test(elActionText(el)));
-    if (!target) return { ok: false, clicked: false };
-    scrollElIntoView(target);
-    target.click();
-    await sleep(1200);
-    return { ok: true, clicked: true, text: elActionText(target) };
+    if (!target) return { ok: false, clicked: false, navigateUrl: "" };
+    const res = await clickKeepingSameTab(target);
+    await sleep(res.clicked ? 800 : 200);
+    return {
+      ok: Boolean(res.clicked || res.navigateUrl),
+      clicked: Boolean(res.clicked),
+      navigateUrl: res.navigateUrl || "",
+      text: elActionText(target)
+    };
   }
 
   function stepSignature() {
@@ -2967,10 +3048,14 @@
       const entryRes = await clickEasyApplyEntry();
       await sleep(400);
       return {
-        ok: Boolean(entryRes?.clicked),
+        ok: Boolean(entryRes?.clicked || entryRes?.navigateUrl),
         clicked: Boolean(entryRes?.clicked),
+        navigateUrl: entryRes?.navigateUrl || "",
         isSubmit: false,
-        action: entryRes?.clicked ? { type: "entry", text: entryRes.text || "" } : null,
+        action:
+          entryRes?.clicked || entryRes?.navigateUrl
+            ? { type: "entry", text: entryRes.text || "" }
+            : null,
         before,
         after: getApplyActionSnapshot()
       };
@@ -3017,12 +3102,11 @@
         after: before
       };
     }
-    scrollElIntoView(action.el);
-    action.el.click();
-    await sleep(400);
+    const clickRes = await clickKeepingSameTab(action.el);
     return {
-      ok: true,
-      clicked: true,
+      ok: Boolean(clickRes.clicked || clickRes.navigateUrl),
+      clicked: Boolean(clickRes.clicked),
+      navigateUrl: clickRes.navigateUrl || "",
       isSubmit: false,
       action: describeAction(action),
       before,
