@@ -117,7 +117,7 @@ async function findExistingPanelWindow() {
 async function openPanelWindow() {
   const existing = await findExistingPanelWindow();
   if (existing?.id != null) {
-    await chrome.windows.update(existing.id, { focused: true });
+    await chrome.windows.update(existing.id, { focused: true, width: PANEL_WIDTH });
     const activeTab = existing.tabs?.find((t) => t.active) || existing.tabs?.[0];
     if (activeTab?.id != null) {
       try {
@@ -147,6 +147,14 @@ chrome.windows.onRemoved.addListener((windowId) => {
     lastFocusedNormalWindowId = null;
   }
 });
+
+if (chrome.windows.onBoundsChanged) {
+  chrome.windows.onBoundsChanged.addListener((win) => {
+    if (!win || win.id !== panelWindowId) return;
+    if (Math.abs(Number(win.width || 0) - PANEL_WIDTH) <= 2) return;
+    chrome.windows.update(win.id, { width: PANEL_WIDTH }).catch(() => {});
+  });
+}
 
 /** Remember the most recent normal (browser) window the user focused. */
 function rememberFocusedNormalWindow(windowId) {
@@ -1559,7 +1567,7 @@ function sanitizePathSegment(value, fallback = "untitled") {
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
     .replace(/\s+/g, " ")
     .replace(/[. ]+$/g, "")
-    .slice(0, 80)
+    .slice(0, 140)
     .trim();
   return cleaned || fallback;
 }
@@ -1571,12 +1579,30 @@ function joinDownloadPath(...parts) {
     .join("/");
 }
 
-/** Job folder: {job_title}-{company}-{name} */
-function buildJobFolderName(jobMeta = {}, personName = "") {
-  const role = sanitizePathSegment(jobMeta.jobTitle || "Role", "Role");
+const RESUME_FOLDER_SEQ_KEY = "resume_folder_seq";
+
+function firstNameFromPerson(personName) {
+  const parts = String(personName || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  return parts[0] || "Candidate";
+}
+
+async function nextResumeFolderId() {
+  const stored = await chrome.storage.local.get(RESUME_FOLDER_SEQ_KEY);
+  const next = Math.max(1, Number(stored[RESUME_FOLDER_SEQ_KEY] || 0) + 1);
+  await chrome.storage.local.set({ [RESUME_FOLDER_SEQ_KEY]: next });
+  return next;
+}
+
+/** Job folder: {id} - {first name} - {company} - {role} */
+async function buildJobFolderName(jobMeta = {}, personName = "") {
+  const id = await nextResumeFolderId();
+  const first = sanitizePathSegment(firstNameFromPerson(personName), "Candidate");
   const company = sanitizePathSegment(jobMeta.companyName || "Company", "Company");
-  const name = sanitizePathSegment(personName || "Candidate", "Candidate");
-  return sanitizePathSegment(`${role}-${company}-${name}`, "Role-Company-Candidate");
+  const role = sanitizePathSegment(jobMeta.jobTitle || "Role", "Role");
+  return sanitizePathSegment(`${id} - ${first} - ${company} - ${role}`, `${id} - Candidate - Company - Role`);
 }
 
 function buildJdTxtContent({ jobTitle, companyName, jdLink, jdText }) {
@@ -1840,7 +1866,7 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
   const pdfBase64 = await htmlToPdfBase64(html);
 
   const personName = String(resumeData?.name || "").trim() || "Candidate";
-  const folderName = buildJobFolderName(jobMeta, personName);
+  const folderName = await buildJobFolderName(jobMeta, personName);
   const resumeFileBase = sanitizePathSegment(personName.replace(/\s+/g, "_") || "Resume", "Resume");
 
   const jdTxt = buildJdTxtContent({
@@ -2947,6 +2973,126 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
     })();
     return true;
+  }
+
+  if (message?.type === "batch_generate_jobs") {
+    const profileId = message.profileId;
+    const jobIds = Array.isArray(message.jobIds) ? message.jobIds.map((id) => String(id || "").trim()).filter(Boolean) : [];
+    const shared = message.jobMeta || {};
+
+    if (!profileId) {
+      safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
+      return false;
+    }
+    if (!jobIds.length) {
+      safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
+      return false;
+    }
+    if (isRunning) {
+      safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+      return false;
+    }
+
+    isRunning = true;
+    startKeepAlive();
+    chrome.storage.local.set({ generation_running: true });
+    safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
+
+    (async () => {
+      let okCount = 0;
+      let failCount = 0;
+      try {
+        const byId = await getImportedJobsById();
+        const resumeOnlyStored =
+          (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
+
+        for (let i = 0; i < jobIds.length; i += 1) {
+          const importedJobId = jobIds[i];
+          const job = byId[importedJobId];
+          if (!job) {
+            failCount += 1;
+            continue;
+          }
+          const jdText = String(job.jdText || shared.jdText || "").trim();
+          if (!jdText) {
+            failCount += 1;
+            await setImportedJobStatus(importedJobId, {
+              status: "failed",
+              statusDetail: "Missing job description — cannot generate a resume.",
+              profileId
+            });
+            continue;
+          }
+
+          const jobMeta = {
+            jobTitle: job.jobTitle || "",
+            companyName: job.companyName || "",
+            jdLink: job.jdLink || job.url || "",
+            jdText,
+            templateId: shared.templateId || DEFAULT_TEMPLATE_ID,
+            spreadsheetUrl: shared.spreadsheetUrl || "",
+            sheetName: shared.sheetName || "",
+            sheetsWebAppUrl: shared.sheetsWebAppUrl || "",
+            workArrangement: job.workArrangement || "",
+            employmentType: job.employmentType || "",
+            salaryMin: job.salaryMin || "",
+            salaryMax: job.salaryMax || "",
+            datePosted: job.datePosted || "",
+            resumeOnly: resumeOnlyStored
+          };
+
+          await chrome.storage.local.set({
+            selected_profile_id: profileId,
+            selected_template_id: jobMeta.templateId,
+            last_job_title: jobMeta.jobTitle,
+            last_company_name: jobMeta.companyName,
+            last_jd_link: jobMeta.jdLink,
+            last_jd_text: jobMeta.jdText
+          });
+
+          await setImportedJobStatus(importedJobId, {
+            status: "generating",
+            statusDetail: `Batch resume ${i + 1}/${jobIds.length}...`,
+            markAttempt: true,
+            profileId
+          });
+          await setStatus(
+            `Batch resume ${i + 1}/${jobIds.length}: ${jobMeta.jobTitle || importedJobId} @ ${jobMeta.companyName || ""}`
+          );
+
+          try {
+            const saved = await runGenerationPipeline({ profileId, jobMeta });
+            okCount += 1;
+            await setImportedJobStatus(importedJobId, {
+              status: "generated",
+              statusDetail: saved?.status || "Resume saved.",
+              profileId
+            });
+          } catch (err) {
+            failCount += 1;
+            const error = String(err?.message || err);
+            await setImportedJobStatus(importedJobId, {
+              status: "failed",
+              statusDetail: error,
+              profileId
+            });
+            await setStatus(`Batch item failed (${jobMeta.jobTitle || importedJobId}): ${error}`);
+          }
+        }
+
+        await setStatus(
+          `Batch resume build finished: ${okCount} saved, ${failCount} failed. ${await getCostSummaryText()}`
+        );
+      } catch (err) {
+        await setStatus(`Batch resume build failed: ${String(err?.message || err)}`);
+      } finally {
+        await chrome.storage.local.set({ generation_running: false });
+        isRunning = false;
+        stopKeepAlive();
+      }
+    })();
+
+    return false;
   }
 
   if (message?.type !== "generate_resume") {

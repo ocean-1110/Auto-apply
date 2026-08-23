@@ -269,6 +269,9 @@ const filterDiceJobsBtn = document.getElementById("filterDiceJobs");
 const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
 const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
+const selectAllJobsEl = document.getElementById("selectAllJobs");
+const batchSelectionNoteEl = document.getElementById("batchSelectionNote");
+const batchGenerateBtn = document.getElementById("batchGenerateBtn");
 const sidebarImportEl = jobsSidebarEl?.querySelector(".sidebar-import") || null;
 
 let profilesCache = [];
@@ -288,6 +291,7 @@ let importedJobsOrder = [];
 let importedJobsSelectedId = null;
 let importedJobsVersion = 0;
 let importedJobsFilter = "all";
+const importedJobsChecked = new Set();
 let capturePollRunning = false;
 let panelPollTimer = null;
 let extensionContextDead = false;
@@ -642,6 +646,8 @@ function displayImportedJobStatus(job) {
       return "Opening URL";
     case "generating":
       return "Generating resume";
+    case "generated":
+      return "Resume ready";
     case "opening_form":
       return "Opening application form";
     case "filling":
@@ -671,12 +677,17 @@ async function refreshImportedJobsFromStorage() {
     "imported_jobs_by_id",
     "imported_jobs_order",
     "imported_jobs_selected_id",
-    "imported_jobs_version"
+    "imported_jobs_version",
+    "imported_jobs_checked_ids"
   ]);
   importedJobsById = data.imported_jobs_by_id || {};
   importedJobsOrder = data.imported_jobs_order || [];
   importedJobsSelectedId = data.imported_jobs_selected_id || null;
   importedJobsVersion = Number(data.imported_jobs_version || 0);
+  importedJobsChecked.clear();
+  for (const id of data.imported_jobs_checked_ids || []) {
+    if (importedJobsById[id]) importedJobsChecked.add(String(id));
+  }
 
   renderImportedJobs();
 }
@@ -757,6 +768,35 @@ async function runJobCaptureNow() {
   }
 }
 
+function persistCheckedJobs() {
+  chrome.storage.local
+    .set({ imported_jobs_checked_ids: [...importedJobsChecked] })
+    .catch(() => {});
+}
+
+function visibleImportedJobIds() {
+  return importedJobsOrder.filter((jobId) => {
+    const job = importedJobsById[jobId];
+    return job && importedJobMatchesFilter(job);
+  });
+}
+
+function updateBatchBar() {
+  const visible = visibleImportedJobIds();
+  const selectedVisible = visible.filter((id) => importedJobsChecked.has(id));
+  if (batchSelectionNoteEl) {
+    batchSelectionNoteEl.textContent = `${selectedVisible.length} selected`;
+  }
+  if (selectAllJobsEl) {
+    selectAllJobsEl.checked = visible.length > 0 && selectedVisible.length === visible.length;
+    selectAllJobsEl.indeterminate =
+      selectedVisible.length > 0 && selectedVisible.length < visible.length;
+  }
+  if (batchGenerateBtn) {
+    batchGenerateBtn.disabled = selectedVisible.length === 0;
+  }
+}
+
 function renderImportedJobs() {
   if (!importedJobsListEl) return;
   importedJobsListEl.innerHTML = "";
@@ -764,6 +804,7 @@ function renderImportedJobs() {
   if (!importedJobsOrder.length) {
     importedJobsListEl.innerHTML =
       '<p class="import-status" style="margin:0">No pending jobs. Use Capture now, Import CSV, or wait for auto-capture.</p>';
+    updateBatchBar();
     return;
   }
 
@@ -787,6 +828,23 @@ function renderImportedJobs() {
 
     const summary = document.createElement("summary");
     summary.className = "job-summary";
+
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "job-check";
+    check.title = "Select for batch resume build";
+    check.checked = importedJobsChecked.has(jobId);
+    check.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+    check.addEventListener("change", (e) => {
+      e.stopPropagation();
+      if (check.checked) importedJobsChecked.add(jobId);
+      else importedJobsChecked.delete(jobId);
+      persistCheckedJobs();
+      updateBatchBar();
+    });
+    summary.appendChild(check);
 
     const title = document.createElement("span");
     title.className = "job-summary-title";
@@ -821,6 +879,18 @@ function renderImportedJobs() {
       });
       summary.appendChild(unblockBtn);
 
+      const removeBlockedBtn = document.createElement("button");
+      removeBlockedBtn.type = "button";
+      removeBlockedBtn.className = "secondary job-remove";
+      removeBlockedBtn.textContent = "Remove";
+      removeBlockedBtn.title = "Remove this job from the list";
+      removeBlockedBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await removeImportedJob(jobId);
+      });
+      summary.appendChild(removeBlockedBtn);
+
       card.appendChild(summary);
       frag.appendChild(card);
       continue;
@@ -849,6 +919,19 @@ function renderImportedJobs() {
     }
 
     summary.appendChild(applySummaryBtn);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "secondary job-remove";
+    removeBtn.textContent = "Remove";
+    removeBtn.title = "Remove this job from the list";
+    removeBtn.disabled = isInProgress;
+    removeBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await removeImportedJob(jobId);
+    });
+    summary.appendChild(removeBtn);
 
     card.appendChild(summary);
 
@@ -957,7 +1040,7 @@ function renderImportedJobs() {
       // Allow the details element to open/close, but still copy values.
       // If the click was on a button (handled above), ignore.
       const target = e.target;
-      if (target && target.tagName && target.tagName.toLowerCase() === "button") return;
+      if (target && target.tagName && ["button", "input"].includes(target.tagName.toLowerCase())) return;
       openSelected(e);
     });
 
@@ -968,10 +1051,68 @@ function renderImportedJobs() {
   if (!visibleCount) {
     importedJobsListEl.innerHTML =
       '<p class="import-status" style="margin:0">No pending jobs match this filter.</p>';
+    updateBatchBar();
     return;
   }
 
   importedJobsListEl.appendChild(frag);
+  updateBatchBar();
+}
+
+async function removeImportedJob(jobId) {
+  const job = importedJobsById[jobId];
+  if (!job) return;
+  const now = Date.now();
+  const byId = { ...importedJobsById };
+  delete byId[jobId];
+  const order = importedJobsOrder.filter((id) => id !== jobId);
+  importedJobsChecked.delete(jobId);
+  if (importedJobsSelectedId === jobId) importedJobsSelectedId = null;
+
+  await chrome.storage.local.set({
+    imported_jobs_by_id: byId,
+    imported_jobs_order: order,
+    imported_jobs_selected_id: importedJobsSelectedId,
+    imported_jobs_checked_ids: [...importedJobsChecked],
+    imported_jobs_version: now
+  });
+
+  importedJobsById = byId;
+  importedJobsOrder = order;
+  importedJobsVersion = now;
+  renderImportedJobs();
+  setStatus(`Removed: ${job.jobTitle || jobId}`);
+}
+
+async function batchGenerateSelectedJobs() {
+  const jobIds = visibleImportedJobIds().filter((id) => importedJobsChecked.has(id));
+  if (!jobIds.length) {
+    setStatus("Check one or more jobs, then click Batch resume build.");
+    return;
+  }
+
+  const collected = await collectBatchGenerateSettings();
+  if (!collected) return;
+
+  const runnable = jobIds.filter((id) => {
+    const job = importedJobsById[id];
+    return job && job.status !== "unavailable" && String(job.jdText || "").trim();
+  });
+  if (!runnable.length) {
+    setStatus("Selected jobs need a stored job description. Capture/import with JD text, or open a job and scrape it first.");
+    return;
+  }
+
+  setStatus(`Starting batch resume build for ${runnable.length} job(s)...`);
+  const res = await chrome.runtime.sendMessage({
+    type: "batch_generate_jobs",
+    profileId: collected.profileId,
+    jobIds: runnable,
+    jobMeta: collected.jobMeta
+  });
+  if (!res?.ok) {
+    setStatus(`Batch resume build failed to start: ${String(res?.error || "unknown error")}`);
+  }
 }
 
 async function replaceImportedJobs(jobs) {
@@ -1005,12 +1146,14 @@ async function replaceImportedJobs(jobs) {
     imported_jobs_by_id: byId,
     imported_jobs_order: order,
     imported_jobs_selected_id: null,
+    imported_jobs_checked_ids: [],
     imported_jobs_version: now
   });
 
   importedJobsById = byId;
   importedJobsOrder = order;
   importedJobsSelectedId = null;
+  importedJobsChecked.clear();
   importedJobsVersion = now;
 
   renderImportedJobs();
@@ -1553,6 +1696,54 @@ async function copySheetRow() {
   }
 }
 
+async function collectBatchGenerateSettings() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
+  const spreadsheetUrl = (spreadsheetUrlEl.value || "").trim();
+  const sheetTabName = (sheetTabNameEl?.value || "").trim();
+  const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
+
+  if (spreadsheetUrl || sheetsWebAppUrl || sheetTabName) {
+    if (!extractSpreadsheetId(spreadsheetUrl)) {
+      setStatus("Enter a valid Google Spreadsheet link.");
+      spreadsheetUrlEl.focus();
+      return null;
+    }
+    if (!sheetsWebAppUrl) {
+      setStatus("Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.");
+      sheetsWebAppUrlEl.focus();
+      return null;
+    }
+  }
+
+  const outputFolderName = (await getOutputDirectoryName()) || "";
+  if (!outputFolderName) {
+    setStatus("Select an output folder first (Select folder), then run batch resume build.");
+    selectOutputDirBtn?.focus();
+    return null;
+  }
+
+  await chrome.storage.local.set({
+    selected_profile_id: profileId,
+    selected_template_id: templateId,
+    spreadsheet_url: spreadsheetUrl,
+    sheets_sheet_name: sheetTabName,
+    sheets_web_app_url: sheetsWebAppUrl,
+    generate_resume_only: isResumeOnlyEnabled()
+  });
+
+  return {
+    profileId,
+    jobMeta: {
+      outputDir: outputFolderName,
+      spreadsheetUrl,
+      sheetName: sheetTabName,
+      sheetsWebAppUrl,
+      templateId
+    }
+  };
+}
+
 async function collectJobMetaOrShowError() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
@@ -1646,6 +1837,8 @@ function setBusy(busy) {
   if (generateResumeBtn) generateResumeBtn.disabled = busy;
   if (autofillBtn) autofillBtn.disabled = busy;
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
+  if (batchGenerateBtn && busy) batchGenerateBtn.disabled = true;
+  if (batchGenerateBtn && !busy) updateBatchBar();
 }
 
 function setCopyAnswerEnabled(enabled) {
@@ -2196,6 +2389,19 @@ filterDiceJobsBtn?.addEventListener("click", () => setImportedJobsFilter("dice")
 filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jobright"));
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));
+selectAllJobsEl?.addEventListener("change", () => {
+  const visible = visibleImportedJobIds();
+  if (selectAllJobsEl.checked) {
+    for (const id of visible) importedJobsChecked.add(id);
+  } else {
+    for (const id of visible) importedJobsChecked.delete(id);
+  }
+  persistCheckedJobs();
+  renderImportedJobs();
+});
+batchGenerateBtn?.addEventListener("click", () => {
+  batchGenerateSelectedJobs().catch((err) => setStatus(String(err.message || err)));
+});
 
 autoCaptureToggleEl?.addEventListener("change", () => {
   const enabled = Boolean(autoCaptureToggleEl.checked);
@@ -2434,6 +2640,27 @@ resumeOnlyToggleEl?.addEventListener("change", () => {
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));
 setSidebarMode("manual");
 refreshImportedJobsFromStorage().catch(() => {});
+
+const PANEL_LOCK_WIDTH = 1280;
+let lockingPanelWidth = false;
+async function lockPanelWidth() {
+  if (lockingPanelWidth || !isExtensionContextValid()) return;
+  lockingPanelWidth = true;
+  try {
+    const win = await chrome.windows.getCurrent();
+    if (win?.id != null && Math.abs(Number(win.width || 0) - PANEL_LOCK_WIDTH) > 2) {
+      await chrome.windows.update(win.id, { width: PANEL_LOCK_WIDTH });
+    }
+  } catch {
+    /* popup may not be a windows-managed panel */
+  } finally {
+    lockingPanelWidth = false;
+  }
+}
+window.addEventListener("resize", () => {
+  lockPanelWidth().catch(() => {});
+});
+lockPanelWidth().catch(() => {});
 panelPollTimer = setInterval(async () => {
   if (extensionContextDead) return;
   if (!isExtensionContextValid()) {
@@ -2488,6 +2715,9 @@ panelPollTimer = setInterval(async () => {
       importedJobsOrder = data.imported_jobs_order || [];
       importedJobsSelectedId = data.imported_jobs_selected_id || null;
       importedJobsVersion = nextVersion;
+      for (const id of [...importedJobsChecked]) {
+        if (!importedJobsById[id]) importedJobsChecked.delete(id);
+      }
       renderImportedJobs();
     }
 

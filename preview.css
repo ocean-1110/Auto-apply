@@ -1,16 +1,16 @@
-@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap");
 
 :root {
-  --bg0: #f6f8ff;
-  --bg1: #eef3ff;
+  --bg0: #f4f3ef;
+  --bg1: #eceae4;
   --card: #ffffff;
-  --ink: #12203a;
-  --muted: #5b6b86;
-  --line: #e4eaf6;
-  --indigo: #4f46e5;
-  --indigo-soft: #eef0ff;
-  --amber-soft: #fff7ed;
-  --shadow: 0 18px 50px rgba(79, 70, 229, 0.08);
+  --ink: #1c2430;
+  --muted: #5e6a78;
+  --line: #ddd8ce;
+  --indigo: #1b4f72;
+  --indigo-soft: #e7eef4;
+  --amber-soft: #f7f1de;
+  --shadow: 0 10px 26px rgba(28, 36, 48, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -18,12 +18,9 @@
 html, body {
   margin: 0;
   min-height: 100%;
-  background:
-    radial-gradient(1200px 420px at 8% -10%, #dbe7ff 0%, transparent 55%),
-    radial-gradient(900px 380px at 100% 0%, #f3e8ff 0%, transparent 50%),
-    linear-gradient(180deg, var(--bg0), var(--bg1));
+  background: linear-gradient(180deg, #f7f6f2 0%, #efece6 100%);
   color: var(--ink);
-  font: 15px/1.45 Outfit, "Segoe UI", sans-serif;
+  font: 15px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
 .page {
