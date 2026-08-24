@@ -1915,7 +1915,7 @@
    * NOT mapped to a known profile field. These get answered from the Q&A bank
    * (stable, reusable selections) — never from AI.
    */
-  function collectUnmatchedChoiceQuestions() {
+  async function collectUnmatchedChoiceQuestions() {
     const out = [];
     const groupIds = new Map(); // labelNorm -> id (radio/checkbox groups share one)
     const nodes = [
@@ -1986,13 +1986,33 @@
       const labelNorm = normalize(label);
       if (!labelNorm || labelNorm.length < 6 || seenLabels.has(labelNorm)) continue;
 
-      const expanded = el.getAttribute("aria-expanded") === "true";
-      const options = expanded
-        ? collectVisibleOptions(document)
+      let options = [];
+      if (el.getAttribute("aria-expanded") === "true") {
+        options = collectVisibleOptions(document)
+          .map((node) => cleanLabelText(node.textContent))
+          .filter(Boolean)
+          .slice(0, 40);
+      }
+      if (!options.length) {
+        try {
+          openReactSelect(el);
+          const nodesFound = await waitForOptions(8, 90);
+          options = nodesFound
             .map((node) => cleanLabelText(node.textContent))
             .filter(Boolean)
-            .slice(0, 40)
-        : [];
+            .slice(0, 40);
+          // Close menu so the page stays usable while AI answers.
+          const input = isReactSelectInput(el) ? el : el.querySelector?.("input") || el;
+          if (input) {
+            input.dispatchEvent(
+              new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" })
+            );
+          }
+        } catch {
+          options = [];
+        }
+      }
+      if (!options.length) continue;
 
       const id = `rbc_${out.length}_${Math.abs(
         Array.from(labelNorm).reduce((n, ch) => (n * 31 + ch.charCodeAt(0)) | 0, 7)
@@ -2675,7 +2695,7 @@
 
     const uploadResult = uploadApplicationFiles(uploadFiles);
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
-    const unmatchedChoiceQuestions = collectUnmatchedChoiceQuestions();
+    const unmatchedChoiceQuestions = await collectUnmatchedChoiceQuestions();
 
     return {
       ok: true,

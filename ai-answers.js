@@ -269,8 +269,11 @@ export async function generateConstrainedChoiceAnswers({
         role: "system",
         content:
           "You answer US job-application CHOICE questions for a real candidate. " +
+          "Questions may be select dropdowns, radio groups, checkboxes, or comboboxes (fieldType). " +
           "Each question includes an options array — you MUST set answer to EXACTLY one string from that question's options (character-for-character). " +
-          "Never invent an option. For yes/no style questions prefer honest answers from the profile/resume. " +
+          "Never invent an option. For multi-select checkboxes, pick the single best matching option string from the list. " +
+          "Use the candidate profile, resume, and job description to choose the most appropriate option. " +
+          "For yes/no style questions prefer honest answers from the profile/resume. " +
           "Default guidance when profile is silent: eligible to work in the US → Yes option; visa sponsorship needed → No; " +
           "employment restrictions with current/former employer → No; previously worked for this company → No; " +
           "related to current employee → No; government employee → No; ethics recusal → No. " +
@@ -285,6 +288,7 @@ export async function generateConstrainedChoiceAnswers({
             questions: list.map((q) => ({
               id: q.id,
               question: q.label,
+              fieldType: q.fieldType || "select",
               options: q.options
             }))
           },

@@ -1141,10 +1141,144 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   };
 }
 
+function describeAutofillButton(probe = {}) {
+  const type = String(probe?.best?.action?.type || "");
+  const text = String(probe?.best?.action?.text || "").trim();
+  if (type === "submit") {
+    return {
+      label: "Submit",
+      actionType: "submit",
+      actionText: text || "Submit",
+      title: "Click the page Submit / Apply button"
+    };
+  }
+  if (type === "next" || type === "review" || type === "entry") {
+    return {
+      label: "Next",
+      actionType: type,
+      actionText: text || "Next",
+      title: "Fill this step, then go to the next application page"
+    };
+  }
+  return {
+    label: "Autofill",
+    actionType: "",
+    actionText: "",
+    title: "Fill fields on this page (Q&A bank, then AI for text and choices)"
+  };
+}
+
 /**
- * Drive multi-step Auto Apply on any ATS / job board:
- * fill all frames â†’ if Next/Continue (no final Submit) click it â†’ wait for
- * next page/tab/step â†’ refill. Stops before Submit so the user can review.
+ * One Autofill click: fill current page (profile → Q&A bank → AI text/choices),
+ * then click Apply/Next/Continue/Submit when present. After Next, fill the new page once.
+ */
+async function runAutofillStep(profileId, { uploadDocs = null, clickAction = true } = {}) {
+  const fillRes = await startAutofillOnCurrentPage(profileId, null, { uploadDocs });
+  if (fillRes?.skipped || fillRes?.ok === false) {
+    return fillRes;
+  }
+
+  let tabId = fillRes.tabId;
+  let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
+  let button = describeAutofillButton(probe);
+  let clicked = null;
+  let advanced = false;
+
+  if (clickAction && probe?.best?.action?.type) {
+    const actionType = probe.best.action.type;
+    const live = await chrome.tabs.get(tabId).catch(() => null);
+    const prevUrl = live?.url || "";
+    const prevSig = probe.signature || "";
+
+    await setStatus(`Autofill: clicking ${probe.best.action.text || actionType}...`);
+    const clickRes = await sendMessageToTab(
+      tabId,
+      { type: "click_apply_action", preferredType: actionType },
+      { attempts: 2, frameId: probe.best.frameId }
+    ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+    clicked = {
+      type: actionType,
+      text: probe.best.action.text || actionType,
+      ok: Boolean(clickRes?.ok !== false && (clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit))
+    };
+
+    if (clickRes?.navigateUrl) {
+      await navigateTabToUrl(tabId, clickRes.navigateUrl);
+    }
+
+    if (actionType === "submit" || clickRes?.isSubmit) {
+      button = describeAutofillButton({ best: { action: { type: "submit", text: clicked.text } } });
+      return {
+        ok: true,
+        ...fillRes,
+        clicked,
+        advanced: false,
+        submitted: true,
+        button,
+        status:
+          `Filled ${fillRes.filledCount || 0} field(s)` +
+          (fillRes.choiceFilledCount ? `, ${fillRes.choiceFilledCount} choice(s)` : "") +
+          (fillRes.bankHits ? `, ${fillRes.bankHits} from Q&A bank` : "") +
+          (fillRes.aiFilledCount ? `, AI ${fillRes.aiFilledCount}` : "") +
+          `, clicked Submit (${clicked.text}). ` +
+          (await getCostSummaryText())
+      };
+    }
+
+    const wait = await waitForApplyAdvance(tabId, prevSig, prevUrl, 15000);
+    tabId = wait.tabId;
+    advanced = Boolean(wait.advanced);
+
+    if (advanced) {
+      await waitForPageReady(tabId).catch(() => {});
+      await setStatus("Autofill: filling the next page...");
+      const nextFill = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs });
+      probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
+      button = describeAutofillButton(probe);
+      return {
+        ok: true,
+        ...nextFill,
+        priorFilledCount: fillRes.filledCount || 0,
+        clicked,
+        advanced: true,
+        submitted: false,
+        button,
+        status:
+          `Advanced via ${clicked.text}. Filled next page: ${nextFill.filledCount || 0} field(s)` +
+          (nextFill.choiceFilledCount ? `, ${nextFill.choiceFilledCount} choice(s)` : "") +
+          (nextFill.bankHits ? `, ${nextFill.bankHits} from Q&A bank` : "") +
+          (nextFill.aiFilledCount ? `, AI ${nextFill.aiFilledCount}` : "") +
+          `. ` +
+          (await getCostSummaryText())
+      };
+    }
+  }
+
+  probe = await getApplyActionFromTab(tabId).catch(() => probe);
+  button = describeAutofillButton(probe);
+  return {
+    ok: true,
+    ...fillRes,
+    clicked,
+    advanced,
+    submitted: false,
+    button,
+    status:
+      `Autofilled ${fillRes.filledCount || 0} field(s)` +
+      (fillRes.choiceFilledCount ? `, ${fillRes.choiceFilledCount} choice(s)` : "") +
+      (fillRes.bankHits ? `, ${fillRes.bankHits} from Q&A bank` : "") +
+      (fillRes.aiFilledCount ? `, AI-answered ${fillRes.aiFilledCount}` : "") +
+      (clicked?.ok ? `, clicked ${clicked.text}` : "") +
+      ". " +
+      (await getCostSummaryText())
+  };
+}
+
+/**
+ * Drive multi-step Autofill on any ATS / job board:
+ * fill all frames → if Next/Continue click it → wait for next page → refill.
+ * On the final Submit page, clicks Submit.
  */
 async function sleepMs(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -1495,8 +1629,17 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.best.action.type === "submit") {
-      summary.status = "ready_for_review";
-      summary.detail = `Reached the final Submit step (${probe.best.action.text || "Submit"}). Stopped so you can review and submit.`;
+      await setStatus(`Autofill: clicking ${probe.best.action.text || "Submit"}...`);
+      const clickRes = await sendMessageToTab(
+        currentTabId,
+        { type: "click_apply_action", preferredType: "submit" },
+        { attempts: 2, frameId: probe.best.frameId }
+      ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+      if (clickRes?.navigateUrl) {
+        await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+      }
+      summary.status = "submitted";
+      summary.detail = `Clicked Submit (${probe.best.action.text || "Submit"}).`;
       return summary;
     }
 
@@ -1506,7 +1649,7 @@ async function startMultiStepApplyOnTab(
     const prevSig = probe.signature || "";
     const actionType = probe.best.action.type;
 
-    await setStatus(`Auto Apply: clicking ${probe.best.action.text || actionType}...`);
+    await setStatus(`Autofill: clicking ${probe.best.action.text || actionType}...`);
     const clickRes = await sendMessageToTab(
       currentTabId,
       { type: "click_apply_action", preferredType: actionType },
@@ -1514,8 +1657,8 @@ async function startMultiStepApplyOnTab(
     ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
 
     if (clickRes?.isSubmit) {
-      summary.status = "ready_for_review";
-      summary.detail = "Reached the final Submit step. Stopped so you can review and submit.";
+      summary.status = "submitted";
+      summary.detail = "Clicked Submit.";
       return summary;
     }
     if (clickRes?.navigateUrl) {
@@ -2811,6 +2954,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "probe_autofill_action") {
+    (async () => {
+      try {
+        const tab = await getCurrentApplicationTab();
+        if (!tab?.id || !/^https?:\/\//i.test(tab.url || "")) {
+          safeSendResponse(sendResponse, {
+            ok: true,
+            button: describeAutofillButton({})
+          });
+          return;
+        }
+        await ensureAutofillScript(tab.id);
+        const probe = await getApplyActionFromTab(tab.id).catch(() => ({}));
+        safeSendResponse(sendResponse, {
+          ok: true,
+          button: describeAutofillButton(probe),
+          anyForm: Boolean(probe?.anyForm),
+          actionText: probe?.best?.action?.text || ""
+        });
+      } catch (err) {
+        safeSendResponse(sendResponse, {
+          ok: true,
+          button: describeAutofillButton({}),
+          error: String(err?.message || err)
+        });
+      }
+    })();
+    return true;
+  }
+
   if (message?.type === "autofill_current_page") {
     (async () => {
       try {
@@ -2819,29 +2992,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        await setStatus("Autofilling current application page...");
-        const result = await startAutofillOnCurrentPage(profileId);
+        await setStatus("Autofill: filling this step...");
+        const result = await runAutofillStep(profileId, {
+          clickAction: message.clickAction !== false
+        });
         if (result.skipped) {
           await setStatus(`Autofill skipped: ${result.error}`);
-          safeSendResponse(sendResponse, { ok: false, error: result.error });
+          safeSendResponse(sendResponse, { ok: false, error: result.error, button: result.button });
           return;
         }
         if (!result.ok) {
           const err = result.error || "Autofill failed.";
           await setStatus(`Autofill failed: ${err}`);
-          safeSendResponse(sendResponse, { ok: false, error: err });
+          safeSendResponse(sendResponse, { ok: false, error: err, button: result.button });
           return;
         }
-        const msg =
-          `Autofilled ${result.filledCount || 0} field(s)` +
-          (result.credentialFilledCount ? `, login ${result.credentialFilled.join("/")}` : "") +
-          (result.uploadedCount ? `, uploaded ${result.uploadedCount} file(s)` : "") +
-          (result.bankHits ? `, ${result.bankHits} from Q&A bank` : "") +
-          (result.choiceFilledCount ? `, ${result.choiceFilledCount} choice(s)` : "") +
-          (result.aiFilledCount ? `, AI-answered ${result.aiFilledCount} question(s)` : "") +
-          (result.aiError ? ` (AI answers failed: ${result.aiError})` : "") +
-          " on the current page. " +
-          (await getCostSummaryText());
+        const msg = result.status || "Autofill done.";
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
@@ -2966,6 +3132,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "easy_apply_current_page") {
+    // Legacy shortcut — same as unified Autofill step (fill + Next/Submit).
     (async () => {
       try {
         const profileId = message.profileId;
@@ -2973,42 +3140,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        await setStatus("Running Auto Apply on the current page...");
-        const result = await startMultiStepApplyOnTab(profileId);
-        if (!result.ok) {
-          await setStatus(`Auto Apply failed: ${result.error}`);
-          safeSendResponse(sendResponse, result);
+        await setStatus("Autofill: filling this step...");
+        const result = await runAutofillStep(profileId, { clickAction: true });
+        if (result.skipped || !result.ok) {
+          const err = result.error || "Autofill failed.";
+          await setStatus(`Autofill failed: ${err}`);
+          safeSendResponse(sendResponse, { ok: false, error: err, button: result.button });
           return;
         }
-        const costLine = await getCostSummaryText();
-        const msg =
-          `Auto Apply (${result.site || "site"}): ${result.status || "done"} — ` +
-          `${result.steps || 0} step(s), filled ${result.filled || 0}, ` +
-          `bank ${result.bankHits || 0}, AI ${result.aiFilled || 0}. ${result.detail || ""} ${costLine}`.trim();
+        const msg = result.status || "Autofill done.";
         await setStatus(msg);
-        const stored = await chrome.storage.local.get([
-          "last_job_title",
-          "last_company_name",
-          "last_jd_link"
-        ]);
-        await appendApplicationEvent({
-          profileId,
-          jobTitle: stored.last_job_title || "",
-          companyName: stored.last_company_name || "",
-          jdLink: stored.last_jd_link || result.tabUrl || "",
-          status:
-            result.status === "submitted" || result.status === "ready_for_review"
-              ? result.status === "submitted"
-                ? "completed"
-                : "ready_for_review"
-              : result.status || "ready_for_review",
-          source: result.site || "",
-          detail: result.detail || ""
-        });
-        safeSendResponse(sendResponse, { ...result, status: msg });
+        safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Auto Apply failed: ${error}`);
+        await setStatus(`Autofill failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
       }
     })();
@@ -3240,7 +3385,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           detail: ea.detail || ""
         });
         await setStatus(
-          `Imported job Auto Apply: ${ea.status || "done"} (no submit). ${await getCostSummaryText()}`
+          `Imported job Autofill: ${ea.status || "done"}. ${await getCostSummaryText()}`
         );
       } catch (err) {
         const error = String(err?.message || err);

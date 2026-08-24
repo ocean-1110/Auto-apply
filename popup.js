@@ -68,7 +68,6 @@ const scrapePageBtn = document.getElementById("scrapePageBtn");
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
-const easyApplyBtn = document.getElementById("easyApplyBtn");
 const qaBankSectionEl = document.getElementById("qaBankSection");
 const qaBankNoteEl = document.getElementById("qaBankNote");
 const qaOpenEditorBtn = document.getElementById("qaOpenEditorBtn");
@@ -153,6 +152,7 @@ const importedJobsChecked = new Set();
 let capturePollRunning = false;
 let panelPollTimer = null;
 let extensionContextDead = false;
+let autofillLabelPollTick = 0;
 
 function isExtensionContextValid() {
   try {
@@ -1577,6 +1577,7 @@ async function loadSettings() {
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
   refreshQaBank().catch(() => {});
   refreshCaptureStatus().catch(() => {});
+  refreshAutofillButtonLabel().catch(() => {});
 
   await refreshOutputDirLabel();
   setStatus(data.generation_status || "");
@@ -1704,14 +1705,14 @@ async function scrapeCurrentJobPage() {
     const gen = await startGenerationAndWait();
     if (!gen.ok) return;
 
-    setStatus("Resume saved. Running Auto Apply…", "running");
+    setStatus("Resume saved. Running Autofill…", "running");
     setBusy(true);
-    await runEasyApplyOnCurrentPage({ quiet: true });
+    await runAutofillOnCurrentPage({ quiet: true });
 
     setStatus(
       `Done: scraped${site}, generated ${
         isResumeOnlyEnabled() ? "resume" : "resume & cover letter"
-      }, and ran Auto Apply (stops before submit).`,
+      }, and ran Autofill.`,
       "done"
     );
   } catch (err) {
@@ -2152,61 +2153,63 @@ async function openQaEditor() {
   }
 }
 
-async function runEasyApplyOnCurrentPage({ quiet = false } = {}) {
-  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
-  if (!profileId) {
-    setStatus("Select a profile first.");
-    return;
-  }
-  if (!quiet) {
-    setStatus("Running Auto Apply (fills each step, stops before submit)...");
-  }
-  setBusy(true);
+async function applyAutofillButtonState(button = null) {
+  if (!autofillBtn) return;
+  const label = String(button?.label || "Autofill").trim() || "Autofill";
+  const title =
+    String(button?.title || "").trim() ||
+    "Fill this step (Q&A bank, then AI). Switches to Next / Submit when those buttons appear.";
+  const hint = '<kbd class="shortcut-hint">Alt+Shift+E</kbd>';
+  autofillBtn.innerHTML = `${label} ${hint}`;
+  autofillBtn.title = title;
+  autofillBtn.dataset.actionLabel = label;
+}
+
+async function refreshAutofillButtonLabel() {
+  if (!autofillBtn || autofillBtn.disabled) return;
   try {
-    await chrome.storage.local.set({ selected_profile_id: profileId });
-    const res = await chrome.runtime.sendMessage({ type: "easy_apply_current_page", profileId });
-    if (!res?.ok && res?.error) {
-      throw new Error(res.error);
-    }
-    if (!quiet) {
-      setStatus(res.status || `Auto Apply: ${res.status || "done"}.`);
-    }
-    await refreshQaBank();
-    return res;
-  } catch (err) {
-    if (!quiet) {
-      setStatus(`Auto Apply failed: ${String(err.message || err)}`);
-    }
-    throw err;
-  } finally {
-    setBusy(false);
+    const res = await chrome.runtime.sendMessage({ type: "probe_autofill_action" });
+    if (res?.button) await applyAutofillButtonState(res.button);
+  } catch {
+    /* best-effort */
   }
 }
 
-async function runAutofillOnCurrentPage() {
+async function runAutofillOnCurrentPage({ quiet = false } = {}) {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   if (!profileId) {
-    setStatus("Select a profile first.");
+    setStatus("Select a profile first.", "error");
     return;
   }
 
-  setStatus("Autofilling current application page...");
+  if (!quiet) {
+    setStatus("Autofill: filling this step...", "running");
+  }
   setBusy(true);
   try {
     await chrome.storage.local.set({ selected_profile_id: profileId });
     const res = await chrome.runtime.sendMessage({
       type: "autofill_current_page",
-      profileId
+      profileId,
+      clickAction: true
     });
     if (!res?.ok) {
       throw new Error(res?.error || "Autofill failed.");
     }
-    setStatus(res.status || `Autofilled ${res.filledCount || 0} field(s).`);
+    if (res.button) await applyAutofillButtonState(res.button);
+    if (!quiet) {
+      setStatus(res.status || "Autofill done.");
+    }
     await refreshQaBank();
+    return res;
   } catch (err) {
-    setStatus(`Autofill failed: ${String(err.message || err)}`);
+    if (!quiet) {
+      setStatus(`Autofill failed: ${String(err.message || err)}`, "error");
+    }
+    throw err;
   } finally {
     setBusy(false);
+    refreshAutofillButtonLabel().catch(() => {});
   }
 }
 
@@ -2481,9 +2484,6 @@ stopGenerateBtn?.addEventListener("click", () => {
 trackSheetStatusToggleEl?.addEventListener("change", () => {
   persistJobFields().catch(() => {});
 });
-autofillBtn.addEventListener("click", () => {
-  runAutofillOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
-});
 
 // Sidebar mode switching
 modeManualBtn?.addEventListener("click", () => setSidebarMode("manual"));
@@ -2591,8 +2591,8 @@ csvFileInputEl?.addEventListener("change", async () => {
   }
 });
 
-easyApplyBtn?.addEventListener("click", () => {
-  runEasyApplyOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
+autofillBtn.addEventListener("click", () => {
+  runAutofillOnCurrentPage().catch((err) => setStatus(String(err.message || err), "error"));
 });
 openPreviewBtn?.addEventListener("click", () => {
   openPreview().catch((err) => setStatus(String(err.message || err)));
@@ -2743,7 +2743,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         } else if (cmd === "generate_docs") {
           await generateResumeAndCoverLetter();
         } else if (cmd === "easy_apply") {
-          await runEasyApplyOnCurrentPage();
+          await runAutofillOnCurrentPage();
         }
         sendResponse({ ok: true });
       } catch (err) {
@@ -2857,6 +2857,10 @@ panelPollTimer = setInterval(async () => {
         .finally(() => {
           capturePollRunning = false;
         });
+    }
+    autofillLabelPollTick += 1;
+    if (autofillLabelPollTick % 3 === 0) {
+      refreshAutofillButtonLabel().catch(() => {});
     }
   } catch (err) {
     if (isContextInvalidatedError(err) || !isExtensionContextValid()) {
