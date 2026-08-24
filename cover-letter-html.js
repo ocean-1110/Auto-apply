@@ -95,6 +95,30 @@ export function buildCoverLetterHtml(rawText, contact = {}) {
   .signature { margin-top: 6px; }
   .signature p { margin: 0; text-align: left; }
   .signature .cl-name-sign { font-weight: 700; }
+
+  @media screen {
+    html { background: #d7e6f7; }
+    body {
+      box-sizing: border-box;
+      width: 8.5in;
+      max-width: 100%;
+      min-height: calc(100vh - 32px);
+      margin: 16px auto;
+      padding: 0.7in;
+      box-shadow: 0 8px 28px rgba(15, 39, 68, 0.14);
+    }
+  }
+  @media print {
+    html { background: #fff; }
+    body {
+      margin: 0;
+      padding: 0;
+      width: auto;
+      max-width: none;
+      min-height: 0;
+      box-shadow: none;
+    }
+  }
 </style>
 </head>
 <body>

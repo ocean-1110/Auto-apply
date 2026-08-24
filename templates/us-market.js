@@ -50,6 +50,8 @@ function makeTemplate({ id, label, description, css }) {
       return wrapHtmlDocument({
         title: `${name} - Resume`,
         css,
+        pageMargin: "0.55in",
+        pageWidth: "8.5in",
         body: `  <main class="resume">
     <header class="top">
       <h1>${name}</h1>

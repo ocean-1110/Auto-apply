@@ -180,6 +180,8 @@ export const timesClassicTemplate = {
     return wrapHtmlDocument({
       title: `${name} - Resume`,
       css: CSS,
+      pageMargin: "10mm",
+      pageWidth: "210mm",
       body: `  <main class="resume">
     <header class="top">
       <h1>${name}</h1>

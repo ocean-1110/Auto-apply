@@ -143,8 +143,8 @@ select {
   display: block;
   width: 100%;
   min-height: calc(100vh - 210px);
-  border: 1px solid #fff;
+  border: 1px solid #c5d8ef;
   border-radius: 20px;
-  background: var(--card);
+  background: #d7e6f7;
   box-shadow: var(--shadow);
 }

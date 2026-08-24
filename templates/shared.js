@@ -273,7 +273,15 @@ export function renderEducationBlock(edu = {}) {
   return `<p class="education">${lines.join("<br>\n")}</p>`;
 }
 
-export function wrapHtmlDocument({ title, css, body }) {
+export function wrapHtmlDocument({
+  title,
+  css,
+  body,
+  pageMargin = "0.55in",
+  pageWidth = "8.5in"
+}) {
+  const margin = String(pageMargin || "0.55in").trim() || "0.55in";
+  const width = String(pageWidth || "8.5in").trim() || "8.5in";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -282,6 +290,35 @@ export function wrapHtmlDocument({ title, css, body }) {
   <title>${escapeHtml(title)}</title>
   <style>
 ${css}
+
+    /* Preview / screen: show real page margins (@page alone is print-only). */
+    @media screen {
+      html {
+        background: #d7e6f7;
+      }
+      body {
+        box-sizing: border-box !important;
+        width: ${width} !important;
+        max-width: 100% !important;
+        min-height: calc(100vh - 32px);
+        margin: 16px auto !important;
+        padding: ${margin} !important;
+        background: #fff !important;
+        box-shadow: 0 8px 28px rgba(15, 39, 68, 0.14);
+      }
+    }
+
+    @media print {
+      html { background: #fff !important; }
+      body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: auto !important;
+        max-width: none !important;
+        min-height: 0 !important;
+        box-shadow: none !important;
+      }
+    }
   </style>
 </head>
 <body>
