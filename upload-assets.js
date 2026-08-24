@@ -1,12 +1,15 @@
 /**
  * Last generated resume / cover letter PDFs for application form uploads.
  * Stored in IndexedDB so Autofill can inject them into <input type="file">.
+ *
+ * Also keeps a per-job cache so Apply can reuse a batch-built resume later.
  */
 
 const DB_NAME = "resume-bot-uploads";
 const DB_VERSION = 1;
 const STORE = "docs";
 const LAST_DOCS_KEY = "last_generated_docs";
+const JOB_DOCS_PREFIX = "job_docs:";
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -46,17 +49,29 @@ function idbSet(key, value) {
   );
 }
 
-/**
- * @param {{ resume?: { fileName: string, mimeType: string, base64: string }, coverLetter?: { fileName: string, mimeType: string, base64: string }, folderName?: string }} docs
- */
-export async function setLastGeneratedDocs(docs) {
-  const payload = {
+function idbDelete(key) {
+  return openDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      })
+  );
+}
+
+function normalizeDocsPayload(docs = {}) {
+  return {
     resume: docs?.resume || null,
     coverLetter: docs?.coverLetter || null,
     folderName: docs?.folderName || "",
+    importedJobId: docs?.importedJobId || "",
     updatedAt: Date.now()
   };
-  await idbSet(LAST_DOCS_KEY, payload);
+}
+
+async function publishLastDocsMeta(payload) {
   await chrome.storage.local.set({
     last_upload_docs_ready: true,
     last_upload_docs_meta: {
@@ -65,14 +80,54 @@ export async function setLastGeneratedDocs(docs) {
       resumeName: payload.resume?.fileName || "",
       coverLetterName: payload.coverLetter?.fileName || "",
       folderName: payload.folderName || "",
+      importedJobId: payload.importedJobId || "",
       updatedAt: payload.updatedAt
     }
   });
+}
+
+/**
+ * @param {{ resume?: { fileName: string, mimeType: string, base64: string }, coverLetter?: { fileName: string, mimeType: string, base64: string }, folderName?: string, importedJobId?: string }} docs
+ */
+export async function setLastGeneratedDocs(docs) {
+  const payload = normalizeDocsPayload(docs);
+  await idbSet(LAST_DOCS_KEY, payload);
+  await publishLastDocsMeta(payload);
   return payload;
 }
 
 export async function getLastGeneratedDocs() {
   return (await idbGet(LAST_DOCS_KEY)) || null;
+}
+
+/** Persist PDFs for a specific imported job id (batch resume → later Apply). */
+export async function setGeneratedDocsForJob(jobId, docs) {
+  const id = String(jobId || "").trim();
+  if (!id) return null;
+  const payload = normalizeDocsPayload({ ...docs, importedJobId: id });
+  await idbSet(`${JOB_DOCS_PREFIX}${id}`, payload);
+  await setLastGeneratedDocs(payload);
+  return payload;
+}
+
+export async function getGeneratedDocsForJob(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id) return null;
+  return (await idbGet(`${JOB_DOCS_PREFIX}${id}`)) || null;
+}
+
+/** Make a job's cached PDFs the active upload set for Autofill / Auto Apply. */
+export async function activateGeneratedDocsForJob(jobId) {
+  const docs = await getGeneratedDocsForJob(jobId);
+  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return null;
+  await setLastGeneratedDocs(docs);
+  return docs;
+}
+
+export async function clearGeneratedDocsForJob(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id) return;
+  await idbDelete(`${JOB_DOCS_PREFIX}${id}`).catch(() => {});
 }
 
 /** Extract resume + cover letter entries from a generated file bundle. */

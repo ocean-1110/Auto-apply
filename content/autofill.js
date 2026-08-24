@@ -2769,6 +2769,7 @@
   // Phrases that mean the posting is gone (expired / filled / removed / 404).
   const JOB_GONE_RE = new RegExp(
     [
+      "sorry[, ]*this job is no longer available",
       "no longer (available|accepting applications|active|open|exists)",
       "(job|position|posting|listing|role|opening|opportunity) (is |has been )?(no longer|not) (available|active|open)",
       "(position|role|job) (has been |is )?(filled|closed)",
@@ -2789,15 +2790,41 @@
     const title = String(document.title || "");
     if (title) parts.push(title);
     const nodes = document.querySelectorAll(
-      'h1, h2, [role="heading"], .error, [class*="error"], [class*="not-found"], [class*="notFound"], [class*="expired"], [class*="unavailable"], [class*="empty-state"]'
+      [
+        "h1",
+        "h2",
+        '[role="heading"]',
+        '[role="alert"]',
+        '[role="status"]',
+        ".error",
+        '[class*="error"]',
+        '[class*="alert"]',
+        '[class*="banner"]',
+        '[class*="notice"]',
+        '[class*="not-found"]',
+        '[class*="notFound"]',
+        '[class*="expired"]',
+        '[class*="unavailable"]',
+        '[class*="empty-state"]',
+        '[class*="job-closed"]',
+        '[class*="jobClosed"]',
+        '[data-testid*="closed"]',
+        '[data-testid*="unavailable"]'
+      ].join(", ")
     );
     let count = 0;
     for (const el of nodes) {
       const t = cleanLabelText(el.textContent);
-      if (t && t.length <= 300) parts.push(t);
-      if (++count > 40) break;
+      if (t && t.length <= 400) parts.push(t);
+      if (++count > 60) break;
     }
-    return parts.join("  ").slice(0, 4000);
+    // Dice / ATS closed banners often live in plain body copy, not headings.
+    const body = String(document.body?.innerText || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 6000);
+    if (body) parts.push(body);
+    return parts.join("  ").slice(0, 10000);
   }
 
   /** @returns {string} a short reason when the job is gone, else "" */

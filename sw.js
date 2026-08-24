@@ -34,7 +34,15 @@ import {
   clearPendingOutputFiles,
   setLastSaveMeta
 } from "./fs-output.js";
-import { setLastGeneratedDocs, pickUploadDocsFromBundle, getLastGeneratedDocs } from "./upload-assets.js";
+import {
+  setLastGeneratedDocs,
+  pickUploadDocsFromBundle,
+  getLastGeneratedDocs,
+  setGeneratedDocsForJob,
+  getGeneratedDocsForJob,
+  activateGeneratedDocsForJob,
+  clearGeneratedDocsForJob
+} from "./upload-assets.js";
 import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, isComplexQuestion, shouldBankAnswer, generateRoleSummaries } from "./ai-answers.js";
 import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
 import { upsertPendingQa, dismissPendingMatchingQuestion } from "./pending-qa.js";
@@ -368,7 +376,7 @@ async function setImportedJobsById(byId, { bumpVersion = true } = {}) {
   }
 }
 
-async function setImportedJobStatus(jobId, { status, statusDetail = "", markAttempt = false, profileId, completedAt } = {}) {
+async function setImportedJobStatus(jobId, { status, statusDetail = "", markAttempt = false, profileId, completedAt, patch = null } = {}) {
   if (!jobId) return;
   const byId = await getImportedJobsById();
   const job = byId[jobId];
@@ -382,6 +390,7 @@ async function setImportedJobStatus(jobId, { status, statusDetail = "", markAtte
 
   byId[jobId] = {
     ...job,
+    ...(patch && typeof patch === "object" ? patch : null),
     status: nextStatus,
     statusDetail: statusDetail || job.statusDetail || "",
     updatedAt: now,
@@ -391,6 +400,89 @@ async function setImportedJobStatus(jobId, { status, statusDetail = "", markAtte
   };
 
   await setImportedJobsById(byId, { bumpVersion: true });
+}
+
+/** Remove a job from the imported queue (used when the posting is closed). */
+async function removeImportedJobFromStorage(jobId) {
+  const id = String(jobId || "").trim();
+  if (!id) return false;
+  const byId = await getImportedJobsById();
+  if (!byId[id]) return false;
+  delete byId[id];
+
+  const data = await chrome.storage.local.get([
+    IMPORTED_JOBS_ORDER_KEY,
+    IMPORTED_JOBS_SELECTED_ID_KEY,
+    "imported_jobs_checked_ids"
+  ]);
+  const order = (Array.isArray(data[IMPORTED_JOBS_ORDER_KEY]) ? data[IMPORTED_JOBS_ORDER_KEY] : []).filter(
+    (x) => String(x) !== id
+  );
+  const selected =
+    String(data[IMPORTED_JOBS_SELECTED_ID_KEY] || "") === id
+      ? null
+      : data[IMPORTED_JOBS_SELECTED_ID_KEY] || null;
+  const checked = (
+    Array.isArray(data.imported_jobs_checked_ids) ? data.imported_jobs_checked_ids : []
+  ).filter((x) => String(x) !== id);
+  const now = Date.now();
+
+  await chrome.storage.local.set({
+    [IMPORTED_JOBS_BY_ID_KEY]: byId,
+    [IMPORTED_JOBS_ORDER_KEY]: order,
+    [IMPORTED_JOBS_SELECTED_ID_KEY]: selected,
+    imported_jobs_checked_ids: checked,
+    [IMPORTED_JOBS_VERSION_KEY]: now
+  });
+  await clearGeneratedDocsForJob(id).catch(() => {});
+  return true;
+}
+
+/**
+ * Open (or reuse) a job URL and probe whether the posting is closed.
+ * @returns {Promise<{ tabId: number|null, closed: string, url: string }>}
+ */
+async function openAndProbeJobAvailability(url, { active = false, reuseTabId = null } = {}) {
+  const target = String(url || "").trim();
+  if (!isHttpUrl(target)) {
+    return { tabId: null, closed: "", url: target };
+  }
+
+  let tabId = reuseTabId;
+  if (tabId) {
+    const live = await chrome.tabs.get(tabId).catch(() => null);
+    if (!live?.id) tabId = null;
+  }
+  if (!tabId) {
+    const existing = await findTabByUrl(target);
+    if (existing?.id != null) {
+      tabId = existing.id;
+      if (active) {
+        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+      }
+      await waitForPageReady(tabId);
+    } else {
+      const tab = await chrome.tabs.create({ url: target, active: Boolean(active) });
+      tabId = tab?.id || null;
+      if (!tabId) return { tabId: null, closed: "", url: target };
+      await waitForPageReady(tabId);
+    }
+  } else {
+    await navigateTabToUrl(tabId, target);
+  }
+
+  try {
+    await ensureAutofillScript(tabId);
+    const probe = await sendMessageToTab(
+      tabId,
+      { type: "probe_application_form" },
+      { attempts: 3 }
+    );
+    const closed = String(probe?.jobUnavailable || "").trim();
+    return { tabId, closed, url: target };
+  } catch {
+    return { tabId, closed: "", url: target };
+  }
 }
 
 async function recoverInterruptedImportedJobs() {
@@ -2068,9 +2160,14 @@ async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 12000
  * Does NOT use chrome.downloads — that triggers Save As dialogs when Chrome
  * is set to "Ask where to save each file".
  */
-async function commitOutputBundle(folderName, files) {
+async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}) {
   try {
-    await setLastGeneratedDocs(pickUploadDocsFromBundle(folderName, files));
+    const docs = pickUploadDocsFromBundle(folderName, files);
+    if (importedJobId) {
+      await setGeneratedDocsForJob(importedJobId, docs);
+    } else {
+      await setLastGeneratedDocs(docs);
+    }
   } catch {
     // Upload cache should not block saving.
   }
@@ -2186,7 +2283,9 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
     }
   }
 
-  const savedDir = await commitOutputBundle(folderName, files);
+  const savedDir = await commitOutputBundle(folderName, files, {
+    importedJobId: jobMeta?.importedJobId || ""
+  });
   let status = `Saved to ${savedDir} (${resumeFileBase}_Resume.pdf${
     coverLetterCreated ? " + Cover_Letter.pdf" : ""
   } + jd.txt + HTML)${coverLetterWarning}`;
@@ -2218,7 +2317,7 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
     }
   }
 
-  return { savedDir, status };
+  return { savedDir, status, folderName };
 }
 
 async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
@@ -2870,7 +2969,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         // Stop early if the posting is gone (expired / filled / removed / 404) so
-        // we don't waste an OpenAI call, and mark the job as no longer available.
+        // we don't waste an OpenAI call — and remove it from the list.
         try {
           await ensureAutofillScript(tabId);
           const availProbe = await sendMessageToTab(
@@ -2879,11 +2978,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             { attempts: 2 }
           );
           if (availProbe?.jobUnavailable) {
-            await setImportedJobStatus(importedJobId, {
-              status: "unavailable",
-              statusDetail: `No longer available: ${availProbe.jobUnavailable}`
-            });
-            await setStatus(`Imported job skipped — no longer available: ${availProbe.jobUnavailable}`);
+            await removeImportedJobFromStorage(importedJobId);
+            await setStatus(
+              `Job closed — removed from list: ${availProbe.jobUnavailable}`
+            );
             return;
           }
         } catch {
@@ -2903,30 +3001,50 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
         });
 
-        const resumeOnlyStored =
-          (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
-        const trackStored =
-          (await chrome.storage.local.get("track_application_status")).track_application_status ===
-          true;
-        const genMeta = {
-          ...jobMeta,
-          resumeOnly: resumeOnlyStored,
-          trackApplicationStatus:
-            jobMeta.trackApplicationStatus === true || trackStored
-        };
-        await setImportedJobStatus(importedJobId, {
-          status: "generating",
-          statusDetail: resumeOnlyStored
-            ? "Generating resume only..."
-            : "Generating resume & cover letter..."
-        });
-        await setStatus(`Generating resume for imported job...`);
-        await runGenerationPipeline({ profileId, jobMeta: genMeta });
+        const cachedDocs = await getGeneratedDocsForJob(importedJobId);
+        const liveJob = (await getImportedJobsById())[importedJobId];
+        const reuseResume =
+          Boolean(cachedDocs?.resume?.base64) ||
+          Boolean(liveJob?.hasGeneratedResume) ||
+          String(liveJob?.status || "") === "generated";
 
-        await setImportedJobStatus(importedJobId, {
-          status: "opening_form",
-          statusDetail: "Waiting for the job page, then Auto Apply..."
-        });
+        if (reuseResume && cachedDocs?.resume?.base64) {
+          await activateGeneratedDocsForJob(importedJobId);
+          await setStatus("Using previously generated resume for this job...");
+          await setImportedJobStatus(importedJobId, {
+            status: "opening_form",
+            statusDetail: "Resume ready — opening application form..."
+          });
+        } else {
+          const resumeOnlyStored =
+            (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
+          const trackStored =
+            (await chrome.storage.local.get("track_application_status")).track_application_status ===
+            true;
+          const genMeta = {
+            ...jobMeta,
+            resumeOnly: resumeOnlyStored,
+            trackApplicationStatus:
+              jobMeta.trackApplicationStatus === true || trackStored,
+            importedJobId
+          };
+          await setImportedJobStatus(importedJobId, {
+            status: "generating",
+            statusDetail: resumeOnlyStored
+              ? "Generating resume only..."
+              : "Generating resume & cover letter..."
+          });
+          await setStatus(`Generating resume for imported job...`);
+          const saved = await runGenerationPipeline({ profileId, jobMeta: genMeta });
+          await setImportedJobStatus(importedJobId, {
+            status: "opening_form",
+            statusDetail: "Waiting for the job page, then Auto Apply...",
+            patch: {
+              hasGeneratedResume: true,
+              resumeFolder: saved?.folderName || saved?.savedDir || ""
+            }
+          });
+        }
 
         const liveTab = await chrome.tabs.get(tabId).catch(() => null);
         if (!liveTab?.id) {
@@ -2941,16 +3059,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await ensureAutofillScript(tabId);
           const probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
           if (probe?.jobUnavailable) {
-            await setImportedJobStatus(importedJobId, {
-              status: "unavailable",
-              statusDetail: `No longer available: ${probe.jobUnavailable}`
-            });
-            await setStatus(`Imported job unavailable: ${probe.jobUnavailable}`);
+            await removeImportedJobFromStorage(importedJobId);
+            await setStatus(`Job closed — removed from list: ${probe.jobUnavailable}`);
             return;
           }
         } catch {
           /* availability probe is best-effort; Auto Apply handles the rest */
         }
+
+        // Ensure this job's PDFs are the active upload set right before fill.
+        await activateGeneratedDocsForJob(importedJobId).catch(() => {});
 
         await setImportedJobStatus(importedJobId, {
           status: "filling",
@@ -2961,14 +3079,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const ea = await startMultiStepApplyOnTab(profileId, tabId, { maxSteps: 10 });
         if (!ea.ok && ea.error) throw new Error(ea.error);
 
+        if (ea.status === "unavailable") {
+          await removeImportedJobFromStorage(importedJobId);
+          await setStatus(`Job closed — removed from list: ${ea.detail || "unavailable"}`);
+          return;
+        }
+
         const nextStatus =
           ea.status === "submitted"
             ? "completed"
-            : ea.status === "unavailable"
-              ? "unavailable"
-              : ea.status === "needs_review"
-                ? "needs_review"
-                : "ready_for_review";
+            : ea.status === "needs_review"
+              ? "needs_review"
+              : "ready_for_review";
         await setImportedJobStatus(importedJobId, {
           status: nextStatus,
           statusDetail:
@@ -3079,9 +3201,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       let okCount = 0;
       let failCount = 0;
+      let closedCount = 0;
       let cancelled = false;
+      let probeTabId = null;
       try {
-        const byId = await getImportedJobsById();
+        let byId = await getImportedJobsById();
         const resumeOnlyStored =
           (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
         const trackStored =
@@ -3097,12 +3221,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
 
           const importedJobId = jobIds[i];
+          byId = await getImportedJobsById();
           const job = byId[importedJobId];
           if (!job) {
             failCount += 1;
             continue;
           }
+
+          const jobUrl = String(job.jdLink || job.url || "").trim();
           const jdText = String(job.jdText || shared.jdText || "").trim();
+
+          await setImportedJobStatus(importedJobId, {
+            status: "opening",
+            statusDetail: `Checking if still open (${i + 1}/${jobIds.length})...`,
+            markAttempt: true,
+            profileId
+          });
+          await setStatus(
+            `Batch ${i + 1}/${jobIds.length}: checking ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
+          );
+
+          if (jobUrl) {
+            const probe = await openAndProbeJobAvailability(jobUrl, {
+              active: false,
+              reuseTabId: probeTabId
+            });
+            probeTabId = probe.tabId || probeTabId;
+            if (probe.closed) {
+              closedCount += 1;
+              await removeImportedJobFromStorage(importedJobId);
+              await setStatus(
+                `Closed — removed from list: ${job.jobTitle || importedJobId} (${probe.closed})`
+              );
+              continue;
+            }
+          }
+
           if (!jdText) {
             failCount += 1;
             await setImportedJobStatus(importedJobId, {
@@ -3116,7 +3270,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           const jobMeta = {
             jobTitle: job.jobTitle || "",
             companyName: job.companyName || "",
-            jdLink: job.jdLink || job.url || "",
+            jdLink: jobUrl,
             jdText,
             templateId: shared.templateId || DEFAULT_TEMPLATE_ID,
             spreadsheetUrl: shared.spreadsheetUrl || "",
@@ -3129,7 +3283,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             datePosted: job.datePosted || "",
             resumeOnly: resumeOnlyStored,
             trackApplicationStatus:
-              shared.trackApplicationStatus === true || trackStored
+              shared.trackApplicationStatus === true || trackStored,
+            importedJobId
           };
 
           await chrome.storage.local.set({
@@ -3144,7 +3299,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await setImportedJobStatus(importedJobId, {
             status: "generating",
             statusDetail: `Batch resume ${i + 1}/${jobIds.length}...`,
-            markAttempt: true,
             profileId
           });
           await setStatus(
@@ -3157,7 +3311,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             await setImportedJobStatus(importedJobId, {
               status: "generated",
               statusDetail: saved?.status || "Resume saved.",
-              profileId
+              profileId,
+              patch: {
+                hasGeneratedResume: true,
+                resumeFolder: saved?.folderName || saved?.savedDir || ""
+              }
             });
           } catch (err) {
             if (isCancelError(err)) {
@@ -3180,13 +3338,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         }
 
+        const closedNote = closedCount ? `, ${closedCount} closed/removed` : "";
         if (cancelled) {
           await setStatus(
-            `Batch resume build stopped: ${okCount} saved, ${failCount} failed before cancel. ${await getCostSummaryText()}`
+            `Batch resume build stopped: ${okCount} saved, ${failCount} failed${closedNote} before cancel. ${await getCostSummaryText()}`
           );
         } else {
           await setStatus(
-            `Batch resume build finished: ${okCount} saved, ${failCount} failed. ${await getCostSummaryText()}`
+            `Batch resume build finished: ${okCount} saved, ${failCount} failed${closedNote}. ${await getCostSummaryText()}`
           );
         }
       } catch (err) {
@@ -3196,6 +3355,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await setStatus(`Batch resume build failed: ${String(err?.message || err)}`);
         }
       } finally {
+        if (probeTabId) {
+          await chrome.tabs.remove(probeTabId).catch(() => {});
+        }
         await chrome.storage.local.set({ generation_running: false });
         isRunning = false;
         finishGenerationCancelState();

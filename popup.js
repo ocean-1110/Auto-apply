@@ -965,10 +965,12 @@ async function batchGenerateSelectedJobs() {
 
   const runnable = jobIds.filter((id) => {
     const job = importedJobsById[id];
-    return job && job.status !== "unavailable" && String(job.jdText || "").trim();
+    if (!job || job.status === "unavailable") return false;
+    // Need a JD to generate; closed-check still runs in SW when a URL exists.
+    return Boolean(String(job.jdText || "").trim() || String(job.jdLink || job.url || "").trim());
   });
   if (!runnable.length) {
-    setStatus("Selected jobs need a stored job description. Capture/import with JD text, or open a job and scrape it first.");
+    setStatus("Selected jobs need a job URL or stored JD text.");
     return;
   }
 
