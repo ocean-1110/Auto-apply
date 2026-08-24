@@ -177,6 +177,7 @@ body {
   white-space: nowrap;
 }
 
+#batchRemoveBtn,
 #batchGenerateBtn {
   width: auto;
   min-width: 0;
@@ -185,8 +186,69 @@ body {
   min-height: 32px;
   padding: 6px 12px;
   font-size: 12px;
-  margin-left: auto;
   white-space: normal;
+}
+
+#batchRemoveBtn {
+  margin-left: auto;
+}
+
+.confirm-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.confirm-modal[hidden] {
+  display: none !important;
+}
+
+.confirm-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 39, 68, 0.45);
+}
+
+.confirm-modal-panel {
+  position: relative;
+  z-index: 1;
+  width: min(360px, 100%);
+  padding: 18px 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.confirm-modal-title {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.confirm-modal-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.confirm-modal-actions .danger {
+  background: var(--rose);
+  border-color: var(--rose);
+  color: #fff;
 }
 
 .job-card {
@@ -1306,6 +1368,7 @@ button:disabled {
     flex-basis: 100%;
   }
 
+  #batchRemoveBtn,
   #batchGenerateBtn {
     margin-left: 0;
     width: 100%;

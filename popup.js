@@ -116,8 +116,16 @@ const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
 const selectAllJobsEl = document.getElementById("selectAllJobs");
 const batchSelectionNoteEl = document.getElementById("batchSelectionNote");
+const batchRemoveBtn = document.getElementById("batchRemoveBtn");
 const batchGenerateBtn = document.getElementById("batchGenerateBtn");
+const confirmModalEl = document.getElementById("confirmModal");
+const confirmModalTitleEl = document.getElementById("confirmModalTitle");
+const confirmModalMessageEl = document.getElementById("confirmModalMessage");
+const confirmModalOkEl = document.getElementById("confirmModalOk");
+const confirmModalCancelEl = document.getElementById("confirmModalCancel");
 const sidebarImportEl = jobsSidebarEl?.querySelector(".sidebar-import") || null;
+
+let confirmModalResolve = null;
 
 let profilesCache = [];
 let templatesCache = [];
@@ -666,6 +674,9 @@ function updateBatchBar() {
   if (batchGenerateBtn) {
     batchGenerateBtn.disabled = selectedVisible.length === 0;
   }
+  if (batchRemoveBtn) {
+    batchRemoveBtn.disabled = selectedVisible.length === 0;
+  }
 }
 
 function renderImportedJobs() {
@@ -951,6 +962,90 @@ async function removeImportedJob(jobId) {
   importedJobsVersion = now;
   renderImportedJobs();
   setStatus(`Removed: ${job.jobTitle || jobId}`);
+}
+
+function closeConfirmModal(result = false) {
+  if (!confirmModalEl) return;
+  confirmModalEl.hidden = true;
+  const resolve = confirmModalResolve;
+  confirmModalResolve = null;
+  if (resolve) resolve(Boolean(result));
+}
+
+function openConfirmModal({ title, message, confirmLabel = "Remove" } = {}) {
+  if (!confirmModalEl) return Promise.resolve(false);
+  if (confirmModalTitleEl) confirmModalTitleEl.textContent = title || "Confirm";
+  if (confirmModalMessageEl) confirmModalMessageEl.textContent = message || "";
+  if (confirmModalOkEl) confirmModalOkEl.textContent = confirmLabel;
+  confirmModalEl.hidden = false;
+  confirmModalOkEl?.focus();
+  return new Promise((resolve) => {
+    confirmModalResolve = resolve;
+  });
+}
+
+async function removeSelectedImportedJobs() {
+  const jobIds = visibleImportedJobIds().filter((id) => importedJobsChecked.has(id));
+  if (!jobIds.length) {
+    setStatus("Check one or more jobs, then click Remove selected.");
+    return;
+  }
+
+  const count = jobIds.length;
+  const confirmed = await openConfirmModal({
+    title: "Remove selected jobs?",
+    message:
+      count === 1
+        ? "Remove 1 selected job from the list? This cannot be undone."
+        : `Remove ${count} selected jobs from the list? This cannot be undone.`,
+    confirmLabel: count === 1 ? "Remove job" : `Remove ${count} jobs`
+  });
+  if (!confirmed) return;
+
+  const removable = jobIds.filter((id) => {
+    const job = importedJobsById[id];
+    if (!job) return false;
+    const status = String(job.status || "");
+    return !["opening", "generating", "opening_form", "filling"].includes(status);
+  });
+  const skipped = jobIds.length - removable.length;
+  if (!removable.length) {
+    setStatus("Selected jobs are still in progress and cannot be removed yet.");
+    return;
+  }
+
+  const now = Date.now();
+  const removeSet = new Set(removable);
+  const byId = { ...importedJobsById };
+  for (const id of removable) {
+    delete byId[id];
+    importedJobsChecked.delete(id);
+  }
+  const order = importedJobsOrder.filter((id) => !removeSet.has(id));
+  if (importedJobsSelectedId && removeSet.has(importedJobsSelectedId)) {
+    importedJobsSelectedId = null;
+  }
+
+  await chrome.storage.local.set({
+    imported_jobs_by_id: byId,
+    imported_jobs_order: order,
+    imported_jobs_selected_id: importedJobsSelectedId,
+    imported_jobs_checked_ids: [...importedJobsChecked],
+    imported_jobs_version: now
+  });
+
+  importedJobsById = byId;
+  importedJobsOrder = order;
+  importedJobsVersion = now;
+  renderImportedJobs();
+
+  if (skipped > 0) {
+    setStatus(
+      `Removed ${removable.length} job${removable.length === 1 ? "" : "s"}; skipped ${skipped} in progress.`
+    );
+  } else {
+    setStatus(`Removed ${removable.length} job${removable.length === 1 ? "" : "s"} from the list.`);
+  }
 }
 
 async function batchGenerateSelectedJobs() {
@@ -1749,7 +1844,8 @@ function setBusy(busy) {
   if (autofillBtn) autofillBtn.disabled = busy;
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
   if (batchGenerateBtn && busy) batchGenerateBtn.disabled = true;
-  if (batchGenerateBtn && !busy) updateBatchBar();
+  if (batchRemoveBtn && busy) batchRemoveBtn.disabled = true;
+  if (!busy) updateBatchBar();
 }
 
 function setCopyAnswerEnabled(enabled) {
@@ -2324,6 +2420,19 @@ selectAllJobsEl?.addEventListener("change", () => {
 });
 batchGenerateBtn?.addEventListener("click", () => {
   batchGenerateSelectedJobs().catch((err) => setStatus(String(err.message || err)));
+});
+batchRemoveBtn?.addEventListener("click", () => {
+  removeSelectedImportedJobs().catch((err) => setStatus(String(err.message || err)));
+});
+confirmModalOkEl?.addEventListener("click", () => closeConfirmModal(true));
+confirmModalEl?.querySelectorAll("[data-confirm-dismiss]").forEach((el) => {
+  el.addEventListener("click", () => closeConfirmModal(false));
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && confirmModalEl && !confirmModalEl.hidden) {
+    e.preventDefault();
+    closeConfirmModal(false);
+  }
 });
 
 autoCaptureToggleEl?.addEventListener("change", () => {

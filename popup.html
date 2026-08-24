@@ -55,6 +55,9 @@
                 <span>Select all</span>
               </label>
               <span id="batchSelectionNote" class="batch-note">0 selected</span>
+              <button type="button" id="batchRemoveBtn" class="secondary compact danger" disabled title="Remove checked jobs from the list">
+                Remove selected
+              </button>
               <button type="button" id="batchGenerateBtn" class="compact" disabled title="Generate resumes for checked jobs">
                 Batch resume build
               </button>
@@ -383,6 +386,29 @@
         </div>
       </div>
     </main>
+
+    <div id="confirmModal" class="confirm-modal" hidden>
+      <div class="confirm-modal-backdrop" data-confirm-dismiss></div>
+      <div
+        class="confirm-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirmModalTitle"
+        aria-describedby="confirmModalMessage"
+      >
+        <h2 id="confirmModalTitle" class="confirm-modal-title">Confirm</h2>
+        <p id="confirmModalMessage" class="confirm-modal-message"></p>
+        <div class="confirm-modal-actions">
+          <button type="button" id="confirmModalCancel" class="secondary compact" data-confirm-dismiss>
+            Cancel
+          </button>
+          <button type="button" id="confirmModalOk" class="compact danger">
+            Remove
+          </button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="popup.js"></script>
   </body>
 </html>
