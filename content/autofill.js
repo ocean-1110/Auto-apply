@@ -2770,6 +2770,9 @@
   const JOB_GONE_RE = new RegExp(
     [
       "sorry[, ]*this job is no longer available",
+      "this job is no longer available[.!]?(?:\\s*the similar jobs shown below)?",
+      "similar jobs shown below might interest you",
+      "this job has closed",
       "no longer (available|accepting applications|active|open|exists)",
       "(job|position|posting|listing|role|opening|opportunity) (is |has been )?(no longer|not) (available|active|open)",
       "(position|role|job) (has been |is )?(filled|closed)",
@@ -2804,6 +2807,8 @@
         '[class*="not-found"]',
         '[class*="notFound"]',
         '[class*="expired"]',
+        '[class*="expired-text"]',
+        '[class*="index_expired-text"]',
         '[class*="unavailable"]',
         '[class*="empty-state"]',
         '[class*="job-closed"]',
@@ -2827,8 +2832,36 @@
     return parts.join("  ").slice(0, 10000);
   }
 
+  /** Jobright closed badge: span.index_expired-text* → "This job has closed." */
+  function detectJobrightExpiredBadge() {
+    const host = String(location.hostname || "").toLowerCase();
+    if (!host.includes("jobright.ai")) return "";
+
+    const nodes = document.querySelectorAll(
+      '[class*="index_expired-text"], [class*="expired-text"]'
+    );
+    for (const el of nodes) {
+      if (!el) continue;
+      try {
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden") continue;
+      } catch {
+        /* ignore */
+      }
+      const text = cleanLabelText(el.textContent);
+      if (!text) continue;
+      if (/this job has closed|job has closed|no longer available|expired/i.test(text)) {
+        return text.slice(0, 140) || "This job has closed.";
+      }
+    }
+    return "";
+  }
+
   /** @returns {string} a short reason when the job is gone, else "" */
   function detectJobUnavailable() {
+    const jobrightClosed = detectJobrightExpiredBadge();
+    if (jobrightClosed) return jobrightClosed;
+
     const match = unavailableTextSnippet().match(JOB_GONE_RE);
     if (match) {
       return cleanLabelText(match[0]).slice(0, 140) || "This job is no longer available.";

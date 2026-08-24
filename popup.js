@@ -119,6 +119,7 @@ const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
 const selectAllJobsEl = document.getElementById("selectAllJobs");
 const batchSelectionNoteEl = document.getElementById("batchSelectionNote");
 const batchRemoveBtn = document.getElementById("batchRemoveBtn");
+const checkAvailabilityBtn = document.getElementById("checkAvailabilityBtn");
 const batchGenerateBtn = document.getElementById("batchGenerateBtn");
 const confirmModalEl = document.getElementById("confirmModal");
 const confirmModalTitleEl = document.getElementById("confirmModalTitle");
@@ -690,6 +691,9 @@ function updateBatchBar() {
   if (batchRemoveBtn) {
     batchRemoveBtn.disabled = selectedVisible.length === 0;
   }
+  if (checkAvailabilityBtn) {
+    checkAvailabilityBtn.disabled = selectedVisible.length === 0;
+  }
 }
 
 function renderImportedJobs() {
@@ -779,6 +783,12 @@ function renderImportedJobs() {
     removeBtn.disabled = isInProgress;
 
     if (isUnavailable) {
+      const warnBadge = document.createElement("span");
+      warnBadge.className = "job-unavailable-badge";
+      warnBadge.textContent = "Unavailable — delete";
+      warnBadge.title = String(job.statusDetail || "This job is no longer available");
+      summary.appendChild(warnBadge);
+
       const blockedLabel = document.createElement("button");
       blockedLabel.type = "button";
       blockedLabel.textContent = "Blocked";
@@ -1064,7 +1074,7 @@ async function removeSelectedImportedJobs() {
 async function batchGenerateSelectedJobs() {
   const jobIds = visibleImportedJobIds().filter((id) => importedJobsChecked.has(id));
   if (!jobIds.length) {
-    setStatus("Check one or more jobs, then click Batch resume build.");
+    setStatus("Check one or more jobs, then click Batch resume build.", "error");
     return;
   }
 
@@ -1078,11 +1088,11 @@ async function batchGenerateSelectedJobs() {
     return Boolean(String(job.jdText || "").trim() || String(job.jdLink || job.url || "").trim());
   });
   if (!runnable.length) {
-    setStatus("Selected jobs need a job URL or stored JD text.");
+    setStatus("Selected jobs need a job URL or stored JD text.", "error");
     return;
   }
 
-  setStatus(`Starting batch resume build for ${runnable.length} job(s)...`);
+  setStatus(`Starting batch resume build for ${runnable.length} job(s)...`, "running");
   const res = await chrome.runtime.sendMessage({
     type: "batch_generate_jobs",
     profileId: collected.profileId,
@@ -1090,7 +1100,52 @@ async function batchGenerateSelectedJobs() {
     jobMeta: collected.jobMeta
   });
   if (!res?.ok) {
-    setStatus(`Batch resume build failed to start: ${String(res?.error || "unknown error")}`);
+    setStatus(`Batch resume build failed to start: ${String(res?.error || "unknown error")}`, "error");
+  }
+}
+
+async function checkSelectedJobsAvailability() {
+  const jobIds = visibleImportedJobIds().filter((id) => importedJobsChecked.has(id));
+  if (!jobIds.length) {
+    setStatus("Check one or more jobs, then click Check availability.", "error");
+    return;
+  }
+
+  const runnable = jobIds.filter((id) => {
+    const job = importedJobsById[id];
+    if (!job) return false;
+    const status = String(job.status || "");
+    if (["opening", "generating", "opening_form", "filling"].includes(status)) return false;
+    return Boolean(String(job.jdLink || job.url || "").trim());
+  });
+  if (!runnable.length) {
+    setStatus("Selected jobs need a job URL (and must not be in progress).", "error");
+    return;
+  }
+
+  generationStartPending = true;
+  updateGenerationProgress({
+    running: true,
+    statusText: `Checking availability for ${runnable.length} job(s)...`
+  });
+  setBusy(true);
+
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "check_jobs_availability",
+      jobIds: runnable
+    });
+    if (!res?.ok) {
+      throw new Error(res?.error || "Failed to start availability check.");
+    }
+  } catch (err) {
+    generationStartPending = false;
+    wasGenerationRunning = false;
+    updateGenerationProgress({
+      running: false,
+      statusText: `Availability check failed: ${String(err.message || err)}`
+    });
+    setBusy(false);
   }
 }
 
@@ -1870,6 +1925,7 @@ function setBusy(busy) {
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
   if (batchGenerateBtn && busy) batchGenerateBtn.disabled = true;
   if (batchRemoveBtn && busy) batchRemoveBtn.disabled = true;
+  if (checkAvailabilityBtn && busy) checkAvailabilityBtn.disabled = true;
   if (!busy) updateBatchBar();
 }
 
@@ -2447,10 +2503,13 @@ selectAllJobsEl?.addEventListener("change", () => {
   renderImportedJobs();
 });
 batchGenerateBtn?.addEventListener("click", () => {
-  batchGenerateSelectedJobs().catch((err) => setStatus(String(err.message || err)));
+  batchGenerateSelectedJobs().catch((err) => setStatus(String(err.message || err), "error"));
+});
+checkAvailabilityBtn?.addEventListener("click", () => {
+  checkSelectedJobsAvailability().catch((err) => setStatus(String(err.message || err), "error"));
 });
 batchRemoveBtn?.addEventListener("click", () => {
-  removeSelectedImportedJobs().catch((err) => setStatus(String(err.message || err)));
+  removeSelectedImportedJobs().catch((err) => setStatus(String(err.message || err), "error"));
 });
 confirmModalOkEl?.addEventListener("click", () => closeConfirmModal(true));
 confirmModalEl?.querySelectorAll("[data-confirm-dismiss]").forEach((el) => {

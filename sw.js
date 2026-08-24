@@ -3496,6 +3496,130 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "check_jobs_availability") {
+    const jobIds = Array.isArray(message.jobIds)
+      ? message.jobIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+
+    if (!jobIds.length) {
+      safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
+      return false;
+    }
+    if (isRunning) {
+      safeSendResponse(sendResponse, {
+        ok: false,
+        error: "Another job is already running. Stop it first, then check availability."
+      });
+      return false;
+    }
+
+    isRunning = true;
+    clearGenerationCancel();
+    startKeepAlive();
+    chrome.storage.local.set({ generation_running: true });
+    safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
+
+    (async () => {
+      let closedCount = 0;
+      let openCount = 0;
+      let failedCount = 0;
+      let cancelled = false;
+      let probeTabId = null;
+      try {
+        for (let i = 0; i < jobIds.length; i += 1) {
+          try {
+            assertNotCancelled();
+          } catch {
+            cancelled = true;
+            break;
+          }
+
+          const importedJobId = jobIds[i];
+          const byId = await getImportedJobsById();
+          const job = byId[importedJobId];
+          if (!job) {
+            failedCount += 1;
+            continue;
+          }
+
+          const jobUrl = String(job.jdLink || job.url || "").trim();
+          const priorStatus = String(job.status || "imported");
+          await setImportedJobStatus(importedJobId, {
+            status: priorStatus === "unavailable" ? "unavailable" : priorStatus,
+            statusDetail: `Checking availability (${i + 1}/${jobIds.length})...`,
+            profileId: job.profileId
+          });
+          await setStatus(
+            `Availability ${i + 1}/${jobIds.length}: ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
+          );
+
+          if (!jobUrl) {
+            failedCount += 1;
+            await setImportedJobStatus(importedJobId, {
+              status: priorStatus,
+              statusDetail: "No job URL to check."
+            });
+            continue;
+          }
+
+          const probe = await openAndProbeJobAvailability(jobUrl, {
+            active: false,
+            reuseTabId: probeTabId
+          });
+          probeTabId = probe.tabId || probeTabId;
+
+          if (probe.closed) {
+            closedCount += 1;
+            await setImportedJobStatus(importedJobId, {
+              status: "unavailable",
+              statusDetail: `No longer available — delete recommended. ${probe.closed}`
+            });
+            await setStatus(
+              `Unavailable (${closedCount}): ${job.jobTitle || importedJobId} — marked in red`
+            );
+            continue;
+          }
+
+          openCount += 1;
+          let restoredStatus = priorStatus;
+          if (priorStatus === "unavailable" || priorStatus === "opening") {
+            restoredStatus = job.hasGeneratedResume ? "generated" : "imported";
+          }
+          await setImportedJobStatus(importedJobId, {
+            status: restoredStatus,
+            statusDetail: "Still open."
+          });
+        }
+
+        if (cancelled) {
+          await setStatus(
+            `Availability check cancelled. Closed ${closedCount}, still open ${openCount}, failed ${failedCount}.`
+          );
+        } else {
+          await setStatus(
+            `Availability check done. Closed ${closedCount} (red), still open ${openCount}, failed ${failedCount}.`
+          );
+        }
+      } catch (err) {
+        if (isCancelError(err)) {
+          await setStatus("Availability check cancelled by user.");
+        } else {
+          await setStatus(`Availability check failed: ${String(err?.message || err)}`);
+        }
+      } finally {
+        if (probeTabId) {
+          await chrome.tabs.remove(probeTabId).catch(() => {});
+        }
+        await chrome.storage.local.set({ generation_running: false });
+        isRunning = false;
+        finishGenerationCancelState();
+        stopKeepAlive();
+      }
+    })();
+
+    return false;
+  }
+
   if (message?.type !== "generate_resume") {
     return undefined;
   }

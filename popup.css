@@ -177,6 +177,7 @@ body {
   white-space: nowrap;
 }
 
+#checkAvailabilityBtn,
 #batchRemoveBtn,
 #batchGenerateBtn {
   width: auto;
@@ -189,8 +190,12 @@ body {
   white-space: normal;
 }
 
-#batchRemoveBtn {
+#checkAvailabilityBtn {
   margin-left: auto;
+}
+
+#batchRemoveBtn {
+  margin-left: 0;
 }
 
 .confirm-modal {
@@ -325,21 +330,39 @@ body {
 }
 
 .job-card.is-unavailable {
-  opacity: 0.72;
-  border-color: #d7deee;
+  opacity: 1;
+  border-color: #f1a8a8;
+  background: linear-gradient(180deg, #fff5f5 0%, #ffecec 100%);
+  box-shadow: inset 3px 0 0 var(--rose);
 }
 
 .job-card.is-unavailable .job-summary-title {
-  text-decoration: line-through;
-  text-decoration-color: #94a3b8;
+  text-decoration: none;
+  color: var(--rose);
+  font-weight: 700;
 }
 
 .job-card.is-unavailable .job-summary-status {
-  color: var(--muted);
+  color: var(--rose);
+  font-weight: 700;
 }
 
 .job-card.is-unavailable:not([open]) .job-summary {
   margin-bottom: 0;
+}
+
+.job-unavailable-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #f1a8a8;
+  background: #fff;
+  color: var(--rose);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .job-summary {
@@ -1368,6 +1391,7 @@ button:disabled {
     flex-basis: 100%;
   }
 
+  #checkAvailabilityBtn,
   #batchRemoveBtn,
   #batchGenerateBtn {
     margin-left: 0;
