@@ -32,7 +32,9 @@ import {
   getOutputDirectoryName,
   setPendingOutputFiles,
   clearPendingOutputFiles,
-  setLastSaveMeta
+  setLastSaveMeta,
+  readJobUploadDocsFromDirectory,
+  sanitizeJobFolderName
 } from "./fs-output.js";
 import {
   setLastGeneratedDocs,
@@ -965,10 +967,10 @@ async function resolveChoiceAnswers(
  * Also injects last generated resume / cover letter PDFs into matching file inputs.
  * Unmatched question fields are answered from the Q&A bank, then OpenAI.
  */
-async function startAutofillOnCurrentPage(profileId, tabId = null) {
+async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs = null } = {}) {
   const applicantInfo = await getApplicantInfo(profileId);
   const hasAnyValue = Object.values(applicantInfo).some((v) => String(v || "").trim());
-  const docs = await getLastGeneratedDocs();
+  const docs = uploadDocs || (await getLastGeneratedDocs());
   const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
   const ctx = await getAutofillAiContext();
   let history = { workHistory: [], educationHistory: [] };
@@ -1317,7 +1319,11 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
  * Universal multi-step Auto Apply (Jobright-style): fill â†’ Next if no Submit â†’
  * wait for next page/tab â†’ refill. Never auto-clicks final Submit.
  */
-async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14 } = {}) {
+async function startMultiStepApplyOnTab(
+  profileId,
+  tabId = null,
+  { maxSteps = 14, uploadDocs = null } = {}
+) {
   const tab = tabId
     ? await chrome.tabs.get(tabId).catch(() => null)
     : await getCurrentApplicationTab();
@@ -1464,7 +1470,7 @@ async function startMultiStepApplyOnTab(profileId, tabId = null, { maxSteps = 14
     }
 
     await setStatus(`Auto Apply: step ${step + 1}/${maxSteps} — filling form...`);
-    const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId);
+    const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
     if (fillRes?.skipped && step === 0) {
       return { ok: false, error: fillRes.error || "Autofill skipped.", ...summary, status: "failed" };
     }
@@ -2125,6 +2131,93 @@ async function notifyPanelToFlushOutput() {
   }
 }
 
+async function notifyPanelToLoadJobDocs(folderName, jobId) {
+  try {
+    return await chrome.runtime.sendMessage({
+      type: "load_job_upload_docs",
+      folderName,
+      jobId
+    });
+  } catch {
+    return null;
+  }
+}
+
+function extractFolderNameFromSaveMeta(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  // Prefer a bare folder name; path labels look like "Root / folder".
+  if (!raw.includes("/") && !raw.includes("\\")) return sanitizeJobFolderName(raw);
+  const parts = raw.split(/[/\\]/).map((p) => p.trim()).filter(Boolean);
+  return sanitizeJobFolderName(parts[parts.length - 1] || "");
+}
+
+/**
+ * Resolve resume/cover letter PDFs for an imported job:
+ * 1) per-job IndexedDB cache
+ * 2) files saved under the job's output folder
+ * 3) panel-assisted folder read (permission gesture)
+ */
+async function ensureUploadDocsForImportedJob(jobId, job = null) {
+  const id = String(jobId || "").trim();
+  if (!id) return null;
+
+  let docs = await getGeneratedDocsForJob(id);
+  if (docs?.resume?.base64 || docs?.coverLetter?.base64) {
+    await activateGeneratedDocsForJob(id);
+    return docs;
+  }
+
+  const folderName = extractFolderNameFromSaveMeta(job?.resumeFolder || job?.folderName || "");
+  if (!folderName) return null;
+
+  await setStatus(`Loading saved resume/cover letter from ${folderName}...`);
+
+  try {
+    docs = await readJobUploadDocsFromDirectory(folderName, { interactive: false });
+  } catch (err) {
+    if (err?.code !== "NEEDS_PERMISSION") {
+      docs = null;
+    } else {
+      try {
+        await openPanelWindow();
+      } catch {
+        /* panel may already be open */
+      }
+      const panelRes = await notifyPanelToLoadJobDocs(folderName, id);
+      if (panelRes?.ok && (panelRes.docs?.resume || panelRes.docs?.coverLetter)) {
+        docs = panelRes.docs;
+      } else if (panelRes?.needsPermission) {
+        throw new Error(
+          "Click once in the extension panel to unlock the output folder, then click Apply again."
+        );
+      }
+    }
+  }
+
+  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
+    // One more try via panel even when SW read returned empty (permission/path issues).
+    try {
+      await openPanelWindow();
+    } catch {
+      /* ignore */
+    }
+    const panelRes = await notifyPanelToLoadJobDocs(folderName, id);
+    if (panelRes?.ok) docs = panelRes.docs;
+    if (panelRes?.needsPermission) {
+      throw new Error(
+        "Click once in the extension panel to unlock the output folder, then click Apply again."
+      );
+    }
+  }
+
+  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return null;
+
+  await setGeneratedDocsForJob(id, docs);
+  await activateGeneratedDocsForJob(id);
+  return docs;
+}
+
 /**
  * Chrome will not grant folder access without a user gesture, so focus the panel
  * and wait for the click that unlocks it. The panel writes the pending files as
@@ -2161,8 +2254,9 @@ async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 12000
  * is set to "Ask where to save each file".
  */
 async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}) {
+  let docs = null;
   try {
-    const docs = pickUploadDocsFromBundle(folderName, files);
+    docs = pickUploadDocsFromBundle(folderName, files);
     if (importedJobId) {
       await setGeneratedDocsForJob(importedJobId, docs);
     } else {
@@ -2193,17 +2287,18 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
   await new Promise((r) => setTimeout(r, 350));
 
   let lastError = "";
+  let pathLabel = "";
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const flushResult = await notifyPanelToFlushOutput();
     if (flushResult?.ok) {
-      const pathLabel = flushResult.pathLabel || `${rootLabel} / ${folderName}`;
+      pathLabel = flushResult.pathLabel || `${rootLabel} / ${folderName}`;
       await showSaveNotification(pathLabel);
-      return pathLabel;
+      return { pathLabel, folderName, docs };
     }
 
     if (flushResult?.needsPermission) {
-      const pathLabel = await waitForPanelFolderUnlock(rootLabel, folderName);
-      if (pathLabel) return pathLabel;
+      pathLabel = await waitForPanelFolderUnlock(rootLabel, folderName);
+      if (pathLabel) return { pathLabel, folderName, docs };
       lastError =
         "Chrome needs one click in the extension panel to unlock the output folder.";
       break;
@@ -2215,9 +2310,9 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
 
   const stillPending = (await chrome.storage.local.get("pending_fs_write")).pending_fs_write;
   if (!stillPending) {
-    const pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
+    pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
     await showSaveNotification(pathLabel);
-    return pathLabel;
+    return { pathLabel, folderName, docs };
   }
 
   throw new Error(
@@ -2283,9 +2378,11 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
     }
   }
 
-  const savedDir = await commitOutputBundle(folderName, files, {
+  const saved = await commitOutputBundle(folderName, files, {
     importedJobId: jobMeta?.importedJobId || ""
   });
+  const savedDir = saved?.pathLabel || "";
+  const docs = saved?.docs || pickUploadDocsFromBundle(folderName, files);
   let status = `Saved to ${savedDir} (${resumeFileBase}_Resume.pdf${
     coverLetterCreated ? " + Cover_Letter.pdf" : ""
   } + jd.txt + HTML)${coverLetterWarning}`;
@@ -2317,7 +2414,14 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
     }
   }
 
-  return { savedDir, status, folderName };
+  return {
+    savedDir,
+    status,
+    folderName,
+    docs,
+    resumeFileName: docs?.resume?.fileName || `${resumeFileBase}_Resume.pdf`,
+    coverLetterFileName: docs?.coverLetter?.fileName || (coverLetterCreated ? "Cover_Letter.pdf" : "")
+  };
 }
 
 async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
@@ -3001,20 +3105,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
         });
 
-        const cachedDocs = await getGeneratedDocsForJob(importedJobId);
         const liveJob = (await getImportedJobsById())[importedJobId];
-        const reuseResume =
-          Boolean(cachedDocs?.resume?.base64) ||
-          Boolean(liveJob?.hasGeneratedResume) ||
-          String(liveJob?.status || "") === "generated";
+        let uploadDocs = await ensureUploadDocsForImportedJob(importedJobId, liveJob);
 
-        if (reuseResume && cachedDocs?.resume?.base64) {
-          await activateGeneratedDocsForJob(importedJobId);
-          await setStatus("Using previously generated resume for this job...");
+        if (uploadDocs?.resume?.base64 || uploadDocs?.coverLetter?.base64) {
+          const resumeName = uploadDocs.resume?.fileName || "resume";
+          const coverName = uploadDocs.coverLetter?.fileName
+            ? ` + ${uploadDocs.coverLetter.fileName}`
+            : "";
+          await setStatus(`Using saved files for this job: ${resumeName}${coverName}`);
           await setImportedJobStatus(importedJobId, {
             status: "opening_form",
             statusDetail: "Resume ready — opening application form..."
           });
+        } else if (extractFolderNameFromSaveMeta(liveJob?.resumeFolder || "")) {
+          throw new Error(
+            "A resume was generated for this job, but the saved PDFs could not be loaded from the output folder. Click in the extension panel to unlock the folder, then Apply again."
+          );
         } else {
           const resumeOnlyStored =
             (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
@@ -3036,12 +3143,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           });
           await setStatus(`Generating resume for imported job...`);
           const saved = await runGenerationPipeline({ profileId, jobMeta: genMeta });
+          uploadDocs = saved?.docs || (await getGeneratedDocsForJob(importedJobId));
           await setImportedJobStatus(importedJobId, {
             status: "opening_form",
             statusDetail: "Waiting for the job page, then Auto Apply...",
             patch: {
               hasGeneratedResume: true,
-              resumeFolder: saved?.folderName || saved?.savedDir || ""
+              resumeFolder: saved?.folderName || "",
+              resumeFileName: saved?.resumeFileName || "",
+              coverLetterFileName: saved?.coverLetterFileName || ""
             }
           });
         }
@@ -3067,16 +3177,32 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           /* availability probe is best-effort; Auto Apply handles the rest */
         }
 
-        // Ensure this job's PDFs are the active upload set right before fill.
-        await activateGeneratedDocsForJob(importedJobId).catch(() => {});
+        // Re-activate right before fill so this job's PDFs win over any later batch job.
+        uploadDocs =
+          (await ensureUploadDocsForImportedJob(
+            importedJobId,
+            (await getImportedJobsById())[importedJobId]
+          )) || uploadDocs;
+        if (!uploadDocs?.resume?.base64 && !uploadDocs?.coverLetter?.base64) {
+          throw new Error(
+            "No resume/cover letter PDFs are ready for this job. Generate a resume first, then Apply."
+          );
+        }
 
         await setImportedJobStatus(importedJobId, {
           status: "filling",
           statusDetail: `Running Auto Apply (${site})...`
         });
-        await setStatus(`Running Auto Apply (${site})...`);
+        await setStatus(
+          `Running Auto Apply (${site}) with ${uploadDocs.resume?.fileName || "resume"}${
+            uploadDocs.coverLetter?.fileName ? ` + ${uploadDocs.coverLetter.fileName}` : ""
+          }...`
+        );
 
-        const ea = await startMultiStepApplyOnTab(profileId, tabId, { maxSteps: 10 });
+        const ea = await startMultiStepApplyOnTab(profileId, tabId, {
+          maxSteps: 10,
+          uploadDocs
+        });
         if (!ea.ok && ea.error) throw new Error(ea.error);
 
         if (ea.status === "unavailable") {
@@ -3314,7 +3440,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               profileId,
               patch: {
                 hasGeneratedResume: true,
-                resumeFolder: saved?.folderName || saved?.savedDir || ""
+                resumeFolder: saved?.folderName || "",
+                resumeFileName: saved?.resumeFileName || "",
+                coverLetterFileName: saved?.coverLetterFileName || ""
               }
             });
           } catch (err) {

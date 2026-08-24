@@ -4,7 +4,7 @@ import {
   deleteCustomProfile
 } from "./profiles.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
-import { extractSpreadsheetId, buildSheetRowTsv, getExistingJobLinks, updateJobStatusInSpreadsheet } from "./sheets.js";
+import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet } from "./sheets.js";
 import { formatAtsTooltip } from "./ats-score.js";
 import {
   getSheetPresets,
@@ -20,7 +20,8 @@ import {
   getOutputDirectoryName,
   flushPendingOutputToSelectedDirectory,
   getLastSaveMeta,
-  browseLastSavedJobDirectory
+  browseLastSavedJobDirectory,
+  readJobUploadDocsFromDirectory
 } from "./fs-output.js";
 import { isLinkedInSource, isDiceSource, isJobrightSource, parseImportedJobsCsvText } from "./csv-jobs.js";
 import {
@@ -32,6 +33,7 @@ import {
 import { getQaCount } from "./qa-store.js";
 import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
+import { setGeneratedDocsForJob } from "./upload-assets.js";
 
 const statusEl = document.getElementById("status");
 const atsScoreBadgeEl = document.getElementById("atsScoreBadge");
@@ -132,6 +134,8 @@ let templatesCache = [];
 let sheetPresetsCache = [];
 let applyingSheetPreset = false;
 let wasGenerationRunning = false;
+/** True after Generate click until SW sets generation_running (avoids poll wiping the status UI). */
+let generationStartPending = false;
 
 // Extra job metadata captured by the page scraper (sheet history columns).
 let scrapedJobMeta = null;
@@ -191,20 +195,25 @@ function setStatus(message, kind = "") {
     return;
   }
 
+  // Actionable UI guidance must stay visible (validation used to look like a no-op).
+  const looksLikeActionNeeded =
+    /^(enter|paste|select|check|fill|open|click|choose|set|add|connect|unlock)\b/i.test(text) ||
+    /\bfirst\b|\bbefore\b|\bcannot\b|\bneed(s)?\b|\bmust\b|\brequired\b/i.test(text);
+
   const looksLikeError =
     kind === "error" ||
     (/fail|error|could not|missing|invalid|canceled|cancelled/i.test(text) &&
       text &&
       !/^ready\.?$/i.test(text));
 
-  if (looksLikeError) {
+  if (looksLikeError || (text && looksLikeActionNeeded)) {
     statusEl.hidden = false;
     statusEl.textContent = text;
     statusEl.classList.add("is-error");
     return;
   }
 
-  // Idle / Ready / Done / info — hide; save banner + ATS color show outcome.
+  // Idle / Ready / Done / success chatter — hide; save banner + ATS color show outcome.
   statusEl.hidden = true;
   statusEl.textContent = "";
 }
@@ -326,7 +335,7 @@ async function deleteCurrentSheetPreset() {
   setStatus(`Deleted saved sheet${preset ? `: ${presetDisplayLabel(preset)}` : "."}`);
 }
 
-function updateGenerationProgress({ running, statusText }) {
+function updateGenerationProgress({ running, statusText, clearIdleStatus = false }) {
   if (!genProgressEl) return;
 
   const text = String(statusText || "").trim();
@@ -351,7 +360,11 @@ function updateGenerationProgress({ running, statusText }) {
     return;
   }
 
-  // Clear idle / Ready / Done text from the status line.
+  // Idle polls must not wipe validation / guidance messages.
+  if (!clearIdleStatus) return;
+
+  // Only clear a running-style line after a successful finish.
+  if (!statusEl || statusEl.hidden || statusEl.classList.contains("is-error")) return;
   setStatus("", "done");
 }
 
@@ -1556,7 +1569,7 @@ async function startGenerationAndWait() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return { ok: false };
 
-  wasGenerationRunning = true;
+  generationStartPending = true;
   updateGenerationProgress({
     running: true,
     statusText: "Starting resume generation..."
@@ -1569,6 +1582,7 @@ async function startGenerationAndWait() {
     jobMeta: collected.jobMeta
   });
   if (!res?.ok) {
+    generationStartPending = false;
     throw new Error(res?.error || "Failed to start generation.");
   }
 
@@ -1578,8 +1592,9 @@ async function startGenerationAndWait() {
   });
 
   const statusText = await waitForGenerationComplete();
+  generationStartPending = false;
   wasGenerationRunning = false;
-  updateGenerationProgress({ running: false, statusText });
+  updateGenerationProgress({ running: false, statusText, clearIdleStatus: true });
   setBusy(false);
 
   if (/failed|error/i.test(statusText)) {
@@ -1707,12 +1722,15 @@ async function collectBatchGenerateSettings() {
 
   if (spreadsheetUrl || sheetsWebAppUrl || sheetTabName) {
     if (!extractSpreadsheetId(spreadsheetUrl)) {
-      setStatus("Enter a valid Google Spreadsheet link.");
+      setStatus("Enter a valid Google Spreadsheet link.", "error");
       spreadsheetUrlEl.focus();
       return null;
     }
     if (!sheetsWebAppUrl) {
-      setStatus("Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.");
+      setStatus(
+        "Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.",
+        "error"
+      );
       sheetsWebAppUrlEl.focus();
       return null;
     }
@@ -1720,7 +1738,10 @@ async function collectBatchGenerateSettings() {
 
   const outputFolderName = (await getOutputDirectoryName()) || "";
   if (!outputFolderName) {
-    setStatus("Select an output folder first (Select folder), then run batch resume build.");
+    setStatus(
+      "Select an output folder first (Select folder), then run batch resume build.",
+      "error"
+    );
     selectOutputDirBtn?.focus();
     return null;
   }
@@ -1760,35 +1781,39 @@ async function collectJobMetaOrShowError() {
   const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
 
   if (!jobTitle) {
-    setStatus("Enter a job title first.");
+    setStatus("Enter a job title first.", "error");
     jobTitleEl.focus();
     return null;
   }
   if (!companyName) {
-    setStatus("Enter a company name first.");
+    setStatus("Enter a company name first.", "error");
     companyNameEl.focus();
     return null;
   }
   if (!jd) {
-    setStatus("Paste a job description into the JD field first.");
+    setStatus("Paste a job description into the JD field first.", "error");
     jdTextEl.focus();
     return null;
   }
 
   if (spreadsheetUrl || sheetsWebAppUrl || sheetTabName) {
     if (!extractSpreadsheetId(spreadsheetUrl)) {
-      setStatus("Enter a valid Google Spreadsheet link.");
+      setStatus("Enter a valid Google Spreadsheet link.", "error");
       spreadsheetUrlEl.focus();
       return null;
     }
     if (!sheetsWebAppUrl) {
-      setStatus("Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.");
+      setStatus(
+        "Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.",
+        "error"
+      );
       sheetsWebAppUrlEl.focus();
       return null;
     }
     if (!sheetTabName && !/[?#&]gid=\d+/i.test(spreadsheetUrl)) {
       setStatus(
-        "Open your target sheet tab in Google Sheets, copy that URL (must include gid=...), or enter the Sheet tab name."
+        "Open your target sheet tab in Google Sheets, copy that URL (must include gid=...), or enter the Sheet tab name.",
+        "error"
       );
       spreadsheetUrlEl.focus();
       return null;
@@ -1797,7 +1822,7 @@ async function collectJobMetaOrShowError() {
 
   const outputFolderName = (await getOutputDirectoryName()) || "";
   if (!outputFolderName) {
-    setStatus('Select an output folder first (Select folder), then generate.');
+    setStatus("Select an output folder first (Select folder), then generate.", "error");
     selectOutputDirBtn?.focus();
     return null;
   }
@@ -1878,7 +1903,7 @@ async function generateResumeAndCoverLetter() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
-  wasGenerationRunning = true;
+  generationStartPending = true;
   updateGenerationProgress({
     running: true,
     statusText: "Starting resume generation..."
@@ -1898,11 +1923,13 @@ async function generateResumeAndCoverLetter() {
       statusText: "Calling OpenAI for resume JSON..."
     });
   } catch (err) {
+    generationStartPending = false;
+    wasGenerationRunning = false;
     updateGenerationProgress({
       running: false,
-      statusText: `Generation failed: ${String(err.message || err)}`
+      statusText: `Generation failed: ${String(err.message || err)}`,
+      clearIdleStatus: false
     });
-    wasGenerationRunning = false;
     setBusy(false);
   }
 }
@@ -2215,6 +2242,7 @@ async function resetWorkflow() {
     }
     await clearJobFields();
     wasGenerationRunning = false;
+    generationStartPending = false;
     renderAtsBadge(null);
     setStatus("Cleared. Ready for the next job.");
     setBusy(false);
@@ -2473,48 +2501,22 @@ csvFileInputEl?.addEventListener("change", async () => {
       return;
     }
 
-    const spreadsheetUrl = (spreadsheetUrlEl?.value || "").trim();
-    const sheetTabName = (sheetTabNameEl?.value || "").trim();
-    const webAppUrl = (sheetsWebAppUrlEl?.value || "").trim();
-    if (Boolean(spreadsheetUrl) !== Boolean(webAppUrl)) {
-      throw new Error("Fill both Google Sheet fields, or clear both before importing.");
+    if (!parsed.jobs.length) {
+      const msg =
+        `No jobs loaded from CSV (${parsed.format || "unknown"} format). ` +
+        `${parsed.skipped} row(s) missing URL/title/company` +
+        (parsed.format === "capture" ? " or description" : "") +
+        `, ${parsed.duplicateUrls || 0} duplicate URL(s).`;
+      setStatus(`CSV import failed: ${msg}`);
+      if (importStatusEl) importStatusEl.textContent = msg;
+      return;
     }
 
-    let existingSheetLinks = [];
-    if (spreadsheetUrl && webAppUrl) {
-      setStatus("Checking Google Sheet column A for existing jobs...");
-      existingSheetLinks = await getExistingJobLinks({
-        spreadsheetUrl,
-        webAppUrl,
-        sheetName: sheetTabName
-      });
-    }
+    const replaceRes = await replaceImportedJobs(parsed.jobs);
 
-    const existingLinks = new Set(existingSheetLinks.map(normalizeJobLink).filter(Boolean));
-    const csvLinks = new Set();
-    let sheetDuplicates = 0;
-    let csvDuplicates = 0;
-    const pendingJobs = parsed.jobs.filter((job) => {
-      const link = normalizeJobLink(job.jdLink);
-      if (link && existingLinks.has(link)) {
-        sheetDuplicates += 1;
-        return false;
-      }
-      if (link && csvLinks.has(link)) {
-        csvDuplicates += 1;
-        return false;
-      }
-      if (link) csvLinks.add(link);
-      return true;
-    });
-
-    const replaceRes = await replaceImportedJobs(pendingJobs);
-
-    const noSheetNote = spreadsheetUrl ? "" : " Sheet dedup skipped (Google Sheet not connected).";
     const summary =
-      `Loaded ${replaceRes.imported} pending jobs. ` +
-      `Ignored ${sheetDuplicates} already in Sheet, ${csvDuplicates + replaceRes.duplicateIds} CSV duplicates, ` +
-      `${parsed.skipped} invalid rows.${noSheetNote}`;
+      `Loaded ${replaceRes.imported} job(s) from ${parsed.format || "CSV"} export. ` +
+      `Ignored ${parsed.skipped} invalid row(s), ${(parsed.duplicateUrls || 0) + replaceRes.duplicateIds} duplicate(s).`;
     setStatus(`CSV import complete. ${summary}`);
     if (importStatusEl) importStatusEl.textContent = summary;
 
@@ -2620,6 +2622,45 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "load_job_upload_docs") {
+    (async () => {
+      try {
+        const docs = await readJobUploadDocsFromDirectory(message.folderName || "", {
+          interactive: true
+        });
+        if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
+          sendResponse({
+            ok: false,
+            error: `No resume/cover letter PDFs found in folder "${message.folderName || ""}".`
+          });
+          return;
+        }
+        if (message.jobId) {
+          await setGeneratedDocsForJob(message.jobId, docs);
+        }
+        sendResponse({
+          ok: true,
+          docs: {
+            folderName: docs.folderName || "",
+            resume: docs.resume || null,
+            coverLetter: docs.coverLetter || null
+          }
+        });
+      } catch (err) {
+        if (err?.code === "NEEDS_PERMISSION") {
+          sendResponse({
+            ok: false,
+            needsPermission: true,
+            error: String(err.message || err)
+          });
+          return;
+        }
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
   if (message?.type === "open_saved_folder_fs") {
     browseLastSavedJobDirectory()
       .then((result) => sendResponse(result || { ok: true }))
@@ -2698,18 +2739,32 @@ panelPollTimer = setInterval(async () => {
     const statusText =
       typeof data.generation_status === "string" ? data.generation_status : "";
 
-    updateGenerationProgress({ running, statusText });
-    setBusy(running);
     if (running) {
-      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
-    } else {
-      renderAtsBadge(data.last_ats_report);
-    }
-
-    if (wasGenerationRunning && !running) {
-      wasGenerationRunning = false;
-    } else if (running) {
+      generationStartPending = false;
       wasGenerationRunning = true;
+      updateGenerationProgress({ running: true, statusText });
+      setBusy(true);
+      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+    } else if (generationStartPending) {
+      // Keep the local "Starting..." UI until the service worker flips the flag.
+      updateGenerationProgress({
+        running: true,
+        statusText: statusText || "Starting resume generation..."
+      });
+      setBusy(true);
+      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+    } else if (wasGenerationRunning) {
+      wasGenerationRunning = false;
+      updateGenerationProgress({
+        running: false,
+        statusText,
+        clearIdleStatus: true
+      });
+      setBusy(false);
+      renderAtsBadge(data.last_ats_report);
+    } else {
+      setBusy(false);
+      renderAtsBadge(data.last_ats_report);
     }
 
     // While a gesture is pending, the click/keydown handler drives the retry.

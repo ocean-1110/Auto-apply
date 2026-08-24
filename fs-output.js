@@ -154,6 +154,83 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
+function uint8ArrayToBase64(bytes) {
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < arr.length; i += chunk) {
+    binary += String.fromCharCode(...arr.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+export function sanitizeJobFolderName(folderName) {
+  return (
+    String(folderName || "untitled")
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || "untitled"
+  );
+}
+
+/**
+ * Read resume + cover letter PDFs from a previously saved job subfolder
+ * under the user's output directory (for Apply after batch generation).
+ */
+export async function readJobUploadDocsFromDirectory(folderName, { interactive = false } = {}) {
+  const safeFolder = sanitizeJobFolderName(folderName);
+  if (!safeFolder || safeFolder === "untitled") return null;
+
+  const root = await getOutputDirectoryHandle();
+  if (!root) return null;
+
+  const allowed = await ensureDirectoryPermission(root, { interactive });
+  if (!allowed) {
+    const err = new Error(
+      "Chrome needs one click in the extension panel to unlock the output folder."
+    );
+    err.code = "NEEDS_PERMISSION";
+    throw err;
+  }
+
+  let jobDir;
+  try {
+    jobDir = await root.getDirectoryHandle(safeFolder, { create: false });
+  } catch {
+    return null;
+  }
+
+  let resume = null;
+  let coverLetter = null;
+
+  for await (const [name, handle] of jobDir.entries()) {
+    if (!handle || handle.kind !== "file") continue;
+    const lower = String(name || "").toLowerCase();
+    if (!lower.endsWith(".pdf")) continue;
+
+    const file = await handle.getFile();
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    const entry = {
+      fileName: name,
+      mimeType: file.type || "application/pdf",
+      base64: uint8ArrayToBase64(buffer)
+    };
+
+    if (/cover.?letter/i.test(lower)) {
+      coverLetter = entry;
+      continue;
+    }
+    if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower)) {
+      resume = entry;
+      continue;
+    }
+    if (!resume) resume = entry;
+  }
+
+  if (!resume?.base64 && !coverLetter?.base64) return null;
+  return { folderName: safeFolder, resume, coverLetter };
+}
+
 /**
  * Write a job subfolder into the user-selected root directory.
  * Creates the folder if it does not exist.
@@ -174,10 +251,7 @@ export async function writeJobFilesToDirectory(
     throw err;
   }
 
-  const safeFolder = String(folderName || "untitled")
-    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim() || "untitled";
+  const safeFolder = sanitizeJobFolderName(folderName);
 
   const jobDir = await rootHandle.getDirectoryHandle(safeFolder, { create: true });
 
