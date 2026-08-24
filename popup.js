@@ -729,8 +729,18 @@ function renderImportedJobs() {
     const summary = document.createElement("summary");
     summary.className = "job-summary";
 
-    const selectCol = document.createElement("div");
-    selectCol.className = "job-select-col";
+    const title = document.createElement("span");
+    title.className = "job-summary-title";
+    title.textContent = String(job.jobTitle || jobId || "Untitled");
+    summary.appendChild(title);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "job-summary-toolbar";
+
+    const status = document.createElement("span");
+    status.className = "job-summary-status";
+    status.textContent = displayImportedJobStatus(job);
+    toolbar.appendChild(status);
 
     const check = document.createElement("input");
     check.type = "checkbox";
@@ -747,7 +757,6 @@ function renderImportedJobs() {
       persistCheckedJobs();
       updateBatchBar();
     });
-    selectCol.appendChild(check);
 
     const removeBtn = document.createElement("button");
     removeBtn.type = "button";
@@ -765,19 +774,6 @@ function renderImportedJobs() {
       e.stopPropagation();
       await removeImportedJob(jobId);
     });
-    selectCol.appendChild(removeBtn);
-    summary.appendChild(selectCol);
-
-    const title = document.createElement("span");
-    title.className = "job-summary-title";
-    title.textContent = String(job.jobTitle || jobId || "Untitled");
-
-    const status = document.createElement("span");
-    status.className = "job-summary-status";
-    status.textContent = displayImportedJobStatus(job);
-
-    summary.appendChild(title);
-    summary.appendChild(status);
 
     const isCompleted = job.status === "completed";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
@@ -788,17 +784,11 @@ function renderImportedJobs() {
       warnBadge.className = "job-unavailable-badge";
       warnBadge.textContent = "Unavailable — delete";
       warnBadge.title = String(job.statusDetail || "This job is no longer available");
-      summary.appendChild(warnBadge);
-
-      const blockedLabel = document.createElement("button");
-      blockedLabel.type = "button";
-      blockedLabel.textContent = "Blocked";
-      blockedLabel.disabled = true;
-      summary.appendChild(blockedLabel);
+      toolbar.appendChild(warnBadge);
 
       const unblockBtn = document.createElement("button");
       unblockBtn.type = "button";
-      unblockBtn.className = "secondary";
+      unblockBtn.className = "secondary job-summary-action";
       unblockBtn.textContent = "Unblock";
       unblockBtn.title = "Restore this job so you can apply again";
       unblockBtn.addEventListener("click", async (e) => {
@@ -806,7 +796,10 @@ function renderImportedJobs() {
         e.stopPropagation();
         await unblockImportedJob(jobId);
       });
-      summary.appendChild(unblockBtn);
+      toolbar.appendChild(unblockBtn);
+      toolbar.appendChild(check);
+      toolbar.appendChild(removeBtn);
+      summary.appendChild(toolbar);
 
       card.appendChild(summary);
       frag.appendChild(card);
@@ -815,6 +808,7 @@ function renderImportedJobs() {
 
     const applySummaryBtn = document.createElement("button");
     applySummaryBtn.type = "button";
+    applySummaryBtn.className = "job-summary-action";
     if (isCompleted) {
       applySummaryBtn.textContent = "Done";
       applySummaryBtn.disabled = true;
@@ -835,7 +829,10 @@ function renderImportedJobs() {
       });
     }
 
-    summary.appendChild(applySummaryBtn);
+    toolbar.appendChild(applySummaryBtn);
+    toolbar.appendChild(check);
+    toolbar.appendChild(removeBtn);
+    summary.appendChild(toolbar);
 
     card.appendChild(summary);
 
