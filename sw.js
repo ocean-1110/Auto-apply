@@ -2573,26 +2573,29 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jdText: meta.jdText || ""
   });
 
+  const scoredFinal = scoreResumeAgainstJd(data, {
+    jdText: meta.jdText || "",
+    jobTitle: meta.jobTitle || ""
+  });
   const atsReport = {
-    ...scoreResumeAgainstJd(data, {
-      jdText: meta.jdText || "",
-      jobTitle: meta.jobTitle || ""
-    }),
+    ...scoredFinal,
     rewritten: Boolean(improved?.atsReport?.rewritten),
     rewriteAttempts: Number(improved?.atsReport?.rewriteAttempts || 0),
-    previousScore: improved?.atsReport?.previousScore,
+    previousScore: improved?.atsReport?.previousScore ?? scoredFinal.score,
+    finalScore: scoredFinal.score,
     rewriteIssues: improved?.atsReport?.rewriteIssues || []
   };
 
   const rawText = JSON.stringify(data, null, 2);
   await chrome.storage.local.set({ last_response: rawText, last_ats_report: atsReport });
+  const finalPct = Math.round(Number(atsReport.finalScore ?? atsReport.score) || 0);
   const rewriteNote = atsReport.rewritten
-    ? ` Rewritten for ATS (was ${Math.round(Number(atsReport.previousScore))}%).`
-    : "";
+    ? ` Final ATS ${finalPct}% (was ${Math.round(Number(atsReport.previousScore))}%).`
+    : ` Final ATS ${finalPct}%.`;
   await setStatus(
     resumeOnly
-      ? `Resume JSON ready (ATS ${atsReport.score}%).${rewriteNote} Rendering PDF (skipping cover letter)...`
-      : `Resume JSON ready (ATS ${atsReport.score}%).${rewriteNote} Rendering PDF + cover letter...`
+      ? `Resume JSON ready.${rewriteNote} Rendering PDF (skipping cover letter)...`
+      : `Resume JSON ready.${rewriteNote} Rendering PDF + cover letter...`
   );
 
   assertNotCancelled();

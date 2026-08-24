@@ -221,15 +221,16 @@ function setStatus(message, kind = "") {
 
 function renderAtsBadge(report) {
   if (!atsScoreBadgeEl || !atsScoreValueEl) return;
-  const score = Number(report?.score);
+  const score = Number(report?.finalScore ?? report?.score);
   if (!Number.isFinite(score)) {
     atsScoreBadgeEl.hidden = true;
     return;
   }
   atsScoreBadgeEl.hidden = false;
   atsScoreValueEl.textContent = `${Math.round(score)}%`;
+  atsScoreBadgeEl.title = "Final ATS score after generation/rewrite";
   atsScoreBadgeEl.classList.remove("is-high", "is-mid", "is-low");
-  atsScoreBadgeEl.classList.add(score >= 85 ? "is-high" : score >= 70 ? "is-mid" : "is-low");
+  atsScoreBadgeEl.classList.add(score >= 85 ? "is-high" : score >= 75 ? "is-mid" : "is-low");
   if (atsScoreTooltipEl) atsScoreTooltipEl.textContent = formatAtsTooltip(report);
 }
 

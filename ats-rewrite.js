@@ -6,10 +6,16 @@
 
 import { chatCompletion } from "./openai.js";
 import { extractResumeJson } from "./resume-json.js";
-import { scoreResumeAgainstJd } from "./ats-score.js";
+import {
+  scoreResumeAgainstJd,
+  toDisplayAtsScore,
+  ATS_SCORE_TARGET_MIN,
+  ATS_SCORE_DISPLAY_MAX
+} from "./ats-score.js";
 import { logLlmCall } from "./cost-tracker.js";
 
-export const ATS_REWRITE_MIN_SCORE = 70;
+/** Rewrite when below this display score (target band is 75–90). */
+export const ATS_REWRITE_MIN_SCORE = ATS_SCORE_TARGET_MIN;
 const MAX_REWRITE_ATTEMPTS = 2;
 
 const REWRITE_RULES = `
@@ -20,6 +26,7 @@ RULES:
 - Do not make the resume appear custom-written for a single company. Never name the hiring company.
 - When a technology family contains many related capabilities, summarize them naturally rather than enumerating every feature.
 - Allow recruiters to infer adjacent expertise; do not dump every JD keyword into every bullet.
+- Aim for strong ATS coverage in a natural band (about ${ATS_SCORE_TARGET_MIN}–${ATS_SCORE_DISPLAY_MAX}%). Do not keyword-stuff toward a perfect 100% score.
 - The resume should sound like an experienced engineer describing work completed over many years, not answering an exam.
 - Role titles should be aligned with the role in the JD, with a natural career arc: earlier roles more junior / narrower, later roles closer to the target seniority and scope.
 - Experience in each role must be appropriate for that point in the candidate's career — do not give the earliest job the same scope as the current one.
@@ -153,7 +160,14 @@ function applyLockedIdentity(original, rewritten) {
 }
 
 function withAtsMeta(report, extra = {}) {
-  return { ...(report || {}), ...extra };
+  const merged = { ...(report || {}), ...extra };
+  const finalScore = toDisplayAtsScore(merged.finalScore ?? merged.score);
+  merged.score = finalScore;
+  merged.finalScore = finalScore;
+  if (Number.isFinite(Number(merged.previousScore))) {
+    merged.previousScore = toDisplayAtsScore(merged.previousScore);
+  }
+  return merged;
 }
 
 async function judgeResumeRealism(data, { apiKey, model, jdText, jobTitle, atsReport }) {
@@ -308,7 +322,12 @@ export async function ensureAtsReadyResume(
   if (!needsRewrite(atsReport, localIssues, judge)) {
     return {
       data: current,
-      atsReport: withAtsMeta(atsReport, { rewritten: false, rewriteAttempts: 0 })
+      atsReport: withAtsMeta(atsReport, {
+        rewritten: false,
+        rewriteAttempts: 0,
+        previousScore,
+        finalScore: atsReport.score
+      })
     };
   }
 
@@ -360,6 +379,7 @@ export async function ensureAtsReadyResume(
       rewritten: attempts > 0,
       rewriteAttempts: attempts,
       previousScore,
+      finalScore: atsReport.score,
       rewriteIssues: collectedIssues.slice(0, 8)
     })
   };

@@ -1,7 +1,13 @@
 /**
  * Local ATS-style keyword coverage report for a generated resume vs JD.
  * Deterministic (no extra API call) so the popup can always show a score.
+ *
+ * Displayed overall scores are kept in a realistic band (up to 90%).
+ * Rewrite pipeline targets at least 75%.
  */
+
+export const ATS_SCORE_DISPLAY_MAX = 90;
+export const ATS_SCORE_TARGET_MIN = 75;
 
 const STOP = new Set(
   `
@@ -158,8 +164,21 @@ function clamp(n, min, max) {
 }
 
 /**
+ * Map a raw coverage score into the display band.
+ * Never shows 91–100 (those look fake); keeps strong resumes in ~75–90.
+ */
+export function toDisplayAtsScore(raw) {
+  const n = clamp(Math.round(Number(raw) || 0), 0, 100);
+  if (n <= ATS_SCORE_DISPLAY_MAX) return n;
+  // Compress 91–100 into 88–90 so almost-perfect coverage still caps at 90.
+  return clamp(88 + Math.round((n - 90) * 0.2), 88, ATS_SCORE_DISPLAY_MAX);
+}
+
+/**
  * @returns {{
  *   score: number,
+ *   rawScore: number,
+ *   finalScore: number,
  *   titleMatch: number,
  *   skillsCoverage: number,
  *   keywordCoverage: number,
@@ -196,7 +215,7 @@ export function scoreResumeAgainstJd(resumeData = {}, { jdText = "", jobTitle = 
   ).slice(0, 10);
   const missing = keywords.filter((t) => !foundIn(corpus.all, t)).slice(0, 8);
 
-  const score = clamp(
+  const rawScore = clamp(
     Math.round(
       titleMatch * 0.18 +
         skillsCoverage * 0.4 +
@@ -204,11 +223,14 @@ export function scoreResumeAgainstJd(resumeData = {}, { jdText = "", jobTitle = 
         experienceAlignment * 0.1
     ),
     0,
-    99
+    100
   );
+  const score = toDisplayAtsScore(rawScore);
 
   return {
     score,
+    rawScore,
+    finalScore: score,
     titleMatch,
     skillsCoverage,
     keywordCoverage,
@@ -223,20 +245,27 @@ export function scoreResumeAgainstJd(resumeData = {}, { jdText = "", jobTitle = 
 
 export function formatAtsTooltip(report) {
   if (!report) return "";
-  const lines = [
+  const finalScore = Math.round(Number(report.finalScore ?? report.score) || 0);
+  const lines = [`Final ATS score: ${finalScore}%`];
+  if (report.rewritten && Number.isFinite(Number(report.previousScore))) {
+    lines.push(
+      `After rewrite (was ${Math.round(Number(report.previousScore))}%)`
+    );
+  } else if (Number.isFinite(Number(report.previousScore)) && Number(report.previousScore) !== finalScore) {
+    lines.push(`Before polish: ${Math.round(Number(report.previousScore))}%`);
+  }
+  lines.push(
     `Title match: ${report.titleMatch}%`,
     `Skills coverage: ${report.skillsCoverage}%`,
     `Keyword coverage: ${report.keywordCoverage}% (${report.matchedCount}/${report.totalKeywords})`,
     `Experience depth: ${report.experienceAlignment}%`
-  ];
+  );
   if (report.strongMatches?.length) {
     lines.push(`Strong matches: ${report.strongMatches.slice(0, 6).join(", ")}`);
   }
   if (report.missing?.length) {
     lines.push(`Missing: ${report.missing.slice(0, 6).join(", ")}`);
   }
-  if (report.rewritten && Number.isFinite(Number(report.previousScore))) {
-    lines.push(`Rewritten for ATS (was ${Math.round(Number(report.previousScore))}%)`);
-  }
+  lines.push(`Score band: ${ATS_SCORE_TARGET_MIN}–${ATS_SCORE_DISPLAY_MAX}% (never shown above ${ATS_SCORE_DISPLAY_MAX}%)`);
   return lines.join("\n");
 }
