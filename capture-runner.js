@@ -88,10 +88,17 @@ async function mergeIncomingJobs(incoming, sheetLinks) {
     sheetLinks
   });
   if (merged.added > 0) {
+    const checkedData = await chrome.storage.local.get("imported_jobs_checked_ids");
+    const checked = Array.isArray(checkedData.imported_jobs_checked_ids)
+      ? checkedData.imported_jobs_checked_ids.map(String)
+      : [];
+    const checkedSet = new Set(checked);
+    for (const id of merged.addedIds || []) checkedSet.add(String(id));
     await chrome.storage.local.set({
       [IMPORTED_JOBS_BY_ID_KEY]: merged.byId,
       [IMPORTED_JOBS_ORDER_KEY]: merged.order,
-      [IMPORTED_JOBS_VERSION_KEY]: merged.version
+      [IMPORTED_JOBS_VERSION_KEY]: merged.version,
+      imported_jobs_checked_ids: [...checkedSet]
     });
   }
   return merged;
@@ -182,7 +189,7 @@ async function showCaptureNotification(status) {
   try {
     await chrome.notifications.create(`capture-${Date.now()}`, {
       type: "basic",
-      iconUrl: chrome.runtime.getURL("icons/j-icon.svg"),
+      iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
       title: "Job capture complete",
       message,
       priority: 1,

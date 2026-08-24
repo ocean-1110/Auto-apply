@@ -106,6 +106,7 @@ export function buildSheetRowTsv({
 /**
  * Appends one row via the deployed Apps Script web app.
  * Uses text/plain body to avoid CORS preflight issues with Google Apps Script.
+ * Optional applicationStatus writes column J (Status) when track-status is enabled.
  */
 export async function appendJobToSpreadsheet({
   spreadsheetUrl,
@@ -118,7 +119,8 @@ export async function appendJobToSpreadsheet({
   employmentType = "",
   salaryMin = "",
   salaryMax = "",
-  datePosted = ""
+  datePosted = "",
+  applicationStatus = ""
 }) {
   const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
   if (!spreadsheetId) {
@@ -135,6 +137,7 @@ export async function appendJobToSpreadsheet({
     );
   }
 
+  const status = String(applicationStatus || "").trim();
   const payload = {
     action: "appendJob",
     spreadsheetId,
@@ -148,13 +151,20 @@ export async function appendJobToSpreadsheet({
     employmentType: employmentType || "",
     salaryMin: salaryMin || "",
     salaryMax: salaryMax || "",
-    datePosted: datePosted || ""
+    datePosted: datePosted || "",
+    ...(status ? { applicationStatus: status } : null)
   };
 
   const result = await postToSheetsWebApp(endpoint, payload);
-  if (!result.row || result.apiVersion !== "2026-08-09") {
+  const version = String(result.apiVersion || "");
+  if (!result.row || (version !== "2026-08-09" && version !== "2026-08-23")) {
     throw new Error(
       "Your Apps Script Web App is outdated (still running old code). In the extension click Copy script → paste into Apps Script → Save → Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Then try again."
+    );
+  }
+  if (status && version !== "2026-08-23") {
+    throw new Error(
+      "Status tracking needs the latest Apps Script. Click Copy script → paste → Save → Deploy a new Web App version."
     );
   }
 
@@ -164,6 +174,56 @@ export async function appendJobToSpreadsheet({
     sheetName: result.sheetName || tabName,
     row: Number(result.row) || 0,
     ...payload
+  };
+}
+
+/**
+ * Update column J (Status) for an existing row matched by job URL.
+ */
+export async function updateJobStatusInSpreadsheet({
+  spreadsheetUrl,
+  webAppUrl,
+  jdLink,
+  sheetName = "",
+  applicationStatus = "Applied"
+}) {
+  const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
+  if (!spreadsheetId) {
+    throw new Error("Invalid Google Spreadsheet link.");
+  }
+  const endpoint = validateWebAppUrl(webAppUrl);
+  const sheetGid = extractSheetGid(spreadsheetUrl);
+  const tabName = String(sheetName || "").trim();
+  if (!sheetGid && !tabName) {
+    throw new Error(
+      "Open the target sheet tab in Google Sheets, copy that browser URL (it must include gid=...), or enter the Sheet tab name."
+    );
+  }
+  const status = String(applicationStatus || "").trim();
+  if (!status) throw new Error("applicationStatus is required.");
+  if (!String(jdLink || "").trim()) throw new Error("Job URL is required to update sheet status.");
+
+  const result = await postToSheetsWebApp(endpoint, {
+    action: "updateStatus",
+    spreadsheetId,
+    sheetGid,
+    sheetName: tabName,
+    jobLink: jdLink || "",
+    applicationStatus: status
+  });
+
+  if (String(result.apiVersion || "") !== "2026-08-23") {
+    throw new Error(
+      "Status updates need the latest Apps Script. Click Copy script → paste → Save → Deploy a new Web App version."
+    );
+  }
+
+  return {
+    spreadsheetId,
+    sheetGid: result.sheetGid || sheetGid,
+    sheetName: result.sheetName || tabName,
+    row: Number(result.row) || 0,
+    applicationStatus: status
   };
 }
 

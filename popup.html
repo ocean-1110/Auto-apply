@@ -3,15 +3,17 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Resume GPT Builder</title>
+    <title>Ocean — Auto Application App</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main class="app">
       <div class="brand">
-        <img src="icons/j-icon.svg" alt="J icon" class="brand-icon" />
-        <h1>Resume GPT Builder</h1>
-        <p class="hype">Application studio</p>
+        <img src="icons/ocean-icon.svg" alt="Ocean" class="brand-icon" />
+        <div class="brand-copy">
+          <p class="brand-name">Ocean</p>
+          <h1>Auto Application App</h1>
+        </div>
         <button type="button" id="closePanel" class="secondary compact close-btn" title="Close">
           Close
         </button>
@@ -90,6 +92,9 @@
                 <strong id="genProgressState">In progress</strong>
                 <span id="genProgressDetail">Starting...</span>
               </div>
+              <button type="button" id="stopGenerateBtn" class="secondary compact stop-generate" hidden title="Stop the current resume generation">
+                Stop
+              </button>
             </div>
 
             <section id="permBanner" class="save-banner perm-banner" hidden>
@@ -100,21 +105,23 @@
               <button type="button" id="grantFolderAccess" class="compact">Grant access</button>
             </section>
 
-            <section id="saveBanner" class="save-banner" hidden>
-              <div class="save-banner-text">
-                <strong>Files saved</strong>
-                <span id="saveBannerPath"></span>
-              </div>
-              <button type="button" id="openSavedFolder" class="compact">Open folder</button>
-            </section>
+            <div class="status-dock-row">
+              <section id="saveBanner" class="save-banner" hidden>
+                <div class="save-banner-text">
+                  <strong>Files saved</strong>
+                  <span id="saveBannerPath"></span>
+                </div>
+                <button type="button" id="openSavedFolder" class="compact">Open folder</button>
+              </section>
 
-            <section id="atsScoreBadge" class="ats-badge" hidden>
-              <span class="ats-kicker">ATS</span>
-              <strong id="atsScoreValue">—</strong>
-              <div class="ats-tooltip" id="atsScoreTooltip" role="tooltip"></div>
-            </section>
+              <section id="atsScoreBadge" class="ats-badge" hidden title="ATS match score">
+                <span class="ats-kicker">ATS</span>
+                <strong id="atsScoreValue">—</strong>
+                <div class="ats-tooltip" id="atsScoreTooltip" role="tooltip"></div>
+              </section>
+            </div>
 
-            <p id="status" role="status"></p>
+            <p id="status" role="status" hidden></p>
           </div>
 
           <section class="section">
@@ -229,6 +236,13 @@
                 </label>
                 <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
               </div>
+              <label class="inline-check" title="Write status in the last sheet column (J)">
+                <input type="checkbox" id="trackSheetStatusToggle" />
+                <span>Track application status in sheet (column J)</span>
+              </label>
+              <p class="hint">
+                When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>. Redeploy Apps Script after enabling.
+              </p>
               <div class="row-split sheet-preset-actions">
                 <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for the selected profile">
                   Save for this profile

@@ -4,7 +4,7 @@ import {
   deleteCustomProfile
 } from "./profiles.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
-import { extractSpreadsheetId, buildSheetRowTsv, getExistingJobLinks } from "./sheets.js";
+import { extractSpreadsheetId, buildSheetRowTsv, getExistingJobLinks, updateJobStatusInSpreadsheet } from "./sheets.js";
 import { formatAtsTooltip } from "./ats-score.js";
 import {
   getSheetPresets,
@@ -33,163 +33,6 @@ import { getQaCount } from "./qa-store.js";
 import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
 
-const APPS_SCRIPT_SOURCE = `/**
- * Resume GPT Builder — paste into Extensions → Apps Script on your spreadsheet,
- * then Deploy → Manage deployments → Edit → Version: New version → Deploy
- * (Execute as: Me, Who has access: Anyone).
- */
-function jsonResponse(data) {
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(
-    ContentService.MimeType.JSON
-  );
-}
-
-function listSheetOptions(spreadsheet) {
-  return spreadsheet
-    .getSheets()
-    .map(function (sheet) {
-      return sheet.getName() + " (gid=" + sheet.getSheetId() + ")";
-    })
-    .join(", ");
-}
-
-function getTargetSheet(spreadsheet, sheetGid, sheetName) {
-  var name = String(sheetName || "").trim();
-  if (name) {
-    var byName = spreadsheet.getSheetByName(name);
-    if (byName) return byName;
-    throw new Error(
-      'Sheet tab "' + name + '" was not found. Available: ' + listSheetOptions(spreadsheet)
-    );
-  }
-
-  var gid = Number(sheetGid);
-  if (sheetGid !== "" && !isNaN(gid)) {
-    var sheets = spreadsheet.getSheets();
-    for (var i = 0; i < sheets.length; i += 1) {
-      if (sheets[i].getSheetId() === gid) return sheets[i];
-    }
-    throw new Error(
-      "Sheet tab was not found for gid " +
-        sheetGid +
-        ". Available: " +
-        listSheetOptions(spreadsheet)
-    );
-  }
-
-  return spreadsheet.getSheets()[0];
-}
-
-function getColumnAValues(sheet) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < 1) return [];
-  // getRange(row, column, numRows, numColumns) — NOT end-row/end-column.
-  return sheet.getRange(1, 1, lastRow, 1).getDisplayValues().map(function (row) {
-    return String(row[0] || "").trim();
-  });
-}
-
-function getJobLinks(sheet) {
-  return getColumnAValues(sheet).filter(function (value) {
-    return value !== "" && !/^job\\s*(url|link)\$/i.test(value);
-  });
-}
-
-/** First empty row in column A — matches pasting under the last job URL. */
-function findNextEmptyRowInColumnA(sheet) {
-  var values = getColumnAValues(sheet);
-  for (var i = values.length - 1; i >= 0; i -= 1) {
-    if (values[i] !== "") return i + 2; // 1-based next row
-  }
-  return 1;
-}
-
-function appendJobRow(sheet, data) {
-  var row = findNextEmptyRowInColumnA(sheet);
-  // Use A1 notation so we never confuse end-row with numRows.
-  // (Apps Script getRange(r,c,numRows,numColumns) is NOT end-row/end-column.)
-  sheet.getRange("A" + row + ":I" + row).setValues([
-    [
-      data.jobLink || "",
-      data.jobTitle || "",
-      data.companyName || "",
-      data.applicationDate || "",
-      data.workArrangement || "",
-      data.employmentType || "",
-      data.salaryMin || "",
-      data.salaryMax || "",
-      data.datePosted || ""
-    ]
-  ]);
-  return {
-    ok: true,
-    apiVersion: "2026-08-09",
-    sheetName: sheet.getName(),
-    sheetGid: String(sheet.getSheetId()),
-    row: row
-  };
-}
-
-function doPost(e) {
-  try {
-    var data = JSON.parse((e && e.postData && e.postData.contents) || "{}");
-    if (!data.spreadsheetId) {
-      throw new Error("spreadsheetId is required.");
-    }
-
-    var ss = SpreadsheetApp.openById(String(data.spreadsheetId));
-    var sheet = getTargetSheet(ss, String(data.sheetGid || ""), String(data.sheetName || ""));
-
-    if (data.action === "getJobLinks") {
-      return jsonResponse({
-        ok: true,
-        apiVersion: "2026-08-09",
-        jobLinks: getJobLinks(sheet),
-        sheetName: sheet.getName(),
-        sheetGid: String(sheet.getSheetId())
-      });
-    }
-
-    var lock = LockService.getScriptLock();
-    lock.waitLock(30000);
-    try {
-      return jsonResponse(appendJobRow(sheet, data));
-    } finally {
-      lock.releaseLock();
-    }
-  } catch (err) {
-    return jsonResponse({ ok: false, error: String(err && err.message ? err.message : err) });
-  }
-}
-
-function doGet(e) {
-  var params = (e && e.parameter) || {};
-  if (params.action === "getJobLinks") {
-    try {
-      if (!params.spreadsheetId) throw new Error("spreadsheetId is required.");
-      var ss = SpreadsheetApp.openById(String(params.spreadsheetId));
-      var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
-      return jsonResponse({
-        ok: true,
-        apiVersion: "2026-08-09",
-        jobLinks: getJobLinks(sheet),
-        sheetName: sheet.getName(),
-        sheetGid: String(sheet.getSheetId())
-      });
-    } catch (err) {
-      return jsonResponse({ ok: false, error: String(err && err.message ? err.message : err) });
-    }
-  }
-  return ContentService.createTextOutput(
-    JSON.stringify({
-      ok: true,
-      apiVersion: "2026-08-09",
-      message: "Resume GPT Builder sheet append endpoint is running."
-    })
-  ).setMimeType(ContentService.MimeType.JSON);
-}
-`;
-
 const statusEl = document.getElementById("status");
 const atsScoreBadgeEl = document.getElementById("atsScoreBadge");
 const atsScoreValueEl = document.getElementById("atsScoreValue");
@@ -211,6 +54,7 @@ const aiQaSectionEl = document.getElementById("aiQaSection");
 const spreadsheetUrlEl = document.getElementById("spreadsheetUrl");
 const sheetTabNameEl = document.getElementById("sheetTabName");
 const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
+const trackSheetStatusToggleEl = document.getElementById("trackSheetStatusToggle");
 const sheetPresetSelectEl = document.getElementById("sheetPresetSelect");
 const sheetPresetLabelEl = document.getElementById("sheetPresetLabel");
 const saveSheetPresetBtn = document.getElementById("saveSheetPreset");
@@ -252,6 +96,7 @@ const openSavedFolderBtn = document.getElementById("openSavedFolder");
 const genProgressEl = document.getElementById("genProgress");
 const genProgressStateEl = document.getElementById("genProgressState");
 const genProgressDetailEl = document.getElementById("genProgressDetail");
+const stopGenerateBtn = document.getElementById("stopGenerateBtn");
 
 // Imported CSV jobs UI
 const jobsSidebarEl = document.getElementById("jobsSidebar");
@@ -328,11 +173,32 @@ function handleExtensionContextInvalidated() {
 }
 
 function setStatus(message, kind = "") {
-  statusEl.textContent = message;
+  const text = String(message || "").trim();
   statusEl.classList.remove("is-running", "is-done", "is-error");
-  if (kind === "running" || kind === "done" || kind === "error") {
-    statusEl.classList.add(`is-${kind}`);
+
+  if (kind === "running") {
+    statusEl.hidden = false;
+    statusEl.textContent = text || "Working...";
+    statusEl.classList.add("is-running");
+    return;
   }
+
+  const looksLikeError =
+    kind === "error" ||
+    (/fail|error|could not|missing|invalid|canceled|cancelled/i.test(text) &&
+      text &&
+      !/^ready\.?$/i.test(text));
+
+  if (looksLikeError) {
+    statusEl.hidden = false;
+    statusEl.textContent = text;
+    statusEl.classList.add("is-error");
+    return;
+  }
+
+  // Idle / Ready / Done / info — hide; save banner + ATS color show outcome.
+  statusEl.hidden = true;
+  statusEl.textContent = "";
 }
 
 function renderAtsBadge(report) {
@@ -360,7 +226,8 @@ function readSheetFields() {
     label: (sheetPresetLabelEl?.value || "").trim(),
     spreadsheetUrl: (spreadsheetUrlEl?.value || "").trim(),
     sheetName: (sheetTabNameEl?.value || "").trim(),
-    webAppUrl: (sheetsWebAppUrlEl?.value || "").trim()
+    webAppUrl: (sheetsWebAppUrlEl?.value || "").trim(),
+    trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
   };
 }
 
@@ -374,6 +241,9 @@ function applySheetFields(preset = null, { keepWebApp = true } = {}) {
     if (sheetsWebAppUrlEl) {
       const nextUrl = preset?.webAppUrl || (keepWebApp ? sheetsWebAppUrlEl.value : "");
       sheetsWebAppUrlEl.value = nextUrl || "";
+    }
+    if (trackSheetStatusToggleEl) {
+      trackSheetStatusToggleEl.checked = Boolean(preset?.trackApplicationStatus);
     }
   } finally {
     applyingSheetPreset = false;
@@ -452,7 +322,7 @@ function updateGenerationProgress({ running, statusText }) {
   if (!genProgressEl) return;
 
   const text = String(statusText || "").trim();
-  const failed = /fail/i.test(text);
+  if (stopGenerateBtn) stopGenerateBtn.hidden = !running;
 
   if (running) {
     genProgressEl.hidden = false;
@@ -463,27 +333,18 @@ function updateGenerationProgress({ running, statusText }) {
     return;
   }
 
-  // Show Done / Failed after a run (or when status already says saved/failed).
-  if (wasGenerationRunning || /\bsaved\b/i.test(text) || failed) {
-    if (!text && !wasGenerationRunning) {
-      genProgressEl.hidden = true;
-      return;
-    }
-    genProgressEl.hidden = false;
-    genProgressEl.classList.toggle("is-error", failed);
-    genProgressEl.classList.toggle("is-done", !failed);
-    if (genProgressStateEl) {
-      genProgressStateEl.textContent = failed ? "Failed" : "Done";
-    }
-    if (genProgressDetailEl) {
-      genProgressDetailEl.textContent =
-        text || (failed ? "Generation failed." : "Files are ready.");
-    }
-    setStatus(text || (failed ? "Generation failed." : "Done."), failed ? "error" : "done");
+  // Hide progress after the run finishes — save banner + ATS color carry the outcome.
+  genProgressEl.hidden = true;
+  genProgressEl.classList.remove("is-done", "is-error");
+  if (stopGenerateBtn) stopGenerateBtn.hidden = true;
+
+  if (/fail/i.test(text) || /\bcancel/i.test(text)) {
+    setStatus(text, "error");
     return;
   }
 
-  if (text) setStatus(text);
+  // Clear idle / Ready / Done text from the status line.
+  setStatus("", "done");
 }
 
 function populateTemplateSelect(selectedId) {
@@ -563,7 +424,8 @@ async function persistJobFields() {
     last_jd_text: jdTextEl.value,
     spreadsheet_url: spreadsheetUrlEl.value.trim(),
     sheets_sheet_name: (sheetTabNameEl?.value || "").trim(),
-    sheets_web_app_url: sheetsWebAppUrlEl.value.trim()
+    sheets_web_app_url: sheetsWebAppUrlEl.value.trim(),
+    track_application_status: Boolean(trackSheetStatusToggleEl?.checked)
   });
 }
 
@@ -685,8 +547,17 @@ async function refreshImportedJobsFromStorage() {
   importedJobsSelectedId = data.imported_jobs_selected_id || null;
   importedJobsVersion = Number(data.imported_jobs_version || 0);
   importedJobsChecked.clear();
-  for (const id of data.imported_jobs_checked_ids || []) {
-    if (importedJobsById[id]) importedJobsChecked.add(String(id));
+  const storedChecked = data.imported_jobs_checked_ids;
+  if (Array.isArray(storedChecked)) {
+    for (const id of storedChecked) {
+      if (importedJobsById[id]) importedJobsChecked.add(String(id));
+    }
+  } else {
+    // First load / no preference yet — check every job by default.
+    for (const id of importedJobsOrder) {
+      if (importedJobsById[id]?.status !== "unavailable") importedJobsChecked.add(String(id));
+    }
+    persistCheckedJobs();
   }
 
   renderImportedJobs();
@@ -829,6 +700,9 @@ function renderImportedJobs() {
     const summary = document.createElement("summary");
     summary.className = "job-summary";
 
+    const selectCol = document.createElement("div");
+    selectCol.className = "job-select-col";
+
     const check = document.createElement("input");
     check.type = "checkbox";
     check.className = "job-check";
@@ -844,7 +718,26 @@ function renderImportedJobs() {
       persistCheckedJobs();
       updateBatchBar();
     });
-    summary.appendChild(check);
+    selectCol.appendChild(check);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "job-remove";
+    removeBtn.title = "Remove this job from the list";
+    removeBtn.setAttribute("aria-label", "Remove job");
+    removeBtn.innerHTML =
+      '<svg class="job-remove-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+      '<path d="M9 3h6l1 2h4v2H4V5h4l1-2z" fill="currentColor" opacity="0.9"/>' +
+      '<path d="M6 8h12l-.8 12.2A2 2 0 0 1 15.2 22H8.8a2 2 0 0 1-2-1.8L6 8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>' +
+      '<path d="M10 11v7M14 11v7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+      "</svg>";
+    removeBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await removeImportedJob(jobId);
+    });
+    selectCol.appendChild(removeBtn);
+    summary.appendChild(selectCol);
 
     const title = document.createElement("span");
     title.className = "job-summary-title";
@@ -859,6 +752,7 @@ function renderImportedJobs() {
 
     const isCompleted = job.status === "completed";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
+    removeBtn.disabled = isInProgress;
 
     if (isUnavailable) {
       const blockedLabel = document.createElement("button");
@@ -878,18 +772,6 @@ function renderImportedJobs() {
         await unblockImportedJob(jobId);
       });
       summary.appendChild(unblockBtn);
-
-      const removeBlockedBtn = document.createElement("button");
-      removeBlockedBtn.type = "button";
-      removeBlockedBtn.className = "secondary job-remove";
-      removeBlockedBtn.textContent = "Remove";
-      removeBlockedBtn.title = "Remove this job from the list";
-      removeBlockedBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await removeImportedJob(jobId);
-      });
-      summary.appendChild(removeBlockedBtn);
 
       card.appendChild(summary);
       frag.appendChild(card);
@@ -920,19 +802,6 @@ function renderImportedJobs() {
 
     summary.appendChild(applySummaryBtn);
 
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "secondary job-remove";
-    removeBtn.textContent = "Remove";
-    removeBtn.title = "Remove this job from the list";
-    removeBtn.disabled = isInProgress;
-    removeBtn.addEventListener("click", async (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      await removeImportedJob(jobId);
-    });
-    summary.appendChild(removeBtn);
-
     card.appendChild(summary);
 
     const details = document.createElement("div");
@@ -953,9 +822,12 @@ function renderImportedJobs() {
     actions.className = "job-actions";
 
     const seeBtn = document.createElement("button");
-    seeBtn.className = "secondary";
-    seeBtn.textContent = "See job";
-    seeBtn.title = "Open the job page in a browser tab";
+    seeBtn.type = "button";
+    seeBtn.className = "job-action-icon";
+    seeBtn.title = "See job — open the job page";
+    seeBtn.setAttribute("aria-label", "See job");
+    seeBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M14 3h7v7h-2V6.4l-9.3 9.3-1.4-1.4L17.6 5H14V3z"/><path fill="currentColor" d="M5 5h6v2H7v10h10v-4h2v6H5V5z"/></svg>';
     const jobUrl = String(job.jdLink || job.url || "").trim();
     seeBtn.disabled = !jobUrl;
     seeBtn.addEventListener("click", async (e) => {
@@ -966,9 +838,13 @@ function renderImportedJobs() {
     actions.appendChild(seeBtn);
 
     const completeBtn = document.createElement("button");
-    completeBtn.className = "secondary";
+    completeBtn.type = "button";
+    completeBtn.className = "job-action-icon is-success";
+    completeBtn.title = "Mark completed / applied";
+    completeBtn.setAttribute("aria-label", "Mark completed");
+    completeBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 4.8 12.2l1.4-1.4 3 3 8-8 1.4 1.4-9.4 9.4z"/></svg>';
     if (["ready_for_review", "needs_review"].includes(String(job.status))) {
-      completeBtn.textContent = "Mark completed";
       completeBtn.disabled = false;
       completeBtn.addEventListener("click", async (e) => {
         e.preventDefault();
@@ -976,17 +852,18 @@ function renderImportedJobs() {
         await markImportedJobCompleted(jobId);
       });
     } else {
-      completeBtn.textContent = "Mark completed";
       completeBtn.disabled = true;
     }
-
     actions.appendChild(completeBtn);
 
     const blockBtn = document.createElement("button");
-    blockBtn.className = "secondary";
+    blockBtn.type = "button";
+    blockBtn.className = "job-action-icon is-danger";
     if (isUnavailable) {
-      blockBtn.textContent = "Unblock";
-      blockBtn.title = "Restore this job so you can apply again";
+      blockBtn.title = "Unblock — restore this job";
+      blockBtn.setAttribute("aria-label", "Unblock");
+      blockBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a5 5 0 0 1 5 5v3h1a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h1V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v3h6V7a3 3 0 0 0-3-3z"/></svg>';
       blockBtn.disabled = false;
       blockBtn.addEventListener("click", async (e) => {
         e.preventDefault();
@@ -994,8 +871,10 @@ function renderImportedJobs() {
         await unblockImportedJob(jobId);
       });
     } else {
-      blockBtn.textContent = "Block";
-      blockBtn.title = "Mark this job as no longer available / disabled";
+      blockBtn.title = "Block — mark unavailable";
+      blockBtn.setAttribute("aria-label", "Block");
+      blockBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.3 12.9L7.1 5.7A7.96 7.96 0 0 1 12 4zM5.7 7.1 16.9 18.3A8 8 0 0 1 5.7 7.1z"/></svg>';
       blockBtn.disabled = isInProgress;
       blockBtn.addEventListener("click", async (e) => {
         e.preventDefault();
@@ -1015,25 +894,15 @@ function renderImportedJobs() {
       details.appendChild(errP);
     }
 
-    const detail = String(job?.statusDetail || "").trim();
-    if (job.status !== "failed" && detail && job.status !== "imported") {
-      const d = document.createElement("p");
-      d.className = "job-meta";
-      d.textContent = detail.slice(0, 220);
-      details.appendChild(d);
-    }
-
     const openSelected = (event) => {
       event?.stopPropagation?.();
       importedJobsSelectedId = jobId;
       chrome.storage.local.set({ imported_jobs_selected_id: jobId }).catch(() => {});
-      // Copy values into the existing manual editor.
       if (jobTitleEl) jobTitleEl.value = job.jobTitle || "";
       if (companyNameEl) companyNameEl.value = job.companyName || "";
       if (jdLinkEl) jdLinkEl.value = job.jdLink || "";
       if (jdTextEl) jdTextEl.value = job.jdText || "";
       persistJobFields().catch(() => {});
-      setStatus(`Selected imported job: ${job.jobTitle || jobId}`);
     };
 
     summary.addEventListener("click", (e) => {
@@ -1146,7 +1015,7 @@ async function replaceImportedJobs(jobs) {
     imported_jobs_by_id: byId,
     imported_jobs_order: order,
     imported_jobs_selected_id: null,
-    imported_jobs_checked_ids: [],
+    imported_jobs_checked_ids: order.slice(),
     imported_jobs_version: now
   });
 
@@ -1154,6 +1023,7 @@ async function replaceImportedJobs(jobs) {
   importedJobsOrder = order;
   importedJobsSelectedId = null;
   importedJobsChecked.clear();
+  for (const id of order) importedJobsChecked.add(id);
   importedJobsVersion = now;
 
   renderImportedJobs();
@@ -1274,7 +1144,30 @@ async function markImportedJobCompleted(jobId) {
     source: job.source || "",
     detail: "Completed by user."
   });
-  setStatus(`Marked completed: ${job.jobTitle || jobId}`);
+
+  let sheetNote = "";
+  if (trackSheetStatusToggleEl?.checked) {
+    const spreadsheetUrl = (spreadsheetUrlEl?.value || "").trim();
+    const sheetsWebAppUrl = (sheetsWebAppUrlEl?.value || "").trim();
+    const sheetName = (sheetTabNameEl?.value || "").trim();
+    const jdLink = String(job.jdLink || job.url || "").trim();
+    if (spreadsheetUrl && sheetsWebAppUrl && jdLink) {
+      try {
+        await updateJobStatusInSpreadsheet({
+          spreadsheetUrl,
+          webAppUrl: sheetsWebAppUrl,
+          sheetName,
+          jdLink,
+          applicationStatus: "Applied"
+        });
+        sheetNote = " Sheet status → Applied.";
+      } catch (err) {
+        sheetNote = ` Sheet status update failed: ${String(err?.message || err)}`;
+      }
+    }
+  }
+
+  setStatus(`Marked completed: ${job.jobTitle || jobId}.${sheetNote}`);
 }
 
 async function setImportedJobUnavailable(jobId, { detail = "Marked no longer available." } = {}) {
@@ -1462,6 +1355,7 @@ async function loadSettings() {
     "spreadsheet_url",
     "sheets_sheet_name",
     "sheets_web_app_url",
+    "track_application_status",
     "generation_status",
     "generation_running",
     "pending_fs_write",
@@ -1486,12 +1380,20 @@ async function loadSettings() {
   spreadsheetUrlEl.value = data.spreadsheet_url || "";
   if (sheetTabNameEl) sheetTabNameEl.value = data.sheets_sheet_name || "";
   sheetsWebAppUrlEl.value = data.sheets_web_app_url || "";
+  if (trackSheetStatusToggleEl) {
+    trackSheetStatusToggleEl.checked = Boolean(data.track_application_status);
+  }
   await refreshSheetPresets();
   const boundPreset = await getPresetForProfile(profileSelectEl.value);
   if (boundPreset) {
     applySheetFields(boundPreset);
     await persistJobFields();
-  } else populateSheetPresetSelect("");
+  } else {
+    populateSheetPresetSelect("");
+    if (trackSheetStatusToggleEl && data.track_application_status != null) {
+      trackSheetStatusToggleEl.checked = Boolean(data.track_application_status);
+    }
+  }
   syncSheetSummaryNote();
   await refreshAtsBadge();
 
@@ -1654,7 +1556,10 @@ async function scrapeCurrentJobPage() {
 
 async function copyAppsScript() {
   try {
-    await navigator.clipboard.writeText(APPS_SCRIPT_SOURCE);
+    const res = await fetch(chrome.runtime.getURL("apps-script/Code.gs"));
+    const text = await res.text();
+    if (!String(text || "").trim()) throw new Error("empty");
+    await navigator.clipboard.writeText(text);
     setStatus("Apps Script copied. Paste it into Extensions → Apps Script, then deploy as Web app.");
   } catch {
     setStatus("Could not copy. Open apps-script/Code.gs in the project instead.");
@@ -1729,6 +1634,7 @@ async function collectBatchGenerateSettings() {
     spreadsheet_url: spreadsheetUrl,
     sheets_sheet_name: sheetTabName,
     sheets_web_app_url: sheetsWebAppUrl,
+    track_application_status: Boolean(trackSheetStatusToggleEl?.checked),
     generate_resume_only: isResumeOnlyEnabled()
   });
 
@@ -1739,7 +1645,8 @@ async function collectBatchGenerateSettings() {
       spreadsheetUrl,
       sheetName: sheetTabName,
       sheetsWebAppUrl,
-      templateId
+      templateId,
+      trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
     }
   };
 }
@@ -1808,6 +1715,7 @@ async function collectJobMetaOrShowError() {
     spreadsheet_url: spreadsheetUrl,
     sheets_sheet_name: sheetTabName,
     sheets_web_app_url: sheetsWebAppUrl,
+    track_application_status: Boolean(trackSheetStatusToggleEl?.checked),
     generate_resume_only: isResumeOnlyEnabled()
   });
 
@@ -1828,7 +1736,8 @@ async function collectJobMetaOrShowError() {
       salaryMin: scrapedJobMeta?.salaryMin || "",
       salaryMax: scrapedJobMeta?.salaryMax || "",
       datePosted: scrapedJobMeta?.datePosted || "",
-      resumeOnly: isResumeOnlyEnabled()
+      resumeOnly: isResumeOnlyEnabled(),
+      trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
     }
   };
 }
@@ -2377,6 +2286,18 @@ scrapePageBtn?.addEventListener("click", () => {
 copyAppsScriptBtn.addEventListener("click", copyAppsScript);
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
+stopGenerateBtn?.addEventListener("click", () => {
+  chrome.runtime
+    .sendMessage({ type: "cancel_generation" })
+    .then(() => {
+      setStatus("Stopping generation…", "running");
+      if (genProgressDetailEl) genProgressDetailEl.textContent = "Stopping…";
+    })
+    .catch((err) => setStatus(String(err?.message || err), "error"));
+});
+trackSheetStatusToggleEl?.addEventListener("change", () => {
+  persistJobFields().catch(() => {});
+});
 autofillBtn.addEventListener("click", () => {
   runAutofillOnCurrentPage().catch((err) => setStatus(String(err.message || err)));
 });
@@ -2641,26 +2562,6 @@ loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || er
 setSidebarMode("manual");
 refreshImportedJobsFromStorage().catch(() => {});
 
-const PANEL_LOCK_WIDTH = 1280;
-let lockingPanelWidth = false;
-async function lockPanelWidth() {
-  if (lockingPanelWidth || !isExtensionContextValid()) return;
-  lockingPanelWidth = true;
-  try {
-    const win = await chrome.windows.getCurrent();
-    if (win?.id != null && Math.abs(Number(win.width || 0) - PANEL_LOCK_WIDTH) > 2) {
-      await chrome.windows.update(win.id, { width: PANEL_LOCK_WIDTH });
-    }
-  } catch {
-    /* popup may not be a windows-managed panel */
-  } finally {
-    lockingPanelWidth = false;
-  }
-}
-window.addEventListener("resize", () => {
-  lockPanelWidth().catch(() => {});
-});
-lockPanelWidth().catch(() => {});
 panelPollTimer = setInterval(async () => {
   if (extensionContextDead) return;
   if (!isExtensionContextValid()) {

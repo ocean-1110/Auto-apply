@@ -14,15 +14,19 @@
  *
  * After generation, the extension appends:
  *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName, applicationDate,
- *   workArrangement, employmentType, salaryMin, salaryMax, datePosted
+ *   workArrangement, employmentType, salaryMin, salaryMax, datePosted,
+ *   applicationStatus (optional — column J when track status is enabled)
  *
  * Row order matches your sheet headers:
  *   A JOB URL | B JOB TITLE | C COMPANY NAME | D Application Date |
- *   E Work arrangement | F Employment type | G Salary min | H Salary max | I Date posted
+ *   E Work arrangement | F Employment type | G Salary min | H Salary max | I Date posted |
+ *   J Status (optional: "Resume Generated" → "Applied")
  *
  * Rows are written on the selected tab, in the first empty cell of column A
  * (same place you'd paste after Copy row).
  */
+var API_VERSION = "2026-08-23";
+
 function jsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(
     ContentService.MimeType.JSON
@@ -89,29 +93,67 @@ function findNextEmptyRowInColumnA(sheet) {
   return 1;
 }
 
+function normalizeJobLink(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function findRowByJobLink(sheet, jobLink) {
+  var target = normalizeJobLink(jobLink);
+  if (!target) return 0;
+  var values = getColumnAValues(sheet);
+  for (var i = 0; i < values.length; i += 1) {
+    if (normalizeJobLink(values[i]) === target) return i + 1;
+  }
+  return 0;
+}
+
 function appendJobRow(sheet, data) {
   var row = findNextEmptyRowInColumnA(sheet);
-  // Use A1 notation so we never confuse end-row with numRows.
-  // (Apps Script getRange(r,c,numRows,numColumns) is NOT end-row/end-column.)
-  sheet.getRange("A" + row + ":I" + row).setValues([
-    [
-      data.jobLink || "",
-      data.jobTitle || "",
-      data.companyName || "",
-      data.applicationDate || "",
-      data.workArrangement || "",
-      data.employmentType || "",
-      data.salaryMin || "",
-      data.salaryMax || "",
-      data.datePosted || ""
-    ]
-  ]);
+  var status = String(data.applicationStatus || "").trim();
+  var cells = [
+    data.jobLink || "",
+    data.jobTitle || "",
+    data.companyName || "",
+    data.applicationDate || "",
+    data.workArrangement || "",
+    data.employmentType || "",
+    data.salaryMin || "",
+    data.salaryMax || "",
+    data.datePosted || ""
+  ];
+  if (status) {
+    cells.push(status);
+    sheet.getRange("A" + row + ":J" + row).setValues([cells]);
+  } else {
+    sheet.getRange("A" + row + ":I" + row).setValues([cells]);
+  }
   return {
     ok: true,
-    apiVersion: "2026-08-09",
+    apiVersion: API_VERSION,
     sheetName: sheet.getName(),
     sheetGid: String(sheet.getSheetId()),
     row: row
+  };
+}
+
+function updateJobStatus(sheet, data) {
+  var status = String(data.applicationStatus || "").trim();
+  if (!status) throw new Error("applicationStatus is required.");
+  var row = findRowByJobLink(sheet, data.jobLink);
+  if (!row) {
+    throw new Error('No sheet row found for job URL: "' + String(data.jobLink || "") + '"');
+  }
+  sheet.getRange("J" + row).setValue(status);
+  return {
+    ok: true,
+    apiVersion: API_VERSION,
+    sheetName: sheet.getName(),
+    sheetGid: String(sheet.getSheetId()),
+    row: row,
+    applicationStatus: status
   };
 }
 
@@ -128,7 +170,7 @@ function doPost(e) {
     if (data.action === "getJobLinks") {
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-09",
+        apiVersion: API_VERSION,
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -138,6 +180,9 @@ function doPost(e) {
     var lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
+      if (data.action === "updateStatus") {
+        return jsonResponse(updateJobStatus(sheet, data));
+      }
       return jsonResponse(appendJobRow(sheet, data));
     } finally {
       lock.releaseLock();
@@ -156,7 +201,7 @@ function doGet(e) {
       var sheet = getTargetSheet(ss, String(params.sheetGid || ""), String(params.sheetName || ""));
       return jsonResponse({
         ok: true,
-        apiVersion: "2026-08-09",
+        apiVersion: API_VERSION,
         jobLinks: getJobLinks(sheet),
         sheetName: sheet.getName(),
         sheetGid: String(sheet.getSheetId())
@@ -168,7 +213,7 @@ function doGet(e) {
   return ContentService.createTextOutput(
     JSON.stringify({
       ok: true,
-      apiVersion: "2026-08-09",
+      apiVersion: API_VERSION,
       message: "Resume GPT Builder sheet append endpoint is running."
     })
   ).setMimeType(ContentService.MimeType.JSON);

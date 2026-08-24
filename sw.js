@@ -13,6 +13,7 @@ import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import {
   chatCompletion,
+  setChatAbortSignal,
   DEFAULT_OPENAI_MODEL,
   RESUME_JSON_SYSTEM_PROMPT
 } from "./openai.js";
@@ -52,6 +53,8 @@ import {
 
 // Service worker entry (v1.3.5)
 let isRunning = false;
+let generationCancelRequested = false;
+let generationAbortController = null;
 let keepAliveTimer = null;
 let panelWindowId = null;
 
@@ -117,7 +120,7 @@ async function findExistingPanelWindow() {
 async function openPanelWindow() {
   const existing = await findExistingPanelWindow();
   if (existing?.id != null) {
-    await chrome.windows.update(existing.id, { focused: true, width: PANEL_WIDTH });
+    await chrome.windows.update(existing.id, { focused: true });
     const activeTab = existing.tabs?.find((t) => t.active) || existing.tabs?.[0];
     if (activeTab?.id != null) {
       try {
@@ -147,14 +150,6 @@ chrome.windows.onRemoved.addListener((windowId) => {
     lastFocusedNormalWindowId = null;
   }
 });
-
-if (chrome.windows.onBoundsChanged) {
-  chrome.windows.onBoundsChanged.addListener((win) => {
-    if (!win || win.id !== panelWindowId) return;
-    if (Math.abs(Number(win.width || 0) - PANEL_WIDTH) <= 2) return;
-    chrome.windows.update(win.id, { width: PANEL_WIDTH }).catch(() => {});
-  });
-}
 
 /** Remember the most recent normal (browser) window the user focused. */
 function rememberFocusedNormalWindow(windowId) {
@@ -292,9 +287,11 @@ async function sendMessageToAllFrames(tabId, message, { attempts = 2 } = {}) {
 
 chrome.runtime.onInstalled.addListener(async () => {
   isRunning = false;
+  generationCancelRequested = false;
   stopKeepAlive();
   await chrome.storage.local.set({
     generation_running: false,
+    generation_cancel_requested: false,
     generation_status: "Ready."
   });
   recoverInterruptedImportedJobs().catch(() => {});
@@ -303,9 +300,11 @@ chrome.runtime.onInstalled.addListener(async () => {
 
 chrome.runtime.onStartup.addListener(async () => {
   isRunning = false;
+  generationCancelRequested = false;
   stopKeepAlive();
   await chrome.storage.local.set({
     generation_running: false,
+    generation_cancel_requested: false,
     generation_status: "Ready."
   });
   recoverInterruptedImportedJobs().catch(() => {});
@@ -316,6 +315,40 @@ registerCaptureAlarmListener();
 
 async function setStatus(status) {
   await chrome.storage.local.set({ generation_status: status });
+}
+
+function clearGenerationCancel() {
+  generationCancelRequested = false;
+  generationAbortController = new AbortController();
+  setChatAbortSignal(generationAbortController.signal);
+  chrome.storage.local.set({ generation_cancel_requested: false }).catch(() => {});
+}
+
+function requestGenerationCancel() {
+  generationCancelRequested = true;
+  try {
+    generationAbortController?.abort();
+  } catch {
+    /* ignore */
+  }
+  chrome.storage.local.set({ generation_cancel_requested: true }).catch(() => {});
+}
+
+function finishGenerationCancelState() {
+  setChatAbortSignal(null);
+  generationAbortController = null;
+  generationCancelRequested = false;
+  chrome.storage.local.set({ generation_cancel_requested: false }).catch(() => {});
+}
+
+function assertNotCancelled() {
+  if (generationCancelRequested || generationAbortController?.signal?.aborted) {
+    throw new Error("Generation cancelled by user.");
+  }
+}
+
+function isCancelError(err) {
+  return /cancelled by user/i.test(String(err?.message || err || ""));
 }
 
 async function getImportedJobsById() {
@@ -1956,7 +1989,7 @@ async function showSaveNotification(pathLabel) {
   try {
     await chrome.notifications.create(`save-${Date.now()}`, {
       type: "basic",
-      iconUrl: chrome.runtime.getURL("icons/j-icon.svg"),
+      iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
       title: "Resume files saved",
       message: pathLabel || "Files saved successfully.",
       priority: 1,
@@ -2096,6 +2129,7 @@ async function commitOutputBundle(folderName, files) {
 }
 
 async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, model, runCoverLetter = true } = {}) {
+  assertNotCancelled();
   await setStatus("Rendering resume from JSON...");
   const bundle = await buildResumeFileBundle(output, resumeData, jobMeta);
   const { folderName, resumeFileBase, files } = bundle;
@@ -2158,6 +2192,7 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
   } + jd.txt + HTML)${coverLetterWarning}`;
 
   if (jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) {
+    assertNotCancelled();
     await setStatus("Appending row to Google Sheet...");
     try {
       const sheetResult = await appendJobToSpreadsheet({
@@ -2171,7 +2206,8 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
         employmentType: jobMeta.employmentType || "",
         salaryMin: jobMeta.salaryMin || "",
         salaryMax: jobMeta.salaryMax || "",
-        datePosted: jobMeta.datePosted || ""
+        datePosted: jobMeta.datePosted || "",
+        applicationStatus: jobMeta.trackApplicationStatus ? "Resume Generated" : ""
       });
       const sheetLabel = sheetResult.sheetName
         ? `"${sheetResult.sheetName}" row ${sheetResult.row}`
@@ -2186,6 +2222,7 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
 }
 
 async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
+  assertNotCancelled();
   const normalized = normalizeSkills(data?.skills);
   if (hasRenderableSkills(normalized, 3)) {
     data.skills = normalized;
@@ -2253,12 +2290,14 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const resumeOnly = meta.resumeOnly === true;
   await ensureCostSession(meta.jdLink || meta.jobTitle || "");
 
+  assertNotCancelled();
   await setStatus("Building resume prompt...");
   const resumePrompt = await buildPrompt(profileId, meta.jdText || "", {
     jobTitle: meta.jobTitle || "",
     companyName: meta.companyName || ""
   });
 
+  assertNotCancelled();
   await setStatus("Calling OpenAI for resume JSON...");
   const resumeResult = await chatCompletion({
     apiKey,
@@ -2283,6 +2322,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     outputTokens: resumeResult.usage?.completion_tokens
   });
 
+  assertNotCancelled();
   let data = extractResumeJson(jsonText);
   if (!data) {
     throw new Error(
@@ -2296,6 +2336,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jdText: meta.jdText || ""
   });
 
+  assertNotCancelled();
   await setStatus("Scoring resume against the job description...");
   let improved;
   try {
@@ -2309,6 +2350,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     });
     data = improved.data || data;
   } catch (rewriteErr) {
+    if (isCancelError(rewriteErr)) throw rewriteErr;
     await setStatus(
       `ATS rewrite skipped (${String(rewriteErr?.message || rewriteErr)}). Using the generated resume.`
     );
@@ -2321,6 +2363,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     };
   }
 
+  assertNotCancelled();
   data = await ensureResumeSkills(data, {
     apiKey,
     model,
@@ -2349,12 +2392,14 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       : `Resume JSON ready (ATS ${atsReport.score}%).${rewriteNote} Rendering PDF + cover letter...`
   );
 
+  assertNotCancelled();
   const saved = await saveResumeAndCoverLetter(rawText, data, meta, {
     apiKey,
     model,
     runCoverLetter: !resumeOnly
   });
 
+  assertNotCancelled();
   try {
     await setStatus("Building application brief for form fill...");
     const applicantInfo = await getApplicantInfo(profileId);
@@ -2366,7 +2411,8 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       applicantInfo
     });
     await storeApplicationBrief(brief);
-  } catch {
+  } catch (briefErr) {
+    if (isCancelError(briefErr)) throw briefErr;
     await storeApplicationBrief(null);
   }
 
@@ -2397,10 +2443,22 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "cancel_generation") {
+    if (!isRunning) {
+      safeSendResponse(sendResponse, { ok: false, error: "Nothing is generating." });
+      return false;
+    }
+    requestGenerationCancel();
+    setStatus("Generation cancelled by user.");
+    safeSendResponse(sendResponse, { ok: true, cancelling: true });
+    return false;
+  }
+
   if (message?.type === "reset_generation_state") {
     (async () => {
       try {
         isRunning = false;
+        finishGenerationCancelState();
         stopKeepAlive();
         await chrome.storage.local.set({
           generation_status: "Reset complete. Ready for next run.",
@@ -2770,6 +2828,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     isRunning = true;
+    clearGenerationCancel();
     startKeepAlive();
     chrome.storage.local.set({ generation_running: true });
 
@@ -2846,7 +2905,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         const resumeOnlyStored =
           (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
-        const genMeta = { ...jobMeta, resumeOnly: resumeOnlyStored };
+        const trackStored =
+          (await chrome.storage.local.get("track_application_status")).track_application_status ===
+          true;
+        const genMeta = {
+          ...jobMeta,
+          resumeOnly: resumeOnlyStored,
+          trackApplicationStatus:
+            jobMeta.trackApplicationStatus === true || trackStored
+        };
         await setImportedJobStatus(importedJobId, {
           status: "generating",
           statusDetail: resumeOnlyStored
@@ -2926,24 +2993,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         );
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Imported job failed: ${error}`);
-        await setImportedJobStatus(importedJobId, {
-          status: "failed",
-          statusDetail: error,
-          profileId
-        });
-        await appendApplicationEvent({
-          profileId,
-          importedJobId,
-          jobTitle: jobMeta.jobTitle || "",
-          companyName: jobMeta.companyName || "",
-          jdLink: jobMeta.jdLink || "",
-          status: "failed",
-          detail: error
-        });
+        if (isCancelError(err)) {
+          await setStatus("Generation cancelled by user.");
+          await setImportedJobStatus(importedJobId, {
+            status: "failed",
+            statusDetail: "Cancelled by user.",
+            profileId
+          });
+        } else {
+          await setStatus(`Imported job failed: ${error}`);
+          await setImportedJobStatus(importedJobId, {
+            status: "failed",
+            statusDetail: error,
+            profileId
+          });
+          await appendApplicationEvent({
+            profileId,
+            importedJobId,
+            jobTitle: jobMeta.jobTitle || "",
+            companyName: jobMeta.companyName || "",
+            jdLink: jobMeta.jdLink || "",
+            status: "failed",
+            detail: error
+          });
+        }
       } finally {
         await chrome.storage.local.set({ generation_running: false });
         isRunning = false;
+        finishGenerationCancelState();
         stopKeepAlive();
       }
     })();
@@ -2994,6 +3071,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     isRunning = true;
+    clearGenerationCancel();
     startKeepAlive();
     chrome.storage.local.set({ generation_running: true });
     safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
@@ -3001,12 +3079,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       let okCount = 0;
       let failCount = 0;
+      let cancelled = false;
       try {
         const byId = await getImportedJobsById();
         const resumeOnlyStored =
           (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
+        const trackStored =
+          (await chrome.storage.local.get("track_application_status")).track_application_status ===
+          true;
 
         for (let i = 0; i < jobIds.length; i += 1) {
+          try {
+            assertNotCancelled();
+          } catch {
+            cancelled = true;
+            break;
+          }
+
           const importedJobId = jobIds[i];
           const job = byId[importedJobId];
           if (!job) {
@@ -3038,7 +3127,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             salaryMin: job.salaryMin || "",
             salaryMax: job.salaryMax || "",
             datePosted: job.datePosted || "",
-            resumeOnly: resumeOnlyStored
+            resumeOnly: resumeOnlyStored,
+            trackApplicationStatus:
+              shared.trackApplicationStatus === true || trackStored
           };
 
           await chrome.storage.local.set({
@@ -3069,6 +3160,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               profileId
             });
           } catch (err) {
+            if (isCancelError(err)) {
+              cancelled = true;
+              await setImportedJobStatus(importedJobId, {
+                status: "failed",
+                statusDetail: "Cancelled by user.",
+                profileId
+              });
+              break;
+            }
             failCount += 1;
             const error = String(err?.message || err);
             await setImportedJobStatus(importedJobId, {
@@ -3080,14 +3180,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           }
         }
 
-        await setStatus(
-          `Batch resume build finished: ${okCount} saved, ${failCount} failed. ${await getCostSummaryText()}`
-        );
+        if (cancelled) {
+          await setStatus(
+            `Batch resume build stopped: ${okCount} saved, ${failCount} failed before cancel. ${await getCostSummaryText()}`
+          );
+        } else {
+          await setStatus(
+            `Batch resume build finished: ${okCount} saved, ${failCount} failed. ${await getCostSummaryText()}`
+          );
+        }
       } catch (err) {
-        await setStatus(`Batch resume build failed: ${String(err?.message || err)}`);
+        if (isCancelError(err)) {
+          await setStatus("Generation cancelled by user.");
+        } else {
+          await setStatus(`Batch resume build failed: ${String(err?.message || err)}`);
+        }
       } finally {
         await chrome.storage.local.set({ generation_running: false });
         isRunning = false;
+        finishGenerationCancelState();
         stopKeepAlive();
       }
     })();
@@ -3105,6 +3216,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   isRunning = true;
+  clearGenerationCancel();
   startKeepAlive();
   chrome.storage.local.set({ generation_running: true });
   setStatus("Starting OpenAI resume generation...");
@@ -3121,9 +3233,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await setStatus(result.status);
     } catch (err) {
       await chrome.storage.local.set({ generation_running: false });
-      await setStatus(`Generation failed: ${String(err?.message || err)}`);
+      if (isCancelError(err)) {
+        await setStatus("Generation cancelled by user.");
+      } else {
+        await setStatus(`Generation failed: ${String(err?.message || err)}`);
+      }
     } finally {
       isRunning = false;
+      finishGenerationCancelState();
       stopKeepAlive();
     }
   })();

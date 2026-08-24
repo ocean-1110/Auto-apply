@@ -58,7 +58,8 @@ function normalizePreset(input = {}, existingId = "") {
     label: String(input.label || "").trim(),
     spreadsheetUrl: String(input.spreadsheetUrl || "").trim(),
     sheetName: String(input.sheetName || "").trim(),
-    webAppUrl: String(input.webAppUrl || "").trim()
+    webAppUrl: String(input.webAppUrl || "").trim(),
+    trackApplicationStatus: Boolean(input.trackApplicationStatus)
   };
 }
 

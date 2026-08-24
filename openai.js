@@ -17,13 +17,21 @@ const DEFAULT_MAX_TOKENS = 16384;
 /**
  * Call OpenAI Chat Completions. Used only from the background service worker.
  */
+/** Optional AbortSignal used by in-flight generation (set from the service worker). */
+let activeChatAbortSignal = null;
+
+export function setChatAbortSignal(signal = null) {
+  activeChatAbortSignal = signal || null;
+}
+
 export async function chatCompletion({
   apiKey,
   model = DEFAULT_OPENAI_MODEL,
   messages,
   jsonMode = false,
   temperature = 0.4,
-  maxTokens = DEFAULT_MAX_TOKENS
+  maxTokens = DEFAULT_MAX_TOKENS,
+  signal = null
 }) {
   const key = String(apiKey || "").trim();
   if (!key) {
@@ -44,6 +52,7 @@ export async function chatCompletion({
     body.response_format = { type: "json_object" };
   }
 
+  const abortSignal = signal || activeChatAbortSignal || undefined;
   let response;
   try {
     response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -52,9 +61,17 @@ export async function chatCompletion({
         Authorization: `Bearer ${key}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(abortSignal ? { signal: abortSignal } : null)
     });
   } catch (err) {
+    if (
+      err?.name === "AbortError" ||
+      abortSignal?.aborted ||
+      /aborted|abort/i.test(String(err?.message || ""))
+    ) {
+      throw new Error("Generation cancelled by user.");
+    }
     throw new Error(`OpenAI request failed: ${String(err?.message || err)}`);
   }
 

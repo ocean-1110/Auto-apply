@@ -299,7 +299,8 @@ export async function ensureAtsReadyResume(
     await status(`ATS ${atsReport.score}% — checking that the resume still reads as a realistic career...`);
     try {
       judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
-    } catch {
+    } catch (err) {
+      if (/cancelled by user/i.test(String(err?.message || err || ""))) throw err;
       judge = null;
     }
   }
@@ -342,7 +343,8 @@ export async function ensureAtsReadyResume(
     if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length && attempts < MAX_REWRITE_ATTEMPTS) {
       try {
         judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
-      } catch {
+      } catch (err) {
+        if (/cancelled by user/i.test(String(err?.message || err || ""))) throw err;
         judge = null;
       }
     }
