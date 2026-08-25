@@ -563,6 +563,8 @@ function displayImportedJobStatus(job) {
       return "Completed";
     case "unavailable":
       return "No longer available";
+    case "check_failed":
+      return "Check failed";
     case "failed":
       return "Failed";
     default:
@@ -738,7 +740,11 @@ function renderImportedJobs() {
     card.className = "job-card";
     card.dataset.jobId = jobId;
     const isUnavailable = job.status === "unavailable";
+    const isCheckFailed = job.status === "check_failed";
+    const isApplyFailed = job.status === "failed";
     if (isUnavailable) card.classList.add("is-unavailable");
+    if (isCheckFailed) card.classList.add("is-check-failed");
+    if (isApplyFailed) card.classList.add("is-failed");
     // Keep blocked/compact cards collapsed unless the user explicitly opens them.
     if (jobId === importedJobsSelectedId && !isUnavailable) {
       card.open = true;
@@ -845,7 +851,7 @@ function renderImportedJobs() {
       applySummaryBtn.textContent = "Working";
       applySummaryBtn.disabled = true;
     } else {
-      applySummaryBtn.textContent = ["failed", "needs_review", "ready_for_review"].includes(
+      applySummaryBtn.textContent = ["failed", "needs_review", "ready_for_review", "check_failed"].includes(
         String(job.status)
       )
         ? "Retry"
@@ -859,6 +865,13 @@ function renderImportedJobs() {
     }
 
     toolbar.appendChild(applySummaryBtn);
+    if (isCheckFailed) {
+      const warnBadge = document.createElement("span");
+      warnBadge.className = "job-check-failed-badge";
+      warnBadge.textContent = "Check failed";
+      warnBadge.title = String(job.statusDetail || "Availability could not be verified — check later");
+      toolbar.appendChild(warnBadge);
+    }
     toolbar.appendChild(check);
     toolbar.appendChild(removeBtn);
     summary.appendChild(toolbar);
@@ -944,9 +957,9 @@ function renderImportedJobs() {
     details.appendChild(actions);
 
     const err = shortError(job);
-    if (job.status === "failed" && err) {
+    if ((job.status === "failed" || job.status === "check_failed") && err) {
       const errP = document.createElement("p");
-      errP.className = "job-error";
+      errP.className = job.status === "check_failed" ? "job-error is-warn" : "job-error";
       errP.textContent = err;
       details.appendChild(errP);
     }

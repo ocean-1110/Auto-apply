@@ -440,51 +440,106 @@ async function removeImportedJobFromStorage(jobId) {
   return true;
 }
 
+function isUnusableJobTabUrl(url) {
+  const raw = String(url || "");
+  if (!raw || raw === "about:blank") return true;
+  if (/^(chrome|edge|about|chrome-error|chrome-extension):/i.test(raw)) return true;
+  if (/chrome-error|chromewebdata/i.test(raw)) return true;
+  return !isHttpUrl(raw);
+}
+
 /**
  * Open (or reuse) a job URL and probe whether the posting is closed.
- * @returns {Promise<{ tabId: number|null, closed: string, url: string }>}
+ * Never throws — unknown load/script errors are returned on `error`.
+ * @returns {Promise<{ tabId: number|null, closed: string, error: string, url: string }>}
  */
 async function openAndProbeJobAvailability(url, { active = false, reuseTabId = null } = {}) {
   const target = String(url || "").trim();
   if (!isHttpUrl(target)) {
-    return { tabId: null, closed: "", url: target };
+    return { tabId: null, closed: "", error: "Invalid job URL.", url: target };
   }
 
   let tabId = reuseTabId;
-  if (tabId) {
-    const live = await chrome.tabs.get(tabId).catch(() => null);
-    if (!live?.id) tabId = null;
-  }
-  if (!tabId) {
-    const existing = await findTabByUrl(target);
-    if (existing?.id != null) {
-      tabId = existing.id;
-      if (active) {
-        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-      }
-      await waitForPageReady(tabId);
-    } else {
-      const tab = await chrome.tabs.create({ url: target, active: Boolean(active) });
-      tabId = tab?.id || null;
-      if (!tabId) return { tabId: null, closed: "", url: target };
-      await waitForPageReady(tabId);
-    }
-  } else {
-    await navigateTabToUrl(tabId, target);
-  }
-
   try {
+    if (tabId) {
+      const live = await chrome.tabs.get(tabId).catch(() => null);
+      if (!live?.id) tabId = null;
+    }
+    if (!tabId) {
+      const existing = await findTabByUrl(target);
+      if (existing?.id != null) {
+        tabId = existing.id;
+        if (active) {
+          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+        }
+        await waitForPageReady(tabId);
+      } else {
+        const tab = await chrome.tabs.create({ url: target, active: Boolean(active) });
+        tabId = tab?.id || null;
+        if (!tabId) return { tabId: null, closed: "", error: "Failed to open a tab.", url: target };
+        await waitForPageReady(tabId);
+      }
+    } else {
+      await navigateTabToUrl(tabId, target);
+    }
+
+    const live = await chrome.tabs.get(tabId).catch(() => null);
+    if (!live?.id) {
+      return { tabId: null, closed: "", error: "Tab closed while loading.", url: target };
+    }
+    if (isUnusableJobTabUrl(live.url)) {
+      return { tabId, closed: "", error: "Job page failed to load.", url: target };
+    }
+
     await ensureAutofillScript(tabId);
     const probe = await sendMessageToTab(
       tabId,
       { type: "probe_application_form" },
       { attempts: 3 }
     );
+    if (probe?.ok === false && probe?.error) {
+      return { tabId, closed: "", error: String(probe.error), url: target };
+    }
     const closed = String(probe?.jobUnavailable || "").trim();
-    return { tabId, closed, url: target };
-  } catch {
-    return { tabId, closed: "", url: target };
+    return { tabId, closed, error: "", url: target };
+  } catch (err) {
+    return {
+      tabId,
+      closed: "",
+      error: String(err?.message || err || "Availability probe failed."),
+      url: target
+    };
   }
+}
+
+/**
+ * Retry an availability probe a few times. A poisoned tab is discarded between attempts
+ * so one bad page cannot stall the rest of the batch.
+ */
+async function probeJobAvailabilityWithRetries(
+  url,
+  { attempts = 3, reuseTabId = null, onAttempt } = {}
+) {
+  let tabId = reuseTabId;
+  let last = { tabId, closed: "", error: "", url, attempts: 0 };
+  const max = Math.max(1, Number(attempts) || 3);
+
+  for (let i = 1; i <= max; i += 1) {
+    if (typeof onAttempt === "function") {
+      await onAttempt(i, max);
+    }
+    last = await openAndProbeJobAvailability(url, { active: false, reuseTabId: tabId });
+    last.attempts = i;
+    if (last.closed || !last.error) return last;
+
+    if (last.tabId) {
+      await chrome.tabs.remove(last.tabId).catch(() => {});
+    }
+    tabId = null;
+    if (i < max) await sleepMs(700 * i);
+  }
+
+  return { ...last, tabId: null };
 }
 
 async function recoverInterruptedImportedJobs() {
@@ -3834,64 +3889,108 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             continue;
           }
 
-          const jobUrl = String(job.jdLink || job.url || "").trim();
-          const priorStatus = String(job.status || "imported");
-          await setImportedJobStatus(importedJobId, {
-            status: priorStatus === "unavailable" ? "unavailable" : priorStatus,
-            statusDetail: `Checking availability (${i + 1}/${jobIds.length})...`,
-            profileId: job.profileId
-          });
-          await setStatus(
-            `Availability ${i + 1}/${jobIds.length}: ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
-          );
-
-          if (!jobUrl) {
-            failedCount += 1;
+          try {
+            const jobUrl = String(job.jdLink || job.url || "").trim();
+            const priorStatus = String(job.status || "imported");
             await setImportedJobStatus(importedJobId, {
-              status: priorStatus,
-              statusDetail: "No job URL to check."
-            });
-            continue;
-          }
-
-          const probe = await openAndProbeJobAvailability(jobUrl, {
-            active: false,
-            reuseTabId: probeTabId
-          });
-          probeTabId = probe.tabId || probeTabId;
-
-          if (probe.closed) {
-            closedCount += 1;
-            await setImportedJobStatus(importedJobId, {
-              status: "unavailable",
-              statusDetail: `No longer available — delete recommended. ${probe.closed}`
+              status: priorStatus === "unavailable" ? "unavailable" : priorStatus,
+              statusDetail: `Checking availability (${i + 1}/${jobIds.length})...`,
+              profileId: job.profileId
             });
             await setStatus(
-              `Unavailable (${closedCount}): ${job.jobTitle || importedJobId} — marked in red`
+              `Availability ${i + 1}/${jobIds.length}: ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
             );
-            continue;
-          }
 
-          openCount += 1;
-          let restoredStatus = priorStatus;
-          if (priorStatus === "unavailable" || priorStatus === "opening") {
-            restoredStatus = job.hasGeneratedResume ? "generated" : "imported";
+            if (!jobUrl) {
+              failedCount += 1;
+              await setImportedJobStatus(importedJobId, {
+                status: "check_failed",
+                statusDetail: "No job URL to check. Open the posting later and verify it by hand."
+              });
+              continue;
+            }
+
+            let probe = { tabId: probeTabId, closed: "", error: "", attempts: 0 };
+            try {
+              probe = await probeJobAvailabilityWithRetries(jobUrl, {
+                attempts: 3,
+                reuseTabId: probeTabId,
+                onAttempt: async (attempt, max) => {
+                  await setStatus(
+                    `Availability ${i + 1}/${jobIds.length}: ${job.jobTitle || importedJobId} (try ${attempt}/${max})`
+                  );
+                }
+              });
+            } catch (err) {
+              probe = {
+                tabId: null,
+                closed: "",
+                error: String(err?.message || err || "Availability probe failed."),
+                attempts: 3
+              };
+              if (probeTabId) {
+                await chrome.tabs.remove(probeTabId).catch(() => {});
+              }
+            }
+            probeTabId = probe.tabId || null;
+
+            if (probe.closed) {
+              closedCount += 1;
+              await setImportedJobStatus(importedJobId, {
+                status: "unavailable",
+                statusDetail: `No longer available — delete recommended. ${probe.closed}`
+              });
+              await setStatus(
+                `Unavailable (${closedCount}): ${job.jobTitle || importedJobId} — marked in red`
+              );
+              continue;
+            }
+
+            if (probe.error) {
+              failedCount += 1;
+              probeTabId = null;
+              await setImportedJobStatus(importedJobId, {
+                status: "check_failed",
+                statusDetail: `Could not verify after ${probe.attempts || 3} tries: ${probe.error}`
+              });
+              await setStatus(
+                `Check failed (${failedCount}): ${job.jobTitle || importedJobId} — marked in yellow, skipping`
+              );
+              continue;
+            }
+
+            openCount += 1;
+            let restoredStatus = priorStatus;
+            if (
+              priorStatus === "unavailable" ||
+              priorStatus === "opening" ||
+              priorStatus === "check_failed"
+            ) {
+              restoredStatus = job.hasGeneratedResume ? "generated" : "imported";
+            }
+            await setImportedJobStatus(importedJobId, {
+              status: restoredStatus,
+              statusDetail: "Still open."
+            });
+          } catch (jobErr) {
+            failedCount += 1;
+            if (probeTabId) {
+              await chrome.tabs.remove(probeTabId).catch(() => {});
+              probeTabId = null;
+            }
+            await setImportedJobStatus(importedJobId, {
+              status: "check_failed",
+              statusDetail: `Could not verify: ${String(jobErr?.message || jobErr)}`
+            }).catch(() => {});
+            await setStatus(
+              `Check failed (${failedCount}): ${job.jobTitle || importedJobId} — skipping`
+            ).catch(() => {});
           }
-          await setImportedJobStatus(importedJobId, {
-            status: restoredStatus,
-            statusDetail: "Still open."
-          });
         }
 
-        if (cancelled) {
-          await setStatus(
-            `Availability check cancelled. Closed ${closedCount}, still open ${openCount}, failed ${failedCount}.`
-          );
-        } else {
-          await setStatus(
-            `Availability check done. Closed ${closedCount} (red), still open ${openCount}, failed ${failedCount}.`
-          );
-        }
+        await setStatus(
+          `Availability check ${cancelled ? "cancelled" : "done"}. Closed ${closedCount} (red), still open ${openCount}, check failed ${failedCount} (yellow).`
+        );
       } catch (err) {
         if (isCancelError(err)) {
           await setStatus("Availability check cancelled by user.");
