@@ -795,7 +795,7 @@ function renderImportedJobs() {
 
     const isCompleted = job.status === "completed";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
-    removeBtn.disabled = isInProgress;
+    removeBtn.disabled = false;
 
     if (isUnavailable) {
       const warnBadge = document.createElement("span");
@@ -815,6 +815,17 @@ function renderImportedJobs() {
         await unblockImportedJob(jobId);
       });
       toolbar.appendChild(unblockBtn);
+      const markAppliedBtn = document.createElement("button");
+      markAppliedBtn.type = "button";
+      markAppliedBtn.className = "secondary job-summary-action";
+      markAppliedBtn.textContent = "Applied";
+      markAppliedBtn.title = "Mark as applied";
+      markAppliedBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await markImportedJobCompleted(jobId);
+      });
+      toolbar.appendChild(markAppliedBtn);
       toolbar.appendChild(check);
       toolbar.appendChild(removeBtn);
       summary.appendChild(toolbar);
@@ -890,20 +901,16 @@ function renderImportedJobs() {
     const completeBtn = document.createElement("button");
     completeBtn.type = "button";
     completeBtn.className = "job-action-icon is-success";
-    completeBtn.title = "Mark completed / applied";
-    completeBtn.setAttribute("aria-label", "Mark completed");
+    completeBtn.title = "Mark as applied";
+    completeBtn.setAttribute("aria-label", "Mark as applied");
     completeBtn.innerHTML =
       '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M9.2 16.6 4.8 12.2l1.4-1.4 3 3 8-8 1.4 1.4-9.4 9.4z"/></svg>';
-    if (["ready_for_review", "needs_review"].includes(String(job.status))) {
-      completeBtn.disabled = false;
-      completeBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        await markImportedJobCompleted(jobId);
-      });
-    } else {
-      completeBtn.disabled = true;
-    }
+    completeBtn.disabled = false;
+    completeBtn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await markImportedJobCompleted(jobId);
+    });
     actions.appendChild(completeBtn);
 
     const blockBtn = document.createElement("button");
@@ -925,7 +932,7 @@ function renderImportedJobs() {
       blockBtn.setAttribute("aria-label", "Block");
       blockBtn.innerHTML =
         '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2a8 8 0 0 1 6.3 12.9L7.1 5.7A7.96 7.96 0 0 1 12 4zM5.7 7.1 16.9 18.3A8 8 0 0 1 5.7 7.1z"/></svg>';
-      blockBtn.disabled = isInProgress;
+      blockBtn.disabled = false;
       blockBtn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1041,15 +1048,9 @@ async function removeSelectedImportedJobs() {
   });
   if (!confirmed) return;
 
-  const removable = jobIds.filter((id) => {
-    const job = importedJobsById[id];
-    if (!job) return false;
-    const status = String(job.status || "");
-    return !["opening", "generating", "opening_form", "filling"].includes(status);
-  });
-  const skipped = jobIds.length - removable.length;
+  const removable = jobIds.filter((id) => Boolean(importedJobsById[id]));
   if (!removable.length) {
-    setStatus("Selected jobs are still in progress and cannot be removed yet.");
+    setStatus("No matching jobs to remove.");
     return;
   }
 
@@ -1077,14 +1078,7 @@ async function removeSelectedImportedJobs() {
   importedJobsOrder = order;
   importedJobsVersion = now;
   renderImportedJobs();
-
-  if (skipped > 0) {
-    setStatus(
-      `Removed ${removable.length} job${removable.length === 1 ? "" : "s"}; skipped ${skipped} in progress.`
-    );
-  } else {
-    setStatus(`Removed ${removable.length} job${removable.length === 1 ? "" : "s"} from the list.`);
-  }
+  setStatus(`Removed ${removable.length} job${removable.length === 1 ? "" : "s"} from the list.`);
 }
 
 async function batchGenerateSelectedJobs() {

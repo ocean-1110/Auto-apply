@@ -6,7 +6,7 @@
 (() => {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-18.1";
+  const SCRIPT_BUILD = "2026-08-24.dice-submit";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -1426,7 +1426,31 @@
     });
   }
 
-  function uploadApplicationFiles(uploadFiles = {}) {
+  async function revealApplicationUploads() {
+    const re =
+      /upload (a )?(new )?(resume|cv|cover letter)|attach (a )?(resume|cv|cover letter)|add (a )?cover letter|replace (resume|cv)/i;
+    const controls = [...document.querySelectorAll("button, a, [role='button'], label")].filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    let clicked = 0;
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (!re.test(text)) continue;
+      try {
+        scrollElIntoView(el);
+        el.click();
+        clicked += 1;
+        await sleep(450);
+      } catch {
+        /* ignore */
+      }
+      if (clicked >= 3) break;
+    }
+    return clicked;
+  }
+
+  async function uploadApplicationFiles(uploadFiles = {}) {
+    await revealApplicationUploads();
     const uploaded = [];
     const skipped = [];
     const resumeDoc = uploadFiles.resume;
@@ -1466,6 +1490,18 @@
     if (resumeFile && resumeRows.length) targets.push({ ...resumeRows[0], file: resumeFile, kind: "resume" });
     if (coverFile) {
       for (const row of coverRows) targets.push({ ...row, file: coverFile, kind: "coverLetter" });
+    }
+    const targetedInputs = new Set(targets.map((row) => row.input));
+    if (resumeFile && !targets.some((row) => row.kind === "resume")) {
+      const fallback = classified.find((row) => !targetedInputs.has(row.input));
+      if (fallback) {
+        targets.push({ ...fallback, file: resumeFile, kind: "resume" });
+        targetedInputs.add(fallback.input);
+      }
+    }
+    if (coverFile && !targets.some((row) => row.kind === "coverLetter")) {
+      const leftover = classified.find((row) => !targetedInputs.has(row.input));
+      if (leftover) targets.push({ ...leftover, file: coverFile, kind: "coverLetter" });
     }
 
     const used = new WeakSet();
@@ -2693,7 +2729,7 @@
     };
     const credResult = fillLoginCredentials(creds);
 
-    const uploadResult = uploadApplicationFiles(uploadFiles);
+    const uploadResult = await uploadApplicationFiles(uploadFiles);
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
     const unmatchedChoiceQuestions = await collectUnmatchedChoiceQuestions();
 
@@ -2762,6 +2798,17 @@
           if (!applyRe.test(text)) continue;
           const href = btn.getAttribute("data-href") || btn.getAttribute("data-url") || "";
           if (href) pushUrl(href);
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
+    if (applyUrls.length < 5 && /(^|\.)dice\.com$/i.test(location.hostname)) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        try {
+          if (/\/apply\b|easy-apply|application\/apply/i.test(a.href || "")) pushUrl(a.href);
         } catch {
           /* ignore */
         }
@@ -2919,8 +2966,14 @@
       return /appl(y|ication)|candidate|submission/.test(blob);
     });
 
+    const pathAndQuery = `${location.pathname || ""}${location.search || ""}`;
+    const isDiceApplyPage =
+      /(^|\.)dice\.com$/i.test(location.hostname) &&
+      /\/apply\b|\/application\b|easy-apply/i.test(pathAndQuery);
+
     const isApplicationForm =
       hasFileInput ||
+      isDiceApplyPage ||
       identityFields >= 2 ||
       (hasApplyForm && fillableCount >= 2) ||
       looksLikeHistoryForm();
@@ -2945,7 +2998,23 @@
     /\b(next(\s+step)?|continue|save\s*(and|&)\s*continue|save\s*(and|&)\s*next|agree\s*(and|&)\s*continue|proceed|forward)\b/i;
   const EASY_REVIEW_RE = /\b(review(\s+(application|answers|info|information))?|preview)\b/i;
   const EASY_SUBMIT_RE =
-    /\b(submit(\s+application)?|send(\s+application)?|finish(\s+application)?|complete(\s+application)?|apply\s+now|confirm\s+(and\s+)?submit)\b/i;
+    /\b(submit(\s+(application|app))?|send(\s+application)?|finish(\s+application)?|complete(\s+application)?|apply\s+now|confirm\s+(and\s+)?submit)\b/i;
+  const APPLY_SUCCESS_RE = new RegExp(
+    [
+      "awesome!?\\s*your application is on its way",
+      "your application is on its way",
+      "your application has been submitted",
+      "application submitted successfully",
+      "successfully submitted your application"
+    ].join("|"),
+    "i"
+  );
+
+  function detectApplicationSuccess() {
+    const blob = `${document.title || ""}\n${document.body?.innerText || ""}`.slice(0, 12000);
+    const match = blob.match(APPLY_SUCCESS_RE);
+    return match ? cleanLabelText(match[0]).slice(0, 160) : "";
+  }
   const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss|return)\b/i;
   const EASY_ENTRY_RE =
     /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply with|apply now|apply)\b/i;
@@ -3116,6 +3185,7 @@
       isApplicationForm: Boolean(probe.isApplicationForm),
       blockedReason: probe.blockedReason || "",
       jobUnavailable: probe.jobUnavailable || "",
+      applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
       applyUrls: probe.applyUrls || []
     };
@@ -3171,23 +3241,12 @@
     if (!action) {
       return { ok: false, clicked: false, before, after: before };
     }
-    // Never auto-click final submit — SW stops for user review.
-    if (action.type === "submit") {
-      return {
-        ok: true,
-        clicked: false,
-        isSubmit: true,
-        action: describeAction(action),
-        before,
-        after: before
-      };
-    }
     const clickRes = await clickKeepingSameTab(action.el);
     return {
       ok: Boolean(clickRes.clicked || clickRes.navigateUrl),
       clicked: Boolean(clickRes.clicked),
       navigateUrl: clickRes.navigateUrl || "",
-      isSubmit: false,
+      isSubmit: action.type === "submit",
       action: describeAction(action),
       before,
       after: getApplyActionSnapshot()
@@ -3347,8 +3406,19 @@
         if (autoSubmit) {
           scrollElIntoView(action.el);
           action.el.click();
-          summary.status = "submitted";
-          summary.detail = "Submitted the application.";
+          const start = Date.now();
+          while (Date.now() - start < 20000) {
+            await sleep(400);
+            const success = detectApplicationSuccess();
+            if (success) {
+              summary.status = "submitted";
+              summary.detail = success;
+              return summary;
+            }
+          }
+          summary.status = "needs_review";
+          summary.detail =
+            "Clicked Submit but the confirmation page did not appear. Review and confirm.";
           return summary;
         }
         summary.status = "ready_for_review";
