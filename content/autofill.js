@@ -3,10 +3,10 @@
  * Fills text, textarea, select, checkbox, and radio controls from applicant info.
  * For dropdowns/comboboxes: never types "yes"/"no" — opens the list and picks a matching option.
  */
-(() => {
+(function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-24.dice-submit";
+  const SCRIPT_BUILD = "2026-08-25.dice-submit.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -2751,14 +2751,18 @@
     const applyUrls = [];
     const seen = new Set();
 
-    const applyRe =
-      /\bapply\b|\bstart application\b|\bbegin application\b|\bcontinue\b|\bget started\b|\bsubmit\b|\bnext\b/i;
+    const applyRe = isDiceJobBrowsePage()
+      ? /\beasy\s*apply\b|\bapply now\b/i
+      : /\beasy\s*apply\b|\bapply now\b|\bstart application\b|\bbegin application\b/i;
 
     function pushUrl(href) {
       const url = String(href || "").trim();
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) return;
       if (seen.has(url)) return;
+      if (isDiceJobBrowsePage() && !/\/job-applications\b|\/job-detail\b|\/wizard\b|easy-apply/i.test(url)) {
+        return;
+      }
       try {
         const here = location.href.replace(/#.*$/, "");
         if (url.replace(/#.*$/, "") === here) return;
@@ -2808,7 +2812,9 @@
     if (applyUrls.length < 5 && /(^|\.)dice\.com$/i.test(location.hostname)) {
       for (const a of document.querySelectorAll("a[href]")) {
         try {
-          if (/\/apply\b|easy-apply|application\/apply/i.test(a.href || "")) pushUrl(a.href);
+          if (/\/job-applications\b|\/apply\b|easy-apply|application\/apply/i.test(a.href || "")) {
+            pushUrl(a.href);
+          }
         } catch {
           /* ignore */
         }
@@ -2967,16 +2973,21 @@
     });
 
     const pathAndQuery = `${location.pathname || ""}${location.search || ""}`;
+    const isDiceHost = /(^|\.)dice\.com$/i.test(location.hostname);
     const isDiceApplyPage =
-      /(^|\.)dice\.com$/i.test(location.hostname) &&
-      /\/apply\b|\/application\b|easy-apply/i.test(pathAndQuery);
+      isDiceHost &&
+      /\/job-applications\b|\/wizard\b|easy-apply/i.test(pathAndQuery);
 
-    const isApplicationForm =
-      hasFileInput ||
-      isDiceApplyPage ||
-      identityFields >= 2 ||
-      (hasApplyForm && fillableCount >= 2) ||
-      looksLikeHistoryForm();
+    // Dice job cards / job-detail pages have newsletter and ad forms. Those are
+    // not the application. Only the /job-applications wizard is.
+    const isApplicationForm = isDiceHost
+      ? Boolean(isDiceApplyPage)
+      : Boolean(
+          hasFileInput ||
+            identityFields >= 2 ||
+            (hasApplyForm && fillableCount >= 2) ||
+            looksLikeHistoryForm()
+        );
 
     return {
       ok: true,
@@ -2998,24 +3009,64 @@
     /\b(next(\s+step)?|continue|save\s*(and|&)\s*continue|save\s*(and|&)\s*next|agree\s*(and|&)\s*continue|proceed|forward)\b/i;
   const EASY_REVIEW_RE = /\b(review(\s+(application|answers|info|information))?|preview)\b/i;
   const EASY_SUBMIT_RE =
-    /\b(submit(\s+(application|app))?|send(\s+application)?|finish(\s+application)?|complete(\s+application)?|apply\s+now|confirm\s+(and\s+)?submit)\b/i;
+    /\b(submit(\s+(your\s+)?(application|app))?|send(\s+(your\s+)?application)?|finish(\s+application)?|complete(\s+application)?|apply\s+now|confirm(\s+(and|&)\s+submit)?)\b/i;
   const APPLY_SUCCESS_RE = new RegExp(
     [
       "awesome!?\\s*your application is on its way",
       "your application is on its way",
       "your application has been submitted",
       "application submitted successfully",
-      "successfully submitted your application"
+      "successfully submitted your application",
+      "thank you for (your )?appl(y|ication)",
+      "application (was |has been )?sent",
+      "we('ve| have) received your application"
     ].join("|"),
     "i"
   );
 
+  function isDiceApplicationPath(url = location.href) {
+    try {
+      const u = new URL(String(url || ""), location.href);
+      if (!/(^|\.)dice\.com$/i.test(u.hostname)) return false;
+      return /\/job-applications\b|\/wizard\b|easy-apply/i.test(`${u.pathname}${u.search}`);
+    } catch {
+      return false;
+    }
+  }
+
+  function isDiceJobBrowsePage(url = location.href) {
+    try {
+      const u = new URL(String(url || ""), location.href);
+      if (!/(^|\.)dice\.com$/i.test(u.hostname)) return false;
+      return !isDiceApplicationPath(u.href);
+    } catch {
+      return false;
+    }
+  }
+
   function detectApplicationSuccess() {
+    const href = String(location.href || "");
+    const path = String(location.pathname || "");
+    if (
+      /\/wizard\/success(?:\/|$)/i.test(path) ||
+      /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(path) ||
+      /\/apply\/success\b/i.test(path)
+    ) {
+      return "Application submitted (confirmation page).";
+    }
+    if (/[?&](?:status|result)=success\b/i.test(href)) {
+      return "Application submitted (confirmation page).";
+    }
     const blob = `${document.title || ""}\n${document.body?.innerText || ""}`.slice(0, 12000);
     const match = blob.match(APPLY_SUCCESS_RE);
     return match ? cleanLabelText(match[0]).slice(0, 160) : "";
   }
   const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss|return)\b/i;
+  const ENTRY_JUNK_RE =
+    /\b(cancel|close|dismiss|skip|not now|maybe later|show ad|show ads|advert|sponsored|cookie|subscribe|sign in|log in|register|learn more|see more|next job|previous job|watch|play video)\b/i;
+  const EASY_APPLY_TEXT_RE =
+    /^\s*(easy\s*apply|1-?click apply|one-?click apply|quick apply)\s*$/i;
+  const APPLY_ONLY_TEXT_RE = /^\s*(apply(\s+now)?|apply with dice)\s*$/i;
   const EASY_ENTRY_RE =
     /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply with|apply now|apply)\b/i;
 
@@ -3047,8 +3098,31 @@
     }
   }
 
+  function getDiceWizardRoot() {
+    if (!isDiceApplicationPath()) return null;
+    const selectors = [
+      '[data-testid*="wizard"]',
+      '[class*="application-wizard"]',
+      '[class*="job-application"]',
+      'form',
+      'main',
+      '[role="main"]'
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.querySelector("button, [role='button'], input[type='submit']")) return el;
+    }
+    return document;
+  }
+
   /** The most form-dense visible dialog/modal, or the document when none. */
   function getApplyScope() {
+    if (isDiceApplicationPath()) {
+      return getDiceWizardRoot() || document;
+    }
+    if (isDiceJobBrowsePage()) {
+      return document;
+    }
     const sel =
       '[role="dialog"], dialog[open], dialog, [aria-modal="true"], .modal, [class*="modal"], [class*="apply"], [id*="apply"]';
     let best = null;
@@ -3064,21 +3138,61 @@
     return best || document;
   }
 
-  function classifyActionButton(text) {
+  function isInsideAdOrOverlay(el) {
+    if (!el || typeof el.closest !== "function") return false;
+    return Boolean(
+      el.closest(
+        [
+          '[class*="ad-"]',
+          '[class*="adsby"]',
+          '[id*="google_ads"]',
+          "[data-ad]",
+          '[class*="sponsor"]',
+          '[class*="cookie"]',
+          '[id*="cookie"]',
+          "aside[class*='ad']"
+        ].join(", ")
+      )
+    );
+  }
+
+  function findEasyApplyEntryButton() {
+    const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (!text || text.length > 48) continue;
+      if (ENTRY_JUNK_RE.test(text) || EASY_BACK_RE.test(text)) continue;
+      if (isInsideAdOrOverlay(el)) continue;
+      const href = String(el.href || el.getAttribute?.("href") || el.getAttribute?.("data-href") || "");
+      const hint = `${el.getAttribute("data-testid") || ""} ${el.id || ""} ${el.className || ""} ${href}`;
+      let score = 0;
+      if (EASY_APPLY_TEXT_RE.test(text) || /easy[-_ ]?apply/i.test(hint)) score = 100;
+      else if (APPLY_ONLY_TEXT_RE.test(text) && /job-applications|easy-?apply|apply-button|job-detail/i.test(hint)) {
+        score = 70;
+      } else if (APPLY_ONLY_TEXT_RE.test(text) && /(^|\.)dice\.com$/i.test(location.hostname)) {
+        score = 55;
+      } else if (APPLY_ONLY_TEXT_RE.test(text)) {
+        score = 40;
+      }
+      if (score) scored.push({ type: "entry", el, text, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
+  const classifyActionButton = function (text) {
     const t = String(text || "").trim();
     if (!t || t.length > 80) return null;
     if (EASY_NEXT_RE.test(t)) return "next";
     if (EASY_REVIEW_RE.test(t)) return "review";
     if (EASY_SUBMIT_RE.test(t)) return "submit";
     return null;
-  }
+  };
 
-  /**
-   * Pick the forward action.
-   * If Next/Continue exists, advance; only treat Submit/Apply as final when
-   * there is no Next button (final page of a multi-step form).
-   */
-  function findActionButton(scope) {
+  const findActionButton = function (scope) {
     const scopeEl = scope || getApplyScope();
     const buttons = [
       ...scopeEl.querySelectorAll(
@@ -3091,6 +3205,9 @@
     let submit = null;
     for (const btn of buttons) {
       const text = elActionText(btn);
+      const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
+      const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
+      if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) continue;
       if (EASY_BACK_RE.test(text) && !EASY_NEXT_RE.test(text) && !EASY_SUBMIT_RE.test(text)) {
         continue;
       }
@@ -3098,10 +3215,32 @@
       if (cls === "next" && !next) next = { type: "next", el: btn, text };
       else if (cls === "review" && !review) review = { type: "review", el: btn, text };
       else if (cls === "submit" && !submit) submit = { type: "submit", el: btn, text };
+      else if (
+        !submit &&
+        (typeAttr === "submit" || /submit/i.test(hint)) &&
+        !EASY_BACK_RE.test(text)
+      ) {
+        submit = { type: "submit", el: btn, text: text || "Submit" };
+      }
     }
-    if (next) return next;
-    if (review) return review;
-    if (submit) return submit;
+    // Dice wizard chrome often still has a "Next" (job carousel). The last
+    // application step is Submit — always prefer it when it is on the wizard.
+    if (isDiceApplicationPath()) {
+      if (submit) return submit;
+      if (next) return next;
+      if (review) return review;
+    } else {
+      if (next) return next;
+      if (review) return review;
+      if (submit) return submit;
+    }
+    // Final Dice wizard page often labels the last control "Apply".
+    if (isDiceApplicationPath() && !detectApplicationSuccess()) {
+      const applyBtn = buttons.find((btn) => /^\s*apply(\s+now)?\s*$/i.test(elActionText(btn)));
+      if (applyBtn) {
+        return { type: "submit", el: applyBtn, text: elActionText(applyBtn) || "Apply" };
+      }
+    }
     return null;
   }
 
@@ -3128,6 +3267,41 @@
         el.setAttribute("target", "_self");
       }
       scrollElIntoView(el);
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        /* ignore */
+      }
+      const opts = { bubbles: true, cancelable: true, composed: true, view: window };
+      try {
+        el.dispatchEvent(
+          new PointerEvent("pointerdown", { ...opts, pointerId: 1, pointerType: "mouse" })
+        );
+      } catch {
+        /* ignore */
+      }
+      try {
+        el.dispatchEvent(new MouseEvent("mousedown", opts));
+      } catch {
+        /* ignore */
+      }
+      try {
+        el.dispatchEvent(
+          new PointerEvent("pointerup", { ...opts, pointerId: 1, pointerType: "mouse" })
+        );
+      } catch {
+        /* ignore */
+      }
+      try {
+        el.dispatchEvent(new MouseEvent("mouseup", opts));
+      } catch {
+        /* ignore */
+      }
+      try {
+        el.dispatchEvent(new MouseEvent("click", opts));
+      } catch {
+        /* ignore */
+      }
       el.click();
       await sleep(400);
       if (/^https?:/i.test(capturedUrl)) {
@@ -3140,21 +3314,15 @@
   }
 
   async function clickEasyApplyEntry() {
-    const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
-      (el) => isElVisible(el) && isElEnabled(el)
-    );
-    const preferred = controls.find((el) =>
-      /easy apply|1-?click apply|one-?click apply|quick apply/i.test(elActionText(el))
-    );
-    const target = preferred || controls.find((el) => EASY_ENTRY_RE.test(elActionText(el)));
-    if (!target) return { ok: false, clicked: false, navigateUrl: "" };
-    const res = await clickKeepingSameTab(target);
+    const target = findEasyApplyEntryButton();
+    if (!target?.el) return { ok: false, clicked: false, navigateUrl: "" };
+    const res = await clickKeepingSameTab(target.el);
     await sleep(res.clicked ? 800 : 200);
     return {
       ok: Boolean(res.clicked || res.navigateUrl),
       clicked: Boolean(res.clicked),
       navigateUrl: res.navigateUrl || "",
-      text: elActionText(target)
+      text: target.text || elActionText(target.el)
     };
   }
 
@@ -3167,11 +3335,47 @@
     return `${location.href}|${heading}|${fields}`;
   }
 
+  function formNeedsFill() {
+    if (detectApplicationSuccess()) return false;
+    const fileInputs = collectFileInputs();
+    if (fileInputs.some((el) => !(el.files && el.files.length))) return true;
+    const controls = collectFillableControls();
+    let empty = 0;
+    for (const el of controls) {
+      const type = String(el.type || "text").toLowerCase();
+      if (["hidden", "file", "submit", "button", "image", "reset", "checkbox", "radio"].includes(type)) {
+        continue;
+      }
+      if (el.tagName === "SELECT") {
+        const opt = el.options?.[el.selectedIndex];
+        const t = cleanLabelText(opt?.textContent || opt?.value || "");
+        if (!t || /^(select\.\.\.?|please select|choose|--)$/i.test(t)) empty += 1;
+        continue;
+      }
+      if (!String(el.value || "").trim()) empty += 1;
+    }
+    return empty >= 1;
+  }
+
   function getApplyActionSnapshot() {
     const probe = probeApplicationForm();
+    // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
+    if (!probe.isApplicationForm) {
+      const entry = findEasyApplyEntryButton();
+      return {
+        ok: true,
+        href: location.href,
+        signature: stepSignature(),
+        isApplicationForm: false,
+        blockedReason: probe.blockedReason || "",
+        jobUnavailable: probe.jobUnavailable || "",
+        applicationSuccess: detectApplicationSuccess(),
+        action: entry ? { type: "entry", text: entry.text } : null,
+        needsFill: false,
+        applyUrls: probe.applyUrls || []
+      };
+    }
     let action = findActionButton();
-    // On a job listing (not the form yet), "Apply" / "Apply now" is an entry
-    // control — not the final submit. Remap so the SW can click through.
     if (action?.type === "submit" && !probe.isApplicationForm) {
       const t = action.text || elActionText(action.el);
       if (EASY_ENTRY_RE.test(t)) {
@@ -3187,6 +3391,7 @@
       jobUnavailable: probe.jobUnavailable || "",
       applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
+      needsFill: formNeedsFill(),
       applyUrls: probe.applyUrls || []
     };
   }
@@ -3219,9 +3424,15 @@
       ].filter((el) => isElVisible(el) && isElEnabled(el));
       const match = buttons.find((btn) => {
         const text = elActionText(btn);
+        if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) return false;
         const cls = classifyActionButton(text);
-        if (preferredType === "entry") return EASY_ENTRY_RE.test(text);
-        return cls === preferredType;
+        if (preferredType === "entry") return Boolean(findEasyApplyEntryButton()?.el === btn);
+        if (cls === preferredType) return true;
+        if (preferredType === "submit") {
+          const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
+          return typeAttr === "submit" || /^\s*submit\b/i.test(text);
+        }
+        return false;
       });
       if (match) {
         action = {

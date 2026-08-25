@@ -33,6 +33,7 @@ import {
   setPendingOutputFiles,
   clearPendingOutputFiles,
   setLastSaveMeta,
+  getLastSaveMeta,
   readJobUploadDocsFromDirectory,
   sanitizeJobFolderName
 } from "./fs-output.js";
@@ -585,7 +586,8 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-18.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-25.dice-submit.1";
+const AUTOFILL_READY_SUBMIT_URL_KEY = "autofill_ready_submit_url";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
 function bumpQaVersion() {
@@ -1017,6 +1019,62 @@ async function resolveChoiceAnswers(
   return resolved;
 }
 
+async function formatUploadDocsLocation(docs) {
+  const save = (await getLastSaveMeta().catch(() => null)) || {};
+  const folder = String(docs?.pathLabel || save.pathLabel || docs?.folderName || save.folderName || "").trim();
+  const resumeName = String(docs?.resume?.fileName || "").trim();
+  const coverName = String(docs?.coverLetter?.fileName || "").trim();
+  const joinPath = (name) => {
+    if (!name) return "";
+    if (!folder) return name;
+    const base = folder.replace(/[\\/]+$/, "");
+    if (base.endsWith(name)) return base;
+    return `${base} / ${name}`;
+  };
+  const resumePath = joinPath(resumeName);
+  const coverPath = joinPath(coverName);
+  return {
+    folder,
+    resumePath,
+    coverPath,
+    summary: [resumePath, coverPath].filter(Boolean).join("  +  ") || folder
+  };
+}
+
+async function stampDocsPath(docs, pathLabel, importedJobId = "") {
+  if (!docs) return docs;
+  const next = {
+    ...docs,
+    pathLabel: pathLabel || docs.pathLabel || "",
+    folderName: docs.folderName || ""
+  };
+  try {
+    if (importedJobId || next.importedJobId) {
+      await setGeneratedDocsForJob(importedJobId || next.importedJobId, next);
+    } else {
+      await setLastGeneratedDocs(next);
+    }
+  } catch {
+    /* cache stamp is best-effort */
+  }
+  return next;
+}
+
+async function markReadyToSubmit(url) {
+  await chrome.storage.local.set({ [AUTOFILL_READY_SUBMIT_URL_KEY]: String(url || "") });
+}
+
+async function clearReadyToSubmit() {
+  await chrome.storage.local.remove(AUTOFILL_READY_SUBMIT_URL_KEY);
+}
+
+async function isReadyToSubmit(url) {
+  const data = await chrome.storage.local.get(AUTOFILL_READY_SUBMIT_URL_KEY);
+  const saved = String(data[AUTOFILL_READY_SUBMIT_URL_KEY] || "");
+  if (!saved || !url) return false;
+  return normalizeUrlForMatch(saved) === normalizeUrlForMatch(url);
+}
+
 /**
  * Autofill the currently open application page using the selected profile's answers.
  * Also injects last generated resume / cover letter PDFs into matching file inputs.
@@ -1064,6 +1122,11 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   // Create-login forms often want the Login field to be the email address.
   if (!credentials.email && applicantInfo.email) {
     credentials.email = String(applicantInfo.email || "").trim();
+  }
+
+  const loc = await formatUploadDocsLocation(docs);
+  if (loc.summary) {
+    await setStatus(`Uploading from ${loc.summary}...`);
   }
 
   await ensureAutofillScript(tab.id);
@@ -1196,15 +1259,24 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   };
 }
 
-function describeAutofillButton(probe = {}) {
+function describeAutofillButton(probe = {}, { readyToSubmit = false } = {}) {
   const type = String(probe?.best?.action?.type || "");
   const text = String(probe?.best?.action?.text || "").trim();
+  const needsFill = probe.needsFill !== false;
   if (type === "submit") {
+    if (needsFill && !readyToSubmit) {
+      return {
+        label: "Autofill",
+        actionType: "fill",
+        actionText: text || "Submit",
+        title: "Fill this application first. The button becomes Submit after the form is filled."
+      };
+    }
     return {
       label: "Submit",
       actionType: "submit",
       actionText: text || "Submit",
-      title: "Click the page Submit / Apply button"
+      title: "Click the page Submit button"
     };
   }
   if (type === "next" || type === "review" || type === "entry") {
@@ -1224,23 +1296,108 @@ function describeAutofillButton(probe = {}) {
 }
 
 /**
- * One Autofill click: fill current page (profile → Q&A bank → AI text/choices),
- * then click Apply/Next/Continue/Submit when present. After Next, fill the new page once.
+ * Panel Autofill button: fill the current page first.
+ * On a single-page form (Submit only), stop after filling and switch the
+ * button to Submit. The next click sends the application.
+ * Next/Continue still fill-and-advance in one click.
  */
-async function runAutofillStep(profileId, { uploadDocs = null, clickAction = true } = {}) {
-  const fillRes = await startAutofillOnCurrentPage(profileId, null, { uploadDocs });
+async function runAutofillStep(
+  profileId,
+  { uploadDocs = null, clickAction = true, preferredAction = "" } = {}
+) {
+  let userWantsSubmit = String(preferredAction || "").toLowerCase() === "submit";
+  const docs = uploadDocs || (await getLastGeneratedDocs());
+  const loc = await formatUploadDocsLocation(docs);
+
+  const tab = await getCurrentApplicationTab();
+  if (!tab?.id) {
+    return { ok: false, error: "No application tab found. Open the job application page first." };
+  }
+
+  let tabId = tab.id;
+  let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
+  const ready = await isReadyToSubmit(tab.url || "");
+  if (!userWantsSubmit && probe?.best?.action?.type === "submit" && ready) {
+    userWantsSubmit = true;
+  }
+
+  async function fillSummary(fillRes, extra = "") {
+    const uploaded = Array.isArray(fillRes?.uploaded) ? fillRes.uploaded : [];
+    const fileNote =
+      loc.summary ||
+      (uploaded.length ? uploaded.map((u) => u.fileName || u.kind).join(", ") : "");
+    return (
+      `Filled ${fillRes?.filledCount || 0} field(s)` +
+      (fillRes?.choiceFilledCount ? `, ${fillRes.choiceFilledCount} choice(s)` : "") +
+      (fillRes?.bankHits ? `, ${fillRes.bankHits} from Q&A bank` : "") +
+      (fillRes?.aiFilledCount ? `, AI ${fillRes.aiFilledCount}` : "") +
+      (fileNote ? `. Files: ${fileNote}` : "") +
+      extra +
+      ` ${await getCostSummaryText()}`
+    ).trim();
+  }
+
+  if (userWantsSubmit) {
+    if (probe.needsFill && !ready) {
+      if (loc.summary) await setStatus(`Uploading from ${loc.summary}...`);
+      const fillRes = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
+      if (fillRes?.skipped || fillRes?.ok === false) return fillRes;
+      tabId = fillRes.tabId || tabId;
+    }
+    await setStatus("Autofill: clicking Submit...");
+    const liveProbe = await getApplyActionFromTab(tabId).catch(() => probe);
+    const clickRes = await sendMessageToTab(
+      tabId,
+      { type: "click_apply_action", preferredType: "submit" },
+      { attempts: 2, frameId: liveProbe?.best?.frameId }
+    ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    if (clickRes?.navigateUrl) {
+      await navigateTabToUrl(tabId, clickRes.navigateUrl);
+    }
+    await clearReadyToSubmit();
+    const finished = await finishSubmittedApplication(tabId, {
+      closeOnSuccess: false,
+      clickLabel: liveProbe?.best?.action?.text || "Submit"
+    });
+    return {
+      ok: true,
+      tabId: finished.tabId,
+      clicked: { type: "submit", ok: true, text: liveProbe?.best?.action?.text || "Submit" },
+      submitted: finished.status === "submitted",
+      button: describeAutofillButton(liveProbe, { readyToSubmit: false }),
+      status: finished.detail || "Clicked Submit."
+    };
+  }
+
+  const fillRes = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
   if (fillRes?.skipped || fillRes?.ok === false) {
     return fillRes;
   }
 
-  let tabId = fillRes.tabId;
-  let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
-  let button = describeAutofillButton(probe);
+  tabId = fillRes.tabId || tabId;
+  probe = await getApplyActionFromTab(tabId).catch(() => probe);
+  let button = describeAutofillButton(probe, { readyToSubmit: false });
   let clicked = null;
   let advanced = false;
+  const actionType = probe?.best?.action?.type || "";
 
-  if (clickAction && probe?.best?.action?.type) {
-    const actionType = probe.best.action.type;
+  if (actionType === "submit") {
+    await markReadyToSubmit((await chrome.tabs.get(tabId).catch(() => null))?.url || fillRes.tabUrl || "");
+    button = describeAutofillButton(probe, { readyToSubmit: true });
+    const status = await fillSummary(fillRes, ". Click Submit to send the application.");
+    await setStatus(status);
+    return {
+      ok: true,
+      ...fillRes,
+      clicked: null,
+      advanced: false,
+      submitted: false,
+      button,
+      status
+    };
+  }
+
+  if (clickAction && (actionType === "next" || actionType === "review" || actionType === "entry")) {
     const live = await chrome.tabs.get(tabId).catch(() => null);
     const prevUrl = live?.url || "";
     const prevSig = probe.signature || "";
@@ -1262,35 +1419,38 @@ async function runAutofillStep(profileId, { uploadDocs = null, clickAction = tru
       await navigateTabToUrl(tabId, clickRes.navigateUrl);
     }
 
-    if (actionType === "submit" || clickRes?.isSubmit) {
-      button = describeAutofillButton({ best: { action: { type: "submit", text: clicked.text } } });
+    if (clickRes?.isSubmit) {
+      await clearReadyToSubmit();
+      const finished = await finishSubmittedApplication(tabId, {
+        closeOnSuccess: false,
+        clickLabel: clicked.text
+      });
       return {
         ok: true,
         ...fillRes,
         clicked,
         advanced: false,
-        submitted: true,
-        button,
-        status:
-          `Filled ${fillRes.filledCount || 0} field(s)` +
-          (fillRes.choiceFilledCount ? `, ${fillRes.choiceFilledCount} choice(s)` : "") +
-          (fillRes.bankHits ? `, ${fillRes.bankHits} from Q&A bank` : "") +
-          (fillRes.aiFilledCount ? `, AI ${fillRes.aiFilledCount}` : "") +
-          `, clicked Submit (${clicked.text}). ` +
-          (await getCostSummaryText())
+        submitted: finished.status === "submitted",
+        button: describeAutofillButton({ best: { action: { type: "submit", text: clicked.text } } }),
+        status: finished.detail || (await fillSummary(fillRes, `, clicked ${clicked.text}.`))
       };
     }
 
     const wait = await waitForApplyAdvance(tabId, prevSig, prevUrl, 15000);
     tabId = wait.tabId;
     advanced = Boolean(wait.advanced);
+    await clearReadyToSubmit();
 
     if (advanced) {
       await waitForPageReady(tabId).catch(() => {});
       await setStatus("Autofill: filling the next page...");
-      const nextFill = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs });
+      const nextFill = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
       probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
-      button = describeAutofillButton(probe);
+      const nextReady = probe?.best?.action?.type === "submit";
+      if (nextReady) {
+        await markReadyToSubmit((await chrome.tabs.get(tabId).catch(() => null))?.url || "");
+      }
+      button = describeAutofillButton(probe, { readyToSubmit: nextReady });
       return {
         ok: true,
         ...nextFill,
@@ -1304,14 +1464,18 @@ async function runAutofillStep(profileId, { uploadDocs = null, clickAction = tru
           (nextFill.choiceFilledCount ? `, ${nextFill.choiceFilledCount} choice(s)` : "") +
           (nextFill.bankHits ? `, ${nextFill.bankHits} from Q&A bank` : "") +
           (nextFill.aiFilledCount ? `, AI ${nextFill.aiFilledCount}` : "") +
-          `. ` +
-          (await getCostSummaryText())
+          (loc.summary ? `. Files: ${loc.summary}` : "") +
+          (nextReady ? ". Click Submit to send." : ".") +
+          ` ${await getCostSummaryText()}`
       };
     }
   }
 
   probe = await getApplyActionFromTab(tabId).catch(() => probe);
-  button = describeAutofillButton(probe);
+  button = describeAutofillButton(probe, {
+    readyToSubmit: await isReadyToSubmit((await chrome.tabs.get(tabId).catch(() => null))?.url || "")
+  });
+  const status = await fillSummary(fillRes, clicked?.ok ? `, clicked ${clicked.text}.` : ".");
   return {
     ok: true,
     ...fillRes,
@@ -1319,14 +1483,7 @@ async function runAutofillStep(profileId, { uploadDocs = null, clickAction = tru
     advanced,
     submitted: false,
     button,
-    status:
-      `Autofilled ${fillRes.filledCount || 0} field(s)` +
-      (fillRes.choiceFilledCount ? `, ${fillRes.choiceFilledCount} choice(s)` : "") +
-      (fillRes.bankHits ? `, ${fillRes.bankHits} from Q&A bank` : "") +
-      (fillRes.aiFilledCount ? `, AI-answered ${fillRes.aiFilledCount}` : "") +
-      (clicked?.ok ? `, clicked ${clicked.text}` : "") +
-      ". " +
-      (await getCostSummaryText())
+    status
   };
 }
 
@@ -1341,6 +1498,43 @@ async function sleepMs(ms) {
 
 function isHttpUrl(url) {
   return /^https?:\/\//i.test(String(url || ""));
+}
+
+function isAllowedApplyNavUrl(url) {
+  const href = String(url || "").trim();
+  if (!/^https?:\/\//i.test(href)) return false;
+  try {
+    const u = new URL(href);
+    const host = u.hostname.toLowerCase();
+    const path = `${u.pathname || ""}${u.search || ""}`;
+    if (host === "dice.com" || host.endsWith(".dice.com")) {
+      return /\/job-applications\b|\/job-detail\b|\/wizard\b|easy-apply/i.test(path);
+    }
+    return /\/(apply|application|job-applications)\b/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function applicationSuccessFromUrl(url) {
+  const href = String(url || "");
+  if (!href) return "";
+  try {
+    const u = new URL(href);
+    const path = u.pathname || "";
+    if (
+      /\/wizard\/success(?:\/|$)/i.test(path) ||
+      /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(path) ||
+      /\/apply\/success\b/i.test(path)
+    ) {
+      return "Application submitted (confirmation page).";
+    }
+  } catch {
+    if (/\/wizard\/success(?:\/|\?|#|$)/i.test(href)) {
+      return "Application submitted (confirmation page).";
+    }
+  }
+  return "";
 }
 
 /** Wait for load + a short SPA settle so the job/apply page is actually visible. */
@@ -1384,7 +1578,11 @@ async function navigateTabToUrl(tabId, url) {
 }
 
 function pickBestApplyAction(frameResults = []) {
-  const rank = { next: 1, review: 2, entry: 3, submit: 4 };
+  const anyForm = frameResults.some((f) => f?.isApplicationForm);
+  // On an application form, Submit beats Next (Dice last wizard step).
+  const rank = anyForm
+    ? { submit: 1, next: 2, review: 3, entry: 4 }
+    : { entry: 1, next: 2, review: 3, submit: 4 };
   let best = null;
   for (const f of frameResults) {
     if (!f?.action?.type) continue;
@@ -1404,13 +1602,14 @@ function pickBestApplyAction(frameResults = []) {
     if (cr < br) best = cand;
     else if (cr === br && cand.isApplicationForm && !best.isApplicationForm) best = cand;
   }
-  const anyForm = frameResults.some((f) => f?.isApplicationForm);
   const blockedReason =
     frameResults.find((f) => f?.blockedReason)?.blockedReason || "";
   const jobUnavailable =
     frameResults.find((f) => f?.jobUnavailable)?.jobUnavailable || "";
   const applicationSuccess =
-    frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess || "";
+    frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess ||
+    applicationSuccessFromUrl(best?.href || frameResults[0]?.href || "") ||
+    "";
   const applyUrls = [];
   for (const f of frameResults) {
     for (const u of f?.applyUrls || []) {
@@ -1424,6 +1623,7 @@ function pickBestApplyAction(frameResults = []) {
     jobUnavailable,
     applicationSuccess,
     applyUrls,
+    needsFill: frameResults.some((f) => f?.needsFill),
     signature: best?.signature || frameResults[0]?.signature || "",
     href: best?.href || frameResults[0]?.href || ""
   };
@@ -1432,14 +1632,23 @@ function pickBestApplyAction(frameResults = []) {
 async function getApplyActionFromTab(tabId) {
   await ensureAutofillScript(tabId);
   const frames = await sendMessageToAllFrames(tabId, { type: "get_apply_action" }, { attempts: 1 });
-  return pickBestApplyAction(frames);
+  const picked = pickBestApplyAction(frames);
+  const live = await chrome.tabs.get(tabId).catch(() => null);
+  const urlSuccess = applicationSuccessFromUrl(live?.url || live?.pendingUrl || "");
+  if (urlSuccess && !picked.applicationSuccess) {
+    picked.applicationSuccess = urlSuccess;
+    picked.href = live?.url || picked.href;
+  }
+  return picked;
 }
 
-async function waitForApplicationSuccess(tabId, timeoutMs = 20000) {
+async function waitForApplicationSuccess(tabId, timeoutMs = 25000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const live = await chrome.tabs.get(tabId).catch(() => null);
     if (!live?.id) return { success: false, tabGone: true, detail: "", tabId };
+    const urlHit = applicationSuccessFromUrl(live.url || live.pendingUrl || "");
+    if (urlHit) return { success: true, tabGone: false, detail: urlHit, tabId };
     try {
       await ensureAutofillScript(tabId);
       const probe = await getApplyActionFromTab(tabId);
@@ -1450,9 +1659,16 @@ async function waitForApplicationSuccess(tabId, timeoutMs = 20000) {
         const [{ result } = {}] = await chrome.scripting.executeScript({
           target: { tabId },
           func: () => {
+            const path = String(location.pathname || "");
+            if (
+              /\/wizard\/success(?:\/|$)/i.test(path) ||
+              /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(path)
+            ) {
+              return "Application submitted (confirmation page).";
+            }
             const blob = `${document.title || ""}\n${document.body?.innerText || ""}`.slice(0, 12000);
             const match = blob.match(
-              /awesome!?\s*your application is on its way|your application is on its way|your application has been submitted|application submitted successfully/i
+              /awesome!?\s*your application is on its way|your application is on its way|your application has been submitted|application submitted successfully|thank you for (your )?appl(y|ication)|we('ve| have) received your application/i
             );
             return match ? String(match[0]) : "";
           }
@@ -1477,7 +1693,7 @@ async function closeTabQuietly(tabId) {
  */
 async function finishSubmittedApplication(tabId, { closeOnSuccess = false, clickLabel = "Submit" } = {}) {
   await waitForPageReady(tabId).catch(() => {});
-  const waited = await waitForApplicationSuccess(tabId, 20000);
+  const waited = await waitForApplicationSuccess(tabId, 25000);
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
       await closeTabQuietly(tabId);
@@ -1578,8 +1794,9 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
 }
 
 /**
- * Universal multi-step Auto Apply (Jobright-style): fill â†’ Next if no Submit â†’
- * wait for next page/tab â†’ refill. Never auto-clicks final Submit.
+ * Universal multi-step Auto Apply: fill → Next if no Submit →
+ * wait for next page/tab → refill. On the last page, clicks Submit,
+ * waits for the confirmation URL/page, then optionally closes the tab.
  */
 async function startMultiStepApplyOnTab(
   profileId,
@@ -1600,6 +1817,7 @@ async function startMultiStepApplyOnTab(
 
   let currentTabId = tab.id;
   const site = detectSiteFromUrl(tab.url);
+  const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
   const summary = {
     ok: true,
@@ -1649,80 +1867,41 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
-    // Not on a form yet: click Easy Apply / Apply, or follow apply URL.
-    if (!probe.anyForm && (!probe.best || probe.best.action.type === "entry")) {
+    // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel).
+    if (!probe.anyForm) {
       const live = await chrome.tabs.get(currentTabId).catch(() => null);
       const prevUrl = live?.url || "";
       const prevSig = probe.signature || "";
+      const allowedApplyUrl = (probe.applyUrls || []).find((u) => isAllowedApplyNavUrl(u));
 
       if (probe.best?.action?.type === "entry") {
+        await setStatus(`Auto Apply: clicking ${probe.best.action.text || "Easy Apply"}...`);
         const clickRes = await sendMessageToTab(
           currentTabId,
           { type: "click_apply_action", preferredType: "entry" },
           { attempts: 2, frameId: probe.best.frameId }
         );
-        if (clickRes?.navigateUrl) {
+        if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
           await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
         }
+      } else if (allowedApplyUrl) {
+        await setStatus("Auto Apply: opening the application page...");
+        await navigateTabToUrl(currentTabId, allowedApplyUrl);
       } else {
-        const entry = await sendMessageToTab(
-          currentTabId,
-          { type: "click_easy_apply_entry" },
-          { attempts: 2 }
-        ).catch(() => null);
-        if (entry?.navigateUrl) {
-          await navigateTabToUrl(currentTabId, entry.navigateUrl);
-        } else if (!entry?.clicked && probe.applyUrls?.length) {
-          const nextUrl = String(probe.applyUrls[0] || "").trim();
-          const liveUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || "";
-          if (nextUrl && normalizeUrlForMatch(nextUrl) !== normalizeUrlForMatch(liveUrl)) {
-            await navigateTabToUrl(currentTabId, nextUrl);
-          }
-        } else if (!entry?.clicked && probe.blockedReason) {
-          summary.status = "needs_review";
-          summary.detail = probe.blockedReason;
-          summary.tabId = currentTabId;
-          return summary;
-        }
+        summary.status = "needs_review";
+        summary.detail =
+          probe.blockedReason ||
+          "No Easy Apply / Apply button found on this page.";
+        summary.tabId = currentTabId;
+        return summary;
       }
 
       const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000);
       currentTabId = advanced.tabId;
-      probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
-
-      if (probe.applicationSuccess) {
-        if (closeOnSuccess) await closeTabQuietly(currentTabId);
-        summary.status = "submitted";
-        summary.detail = probe.applicationSuccess;
-        summary.tabId = closeOnSuccess ? null : currentTabId;
-        return summary;
-      }
-
-      if (!probe.anyForm && !(probe.best && probe.best.action.type !== "entry")) {
-        let credNote = "";
-        try {
-          const credentials = await getAccountCredentials();
-          if (credentials.email || credentials.username || credentials.password) {
-            const credRes = await sendMessageToTab(
-              currentTabId,
-              { type: "autofill_credentials", credentials },
-              { attempts: 2 }
-            );
-            if (Number(credRes?.filledCount || 0) > 0) {
-              credNote = ` Saved login prefilled (${(credRes.filled || []).join(", ")}) — sign in, then run Auto Apply again.`;
-            }
-          }
-        } catch {
-          /* best-effort */
-        }
-        summary.status = "needs_review";
-        summary.detail =
-          (probe.blockedReason ||
-            "No application form found on this page. Open the apply form, then run Auto Apply.") +
-          credNote;
-        summary.tabId = currentTabId;
-        return summary;
-      }
+      summary.tabId = currentTabId;
+      summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+      summary.steps = step + 1;
+      continue;
     }
 
     if (probe.blockedReason && !probe.anyForm) {
@@ -1748,10 +1927,17 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
-    await setStatus(`Auto Apply: step ${step + 1}/${maxSteps} — filling form...`);
+    await setStatus(
+      loc.summary
+        ? `Auto Apply: step ${step + 1}/${maxSteps} — uploading ${loc.summary}...`
+        : `Auto Apply: step ${step + 1}/${maxSteps} — filling form...`
+    );
     const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
     if (fillRes?.skipped && step === 0) {
       return { ok: false, error: fillRes.error || "Autofill skipped.", ...summary, status: "failed" };
+    }
+    if (Number(fillRes?.uploadedCount || 0) > 0 && loc.summary) {
+      await setStatus(`Uploaded ${loc.summary} (${fillRes.uploadedCount} file(s)). Filling remaining fields...`);
     }
     summary.filled += Number(fillRes?.filledCount || 0);
     summary.uploaded += Number(fillRes?.uploadedCount || 0);
@@ -1773,6 +1959,18 @@ async function startMultiStepApplyOnTab(
       applicationSuccess: ""
     }));
 
+    // Dice last wizard step: Submit can stay disabled until the SPA finishes
+    // rendering. Wait briefly so we click Submit instead of a leftover Next.
+    if (site === "dice" && !probe.applicationSuccess && probe.best?.action?.type !== "submit") {
+      for (let i = 0; i < 10; i += 1) {
+        await sleepMs(400);
+        const again = await getApplyActionFromTab(currentTabId).catch(() => null);
+        if (!again) continue;
+        probe = again;
+        if (again.applicationSuccess || again.best?.action?.type === "submit") break;
+      }
+    }
+
     if (probe.applicationSuccess) {
       if (closeOnSuccess) await closeTabQuietly(currentTabId);
       summary.status = "submitted";
@@ -1792,11 +1990,19 @@ async function startMultiStepApplyOnTab(
     if (probe.best.action.type === "submit") {
       const clickLabel = probe.best.action.text || "Submit";
       await setStatus(`Autofill: clicking ${clickLabel}...`);
-      const clickRes = await sendMessageToTab(
+      let clickRes = await sendMessageToTab(
         currentTabId,
         { type: "click_apply_action", preferredType: "submit" },
         { attempts: 2, frameId: probe.best.frameId }
       ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+      if (!clickRes?.clicked && !clickRes?.navigateUrl) {
+        await sleepMs(700);
+        clickRes = await sendMessageToTab(
+          currentTabId,
+          { type: "click_apply_action", preferredType: "submit" },
+          { attempts: 2, frameId: probe.best.frameId }
+        ).catch((err) => clickRes || { ok: false, error: String(err?.message || err) });
+      }
       if (clickRes?.navigateUrl) {
         await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
       }
@@ -1810,11 +2016,16 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
-    // Next / Continue / Review / entry — advance then refill.
+    // Next / Continue / Review on the application form only.
     const live = await chrome.tabs.get(currentTabId).catch(() => null);
     const prevUrl = live?.url || "";
     const prevSig = probe.signature || "";
     const actionType = probe.best.action.type;
+    if (actionType !== "next" && actionType !== "review") {
+      summary.status = "ready_for_review";
+      summary.detail = `Filled the form. Unexpected action "${probe.best.action.text || actionType}".`;
+      return summary;
+    }
 
     await setStatus(`Autofill: clicking ${probe.best.action.text || actionType}...`);
     const clickRes = await sendMessageToTab(
@@ -1833,7 +2044,7 @@ async function startMultiStepApplyOnTab(
       summary.tabId = finished.tabId;
       return summary;
     }
-    if (clickRes?.navigateUrl) {
+    if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
       await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
     }
 
@@ -2489,6 +2700,14 @@ async function ensureUploadDocsForImportedJob(jobId, job = null) {
   let docs = await getGeneratedDocsForJob(id);
   if (docs?.resume?.base64 || docs?.coverLetter?.base64) {
     await activateGeneratedDocsForJob(id);
+    const rootLabel = (await getOutputDirectoryName()) || "";
+    if (!docs.pathLabel && (rootLabel || docs.folderName)) {
+      docs = await stampDocsPath(
+        docs,
+        rootLabel && docs.folderName ? `${rootLabel} / ${docs.folderName}` : docs.folderName || rootLabel,
+        id
+      );
+    }
     return docs;
   }
 
@@ -2537,6 +2756,13 @@ async function ensureUploadDocsForImportedJob(jobId, job = null) {
 
   if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return null;
 
+  const rootLabel = (await getOutputDirectoryName()) || "";
+  docs = {
+    ...docs,
+    pathLabel:
+      docs.pathLabel ||
+      (rootLabel && docs.folderName ? `${rootLabel} / ${docs.folderName}` : docs.folderName || rootLabel)
+  };
   await setGeneratedDocsForJob(id, docs);
   await activateGeneratedDocsForJob(id);
   return docs;
@@ -2617,12 +2843,16 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
     if (flushResult?.ok) {
       pathLabel = flushResult.pathLabel || `${rootLabel} / ${folderName}`;
       await showSaveNotification(pathLabel);
+      docs = await stampDocsPath(docs, pathLabel, importedJobId);
       return { pathLabel, folderName, docs };
     }
 
     if (flushResult?.needsPermission) {
       pathLabel = await waitForPanelFolderUnlock(rootLabel, folderName);
-      if (pathLabel) return { pathLabel, folderName, docs };
+      if (pathLabel) {
+        docs = await stampDocsPath(docs, pathLabel, importedJobId);
+        return { pathLabel, folderName, docs };
+      }
       lastError =
         "Chrome needs one click in the extension panel to unlock the output folder.";
       break;
@@ -2636,6 +2866,7 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
   if (!stillPending) {
     pathLabel = `${rootLabel || "Selected folder"} / ${folderName}`;
     await showSaveNotification(pathLabel);
+    docs = await stampDocsPath(docs, pathLabel, importedJobId);
     return { pathLabel, folderName, docs };
   }
 
@@ -2946,6 +3177,22 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     runCoverLetter: !resumeOnly
   });
 
+  if (meta?.importedJobId) {
+    const live = (await getImportedJobsById())[meta.importedJobId];
+    await setImportedJobStatus(meta.importedJobId, {
+      status: live?.status || "generated",
+      statusDetail: live?.statusDetail || saved?.status || "",
+      patch: {
+        hasGeneratedResume: true,
+        resumeFolder: saved?.folderName || "",
+        resumeFileName: saved?.resumeFileName || "",
+        coverLetterFileName: saved?.coverLetterFileName || "",
+        atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0,
+        atsReport
+      }
+    });
+  }
+
   assertNotCancelled();
   try {
     await setStatus("Building application brief for form fill...");
@@ -3165,9 +3412,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         await ensureAutofillScript(tab.id);
         const probe = await getApplyActionFromTab(tab.id).catch(() => ({}));
+        const readyToSubmit = await isReadyToSubmit(tab.url || "");
         safeSendResponse(sendResponse, {
           ok: true,
-          button: describeAutofillButton(probe),
+          button: describeAutofillButton(probe, { readyToSubmit }),
           anyForm: Boolean(probe?.anyForm),
           actionText: probe?.best?.action?.text || ""
         });
@@ -3192,7 +3440,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         await setStatus("Autofill: filling this step...");
         const result = await runAutofillStep(profileId, {
-          clickAction: message.clickAction !== false
+          clickAction: message.clickAction !== false,
+          preferredAction: message.preferredAction || ""
         });
         if (result.skipped) {
           await setStatus(`Autofill skipped: ${result.error}`);
@@ -3535,18 +3784,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           );
         }
 
+        const loc = await formatUploadDocsLocation(uploadDocs);
         await setImportedJobStatus(importedJobId, {
           status: "filling",
-          statusDetail: `Running Auto Apply (${site})...`
+          statusDetail: loc.summary
+            ? `Uploading ${loc.summary} and filling the form (${site})...`
+            : `Running Auto Apply (${site})...`
         });
         await setStatus(
-          `Running Auto Apply (${site}) with ${uploadDocs.resume?.fileName || "resume"}${
-            uploadDocs.coverLetter?.fileName ? ` + ${uploadDocs.coverLetter.fileName}` : ""
-          }...`
+          loc.summary
+            ? `Uploading from ${loc.summary} onto ${site}...`
+            : `Running Auto Apply (${site}) with ${uploadDocs.resume?.fileName || "resume"}${
+                uploadDocs.coverLetter?.fileName ? ` + ${uploadDocs.coverLetter.fileName}` : ""
+              }...`
         );
 
         const ea = await startMultiStepApplyOnTab(profileId, tabId, {
-          maxSteps: 10,
+          maxSteps: 14,
           uploadDocs,
           closeOnSuccess: true
         });

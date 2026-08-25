@@ -21,7 +21,8 @@ import {
   flushPendingOutputToSelectedDirectory,
   getLastSaveMeta,
   browseLastSavedJobDirectory,
-  readJobUploadDocsFromDirectory
+  readJobUploadDocsFromDirectory,
+  sanitizeJobFolderName
 } from "./fs-output.js";
 import { isLinkedInSource, isDiceSource, isJobrightSource, parseImportedJobsCsvText } from "./csv-jobs.js";
 import {
@@ -241,9 +242,18 @@ function renderAtsBadge(report) {
   if (atsScoreTooltipEl) atsScoreTooltipEl.textContent = formatAtsTooltip(report);
 }
 
+function renderAtsForCurrentJob(fallbackReport) {
+  const job = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
+  if (job?.atsReport || Number.isFinite(Number(job?.atsScore))) {
+    renderAtsBadge(job.atsReport || { score: job.atsScore, finalScore: job.atsScore });
+    return;
+  }
+  renderAtsBadge(fallbackReport);
+}
+
 async function refreshAtsBadge() {
   const data = await chrome.storage.local.get("last_ats_report");
-  renderAtsBadge(data.last_ats_report);
+  renderAtsForCurrentJob(data.last_ats_report);
 }
 
 function readSheetFields() {
@@ -513,6 +523,36 @@ function hideSaveBanner() {
   if (saveBannerEl) saveBannerEl.hidden = true;
 }
 
+function resumeFolderNameForJob(job) {
+  const raw = String(job?.resumeFolder || job?.folderName || "").trim();
+  if (!raw) return "";
+  const last = raw.split(/[/\\]/).map((p) => p.trim()).filter(Boolean).pop() || "";
+  return sanitizeJobFolderName(last);
+}
+
+async function pathLabelForImportedJob(job) {
+  const folder = resumeFolderNameForJob(job);
+  if (!folder) return "";
+  const root = (await getOutputDirectoryName()) || "";
+  return root ? `${root} / ${folder}` : folder;
+}
+
+async function refreshSaveBannerForCurrentJob() {
+  const job = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
+  if (job) {
+    const label = await pathLabelForImportedJob(job);
+    if (label) {
+      showSaveBanner(label);
+      renderAtsForCurrentJob(null);
+      return;
+    }
+    hideSaveBanner();
+    return;
+  }
+  const meta = await getLastSaveMeta();
+  if (meta?.pathLabel) showSaveBanner(meta.pathLabel);
+}
+
 function syncSheetSummaryNote() {
   if (!sheetSummaryNoteEl) return;
   const spreadsheetUrl = (spreadsheetUrlEl?.value || "").trim();
@@ -564,7 +604,7 @@ function displayImportedJobStatus(job) {
     case "needs_review":
       return "Needs review";
     case "completed":
-      return "Completed";
+      return "Applied";
     case "unavailable":
       return "No longer available";
     case "check_failed":
@@ -602,10 +642,20 @@ async function refreshImportedJobsFromStorage() {
   } else {
     // First load / no preference yet — check every job by default.
     for (const id of importedJobsOrder) {
-      if (importedJobsById[id]?.status !== "unavailable") importedJobsChecked.add(String(id));
+      const status = importedJobsById[id]?.status;
+      if (status !== "unavailable" && status !== "completed") importedJobsChecked.add(String(id));
     }
     persistCheckedJobs();
   }
+  let stripped = false;
+  for (const id of [...importedJobsChecked]) {
+    const status = importedJobsById[id]?.status;
+    if (status === "completed" || status === "unavailable") {
+      importedJobsChecked.delete(id);
+      stripped = true;
+    }
+  }
+  if (stripped) persistCheckedJobs();
 
   renderImportedJobs();
 }
@@ -625,7 +675,6 @@ function setImportedJobsFilter(filter, { persist = true } = {}) {
 }
 
 function importedJobMatchesFilter(job) {
-  if (job?.status === "completed") return false;
   const source = String(job?.source || "").trim().toLowerCase();
   if (importedJobsFilter === "dice") return isDiceSource(source);
   if (importedJobsFilter === "jobright") return isJobrightSource(source);
@@ -699,8 +748,15 @@ function visibleImportedJobIds() {
   });
 }
 
+function batchableImportedJobIds() {
+  return visibleImportedJobIds().filter((id) => {
+    const status = String(importedJobsById[id]?.status || "");
+    return status !== "completed" && status !== "unavailable";
+  });
+}
+
 function updateBatchBar() {
-  const visible = visibleImportedJobIds();
+  const visible = batchableImportedJobIds();
   const selectedVisible = visible.filter((id) => importedJobsChecked.has(id));
   if (batchSelectionNoteEl) {
     batchSelectionNoteEl.textContent = `${selectedVisible.length} selected`;
@@ -746,11 +802,13 @@ function renderImportedJobs() {
     const isUnavailable = job.status === "unavailable";
     const isCheckFailed = job.status === "check_failed";
     const isApplyFailed = job.status === "failed";
+    const isCompleted = job.status === "completed";
     if (isUnavailable) card.classList.add("is-unavailable");
     if (isCheckFailed) card.classList.add("is-check-failed");
     if (isApplyFailed) card.classList.add("is-failed");
+    if (isCompleted) card.classList.add("is-applied");
     // Keep blocked/compact cards collapsed unless the user explicitly opens them.
-    if (jobId === importedJobsSelectedId && !isUnavailable) {
+    if (jobId === importedJobsSelectedId && !isUnavailable && !isCompleted) {
       card.open = true;
     }
 
@@ -773,8 +831,9 @@ function renderImportedJobs() {
     const check = document.createElement("input");
     check.type = "checkbox";
     check.className = "job-check";
-    check.title = "Select for batch resume build";
-    check.checked = importedJobsChecked.has(jobId);
+    check.title = isCompleted ? "Already applied" : "Select for batch resume build";
+    check.checked = !isCompleted && importedJobsChecked.has(jobId);
+    check.disabled = isCompleted;
     check.addEventListener("click", (e) => {
       e.stopPropagation();
     });
@@ -803,7 +862,6 @@ function renderImportedJobs() {
       await removeImportedJob(jobId);
     });
 
-    const isCompleted = job.status === "completed";
     const isInProgress = ["opening", "generating", "opening_form", "filling"].includes(String(job.status));
     removeBtn.disabled = false;
 
@@ -861,6 +919,7 @@ function renderImportedJobs() {
         ? "Retry"
         : "Apply";
       applySummaryBtn.disabled = false;
+      applySummaryBtn.title = "Apply (Alt+Enter when this job is selected)";
       applySummaryBtn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -869,6 +928,13 @@ function renderImportedJobs() {
     }
 
     toolbar.appendChild(applySummaryBtn);
+    if (isCompleted) {
+      const appliedBadge = document.createElement("span");
+      appliedBadge.className = "job-applied-badge";
+      appliedBadge.textContent = "Applied";
+      appliedBadge.title = String(job.statusDetail || "Application submitted");
+      toolbar.appendChild(appliedBadge);
+    }
     if (isCheckFailed) {
       const warnBadge = document.createElement("span");
       warnBadge.className = "job-check-failed-badge";
@@ -977,6 +1043,7 @@ function renderImportedJobs() {
       if (jdLinkEl) jdLinkEl.value = job.jdLink || "";
       if (jdTextEl) jdTextEl.value = job.jdText || "";
       persistJobFields().catch(() => {});
+      refreshSaveBannerForCurrentJob().catch(() => {});
     };
 
     summary.addEventListener("click", (e) => {
@@ -1000,6 +1067,7 @@ function renderImportedJobs() {
 
   importedJobsListEl.appendChild(frag);
   updateBatchBar();
+  refreshSaveBannerForCurrentJob().catch(() => {});
 }
 
 async function removeImportedJob(jobId) {
@@ -1110,7 +1178,7 @@ async function batchGenerateSelectedJobs() {
 
   const runnable = jobIds.filter((id) => {
     const job = importedJobsById[id];
-    if (!job || job.status === "unavailable") return false;
+    if (!job || job.status === "unavailable" || job.status === "completed") return false;
     // Need a JD to generate; closed-check still runs in SW when a URL exists.
     return Boolean(String(job.jdText || "").trim() || String(job.jdLink || job.url || "").trim());
   });
@@ -1153,7 +1221,7 @@ async function checkSelectedJobsAvailability() {
     const job = importedJobsById[id];
     if (!job) return false;
     const status = String(job.status || "");
-    if (["opening", "generating", "opening_form", "filling"].includes(status)) return false;
+    if (["opening", "generating", "opening_form", "filling", "completed"].includes(status)) return false;
     return Boolean(String(job.jdLink || job.url || "").trim());
   });
   if (!runnable.length) {
@@ -1336,6 +1404,8 @@ async function markImportedJobCompleted(jobId) {
     completedAt: Date.now(),
     ...(profileId ? { profileId } : null)
   });
+  importedJobsChecked.delete(jobId);
+  persistCheckedJobs();
   if (!job) return;
   await appendApplicationEvent({
     profileId: job.profileId || profileId,
@@ -1394,23 +1464,22 @@ async function unblockImportedJob(jobId) {
 }
 
 async function refreshSaveBannerFromStorage() {
-  const meta = await getLastSaveMeta();
-  if (meta?.pathLabel) {
-    showSaveBanner(meta.pathLabel);
-  }
+  await refreshSaveBannerForCurrentJob();
 }
 
 async function openSavedFolder() {
   setStatus("Opening saved folder in File Explorer...", "running");
   try {
+    const selectedJob = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
+    const selectedFolder = resumeFolderNameForJob(selectedJob);
     const meta = await getLastSaveMeta();
-    if (!meta) {
+    if (!selectedFolder && !meta) {
       setStatus("Nothing saved yet.", "error");
       return;
     }
 
     // Prefer Explorer reveal via chrome.downloads.show when we already have an id.
-    if (meta.downloadId != null && meta.method === "downloads") {
+    if (!selectedFolder && meta?.downloadId != null && meta.method === "downloads") {
       const res = await chrome.runtime.sendMessage({
         type: "open_saved_folder",
         meta
@@ -1422,8 +1491,8 @@ async function openSavedFolder() {
       return;
     }
 
-    // FS saves: open a dialog rooted at the saved folder (no re-download).
-    const result = await browseLastSavedJobDirectory();
+    // FS saves: open a dialog rooted at the selected job folder (no re-download).
+    const result = await browseLastSavedJobDirectory(selectedFolder);
     if (result?.aborted) {
       setStatus("Folder browser closed.");
       return;
@@ -1486,6 +1555,7 @@ async function tryFlushPendingOutput({ interactive = false } = {}) {
       const pathLabel = result.pathLabel || "selected folder";
       setStatus(`Done — saved files to ${pathLabel}`, "done");
       showSaveBanner(pathLabel);
+      await refreshSaveBannerForCurrentJob();
       await chrome.storage.local.set({
         generation_status: `Done — saved files to ${pathLabel}`
       });
@@ -1952,6 +2022,7 @@ async function collectJobMetaOrShowError() {
       salaryMin: scrapedJobMeta?.salaryMin || "",
       salaryMax: scrapedJobMeta?.salaryMax || "",
       datePosted: scrapedJobMeta?.datePosted || "",
+      importedJobId: importedJobsSelectedId || "",
       resumeOnly: isResumeOnlyEnabled(),
       trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
     }
@@ -2107,12 +2178,14 @@ async function openQaEditor() {
   openSubpage(url.toString(), { title: "Q&A Editor", kind: "qa" });
 }
 
+let autofillInProgress = false;
+
 async function applyAutofillButtonState(button = null) {
   if (!autofillBtn) return;
   const label = String(button?.label || "Autofill").trim() || "Autofill";
   const title =
     String(button?.title || "").trim() ||
-    "Fill this step (Q&A bank, then AI). Switches to Next / Submit when those buttons appear.";
+    "Fill this step first. On a one-page form the button becomes Submit after filling.";
   const hint = '<kbd class="shortcut-hint">Alt+Shift+E</kbd>';
   autofillBtn.innerHTML = `${label} ${hint}`;
   autofillBtn.title = title;
@@ -2136,8 +2209,16 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
     return;
   }
 
+  const preferredAction =
+    String(autofillBtn?.dataset?.actionLabel || "").toLowerCase() === "submit" ? "submit" : "";
+
+  autofillInProgress = true;
   if (!quiet) {
-    setStatus("Autofill: filling this step...", "running");
+    setStatus(preferredAction === "submit" ? "Clicking Submit..." : "Autofill: filling this step...", "running");
+    updateJobsWorkStatus({
+      running: true,
+      statusText: preferredAction === "submit" ? "Clicking Submit..." : "Autofill: filling this step..."
+    });
   }
   setBusy(true);
   try {
@@ -2145,7 +2226,8 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
     const res = await chrome.runtime.sendMessage({
       type: "autofill_current_page",
       profileId,
-      clickAction: true
+      clickAction: true,
+      preferredAction
     });
     if (!res?.ok) {
       throw new Error(res?.error || "Autofill failed.");
@@ -2162,6 +2244,8 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
     }
     throw err;
   } finally {
+    autofillInProgress = false;
+    if (!quiet) updateJobsWorkStatus({ running: false });
     setBusy(false);
     refreshAutofillButtonLabel().catch(() => {});
   }
@@ -2408,7 +2492,7 @@ filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jo
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));
 selectAllJobsEl?.addEventListener("change", () => {
-  const visible = visibleImportedJobIds();
+  const visible = batchableImportedJobIds();
   if (selectAllJobsEl.checked) {
     for (const id of visible) importedJobsChecked.add(id);
   } else {
@@ -2617,12 +2701,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
         if (message.jobId) {
-          await setGeneratedDocsForJob(message.jobId, docs);
+          const rootName = (await getOutputDirectoryName()) || "";
+          const pathLabel =
+            rootName && docs.folderName ? `${rootName} / ${docs.folderName}` : docs.folderName || rootName;
+          await setGeneratedDocsForJob(message.jobId, { ...docs, pathLabel });
         }
+        const rootName = (await getOutputDirectoryName()) || "";
         sendResponse({
           ok: true,
           docs: {
             folderName: docs.folderName || "",
+            pathLabel:
+              rootName && docs.folderName ? `${rootName} / ${docs.folderName}` : docs.folderName || rootName,
             resume: docs.resume || null,
             coverLetter: docs.coverLetter || null
           }
@@ -2684,6 +2774,18 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && key === "enter") {
     e.preventDefault();
     generateResumeAndCoverLetter().catch(() => {});
+    return;
+  }
+  // Alt+Enter on a selected job card runs the same action as its Apply button.
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && key === "enter") {
+    if (confirmModalEl && !confirmModalEl.hidden) return;
+    if (subpageOverlayEl && !subpageOverlayEl.hidden) return;
+    const jobId = importedJobsSelectedId;
+    const job = jobId ? importedJobsById[jobId] : null;
+    if (!job || job.status === "completed" || job.status === "unavailable") return;
+    if (["opening", "generating", "opening_form", "filling"].includes(String(job.status))) return;
+    e.preventDefault();
+    applyImportedJob(jobId).catch((err) => setStatus(String(err.message || err), "error"));
   }
 });
 
@@ -2734,6 +2836,11 @@ panelPollTimer = setInterval(async () => {
       });
       setBusy(true);
       if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+    } else if (autofillInProgress) {
+      updateJobsWorkStatus({
+        running: true,
+        statusText: statusText || "Autofill: working..."
+      });
     } else if (wasGenerationRunning) {
       wasGenerationRunning = false;
       updateGenerationProgress({
@@ -2742,31 +2849,36 @@ panelPollTimer = setInterval(async () => {
         clearIdleStatus: true
       });
       setBusy(false);
-      renderAtsBadge(data.last_ats_report);
+      renderAtsForCurrentJob(data.last_ats_report);
     } else {
       setBusy(false);
-      renderAtsBadge(data.last_ats_report);
+      renderAtsForCurrentJob(data.last_ats_report);
     }
 
     // While a gesture is pending, the click/keydown handler drives the retry.
     if (data.pending_fs_write && !awaitingFolderPermission) {
       await tryFlushPendingOutput();
     }
-    if (data.last_save_ready && data.last_save_meta?.pathLabel) {
-      showSaveBanner(data.last_save_meta.pathLabel);
+    if (data.last_save_ready) {
       await chrome.storage.local.remove("last_save_ready");
+      await refreshSaveBannerForCurrentJob();
     }
 
+    const nextSelected = data.imported_jobs_selected_id || null;
     const nextVersion = Number(data.imported_jobs_version || 0);
     if (nextVersion && nextVersion !== importedJobsVersion) {
       importedJobsById = data.imported_jobs_by_id || {};
       importedJobsOrder = data.imported_jobs_order || [];
-      importedJobsSelectedId = data.imported_jobs_selected_id || null;
+      importedJobsSelectedId = nextSelected;
       importedJobsVersion = nextVersion;
       for (const id of [...importedJobsChecked]) {
         if (!importedJobsById[id]) importedJobsChecked.delete(id);
       }
       renderImportedJobs();
+    } else if (nextSelected !== importedJobsSelectedId) {
+      importedJobsSelectedId = nextSelected;
+      if (data.imported_jobs_by_id) importedJobsById = data.imported_jobs_by_id;
+      refreshSaveBannerForCurrentJob().catch(() => {});
     }
 
     if (!capturePollRunning) {

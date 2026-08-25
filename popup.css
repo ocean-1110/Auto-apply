@@ -484,6 +484,32 @@ html.ocean-in-panel #cancelBtnBottom {
   font-weight: 700;
 }
 
+.job-card.is-applied {
+  border-color: #86efac;
+  background: linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%);
+  box-shadow: inset 3px 0 0 #16a34a;
+}
+
+.job-card.is-applied .job-summary-title,
+.job-card.is-applied .job-summary-status {
+  color: #15803d;
+  font-weight: 700;
+}
+
+.job-applied-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #86efac;
+  background: #f0fdf4;
+  color: #15803d;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .job-error.is-warn {
   color: #b45309;
 }

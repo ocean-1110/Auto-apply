@@ -293,8 +293,23 @@ export async function getLastJobDirectoryHandle() {
  * picker rooted at the exact saved directory so the generated files are right
  * there, and open whatever the user selects — no downloads, no save prompts.
  */
-export async function browseLastSavedJobDirectory() {
-  const jobDir = await getLastJobDirectoryHandle();
+export async function browseLastSavedJobDirectory(preferredFolderName = "") {
+  let jobDir = null;
+  const wanted = sanitizeJobFolderName(preferredFolderName || "");
+  if (wanted) {
+    const root = await getOutputDirectoryHandle();
+    if (root) {
+      const allowed = await ensureDirectoryPermission(root, { interactive: true });
+      if (allowed) {
+        try {
+          jobDir = await root.getDirectoryHandle(wanted, { create: false });
+        } catch {
+          jobDir = null;
+        }
+      }
+    }
+  }
+  if (!jobDir) jobDir = await getLastJobDirectoryHandle();
   if (!jobDir) {
     throw new Error("No saved job folder is available yet.");
   }

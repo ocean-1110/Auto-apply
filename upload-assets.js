@@ -66,6 +66,7 @@ function normalizeDocsPayload(docs = {}) {
     resume: docs?.resume || null,
     coverLetter: docs?.coverLetter || null,
     folderName: docs?.folderName || "",
+    pathLabel: docs?.pathLabel || "",
     importedJobId: docs?.importedJobId || "",
     updatedAt: Date.now()
   };
@@ -80,6 +81,7 @@ async function publishLastDocsMeta(payload) {
       resumeName: payload.resume?.fileName || "",
       coverLetterName: payload.coverLetter?.fileName || "",
       folderName: payload.folderName || "",
+      pathLabel: payload.pathLabel || "",
       importedJobId: payload.importedJobId || "",
       updatedAt: payload.updatedAt
     }
