@@ -110,6 +110,9 @@ const autoCaptureToggleEl = document.getElementById("autoCaptureToggle");
 const captureNowBtn = document.getElementById("captureNowBtn");
 const captureStatusEl = document.getElementById("captureStatus");
 const importedJobsListEl = document.getElementById("importedJobsList");
+const jobsWorkStatusEl = document.getElementById("jobsWorkStatus");
+const jobsWorkStateEl = document.getElementById("jobsWorkState");
+const jobsWorkDetailEl = document.getElementById("jobsWorkDetail");
 const filterAllJobsBtn = document.getElementById("filterAllJobs");
 const filterDiceJobsBtn = document.getElementById("filterDiceJobs");
 const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
@@ -337,11 +340,26 @@ async function deleteCurrentSheetPreset() {
   setStatus(`Deleted saved sheet${preset ? `: ${presetDisplayLabel(preset)}` : "."}`);
 }
 
+function updateJobsWorkStatus({ running, statusText = "" } = {}) {
+  if (!jobsWorkStatusEl) return;
+  const text = String(statusText || "").trim();
+  if (running) {
+    jobsWorkStatusEl.hidden = false;
+    if (jobsWorkStateEl) jobsWorkStateEl.textContent = "Working";
+    if (jobsWorkDetailEl) jobsWorkDetailEl.textContent = text || "Working...";
+    return;
+  }
+  jobsWorkStatusEl.hidden = true;
+  if (jobsWorkStateEl) jobsWorkStateEl.textContent = "Working";
+  if (jobsWorkDetailEl) jobsWorkDetailEl.textContent = "";
+}
+
 function updateGenerationProgress({ running, statusText, clearIdleStatus = false }) {
   if (!genProgressEl) return;
 
   const text = String(statusText || "").trim();
   if (stopGenerateBtn) stopGenerateBtn.hidden = !running;
+  updateJobsWorkStatus({ running, statusText: text });
 
   if (running) {
     genProgressEl.hidden = false;
@@ -1090,7 +1108,12 @@ async function batchGenerateSelectedJobs() {
     return;
   }
 
-  setStatus(`Starting batch resume build for ${runnable.length} job(s)...`, "running");
+  generationStartPending = true;
+  updateGenerationProgress({
+    running: true,
+    statusText: `Starting batch resume build for ${runnable.length} job(s)...`
+  });
+  setBusy(true);
   const res = await chrome.runtime.sendMessage({
     type: "batch_generate_jobs",
     profileId: collected.profileId,
@@ -1098,7 +1121,13 @@ async function batchGenerateSelectedJobs() {
     jobMeta: collected.jobMeta
   });
   if (!res?.ok) {
-    setStatus(`Batch resume build failed to start: ${String(res?.error || "unknown error")}`, "error");
+    generationStartPending = false;
+    wasGenerationRunning = false;
+    updateGenerationProgress({
+      running: false,
+      statusText: `Batch resume build failed to start: ${String(res?.error || "unknown error")}`
+    });
+    setBusy(false);
   }
 }
 

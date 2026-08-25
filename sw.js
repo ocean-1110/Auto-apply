@@ -2702,9 +2702,14 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     );
     improved = {
       data,
-      atsReport: scoreResumeAgainstJd(data, {
+      atsReport: await scoreResumeAgainstJd(data, {
         jdText: meta.jdText || "",
-        jobTitle: meta.jobTitle || ""
+        jobTitle: meta.jobTitle || "",
+        apiKey,
+        model
+      }).catch((scoreErr) => {
+        if (isCancelError(scoreErr)) throw scoreErr;
+        return null;
       })
     };
   }
@@ -2716,10 +2721,22 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     jdText: meta.jdText || ""
   });
 
-  const scoredFinal = scoreResumeAgainstJd(data, {
-    jdText: meta.jdText || "",
-    jobTitle: meta.jobTitle || ""
-  });
+  let scoredFinal = improved?.atsReport;
+  try {
+    await setStatus("Asking GPT for the final ATS score...");
+    scoredFinal = await scoreResumeAgainstJd(data, {
+      jdText: meta.jdText || "",
+      jobTitle: meta.jobTitle || "",
+      apiKey,
+      model
+    });
+  } catch (scoreErr) {
+    if (isCancelError(scoreErr)) throw scoreErr;
+    await setStatus(
+      `GPT ATS score failed (${String(scoreErr?.message || scoreErr)}). Using the last score if available.`
+    );
+    if (!scoredFinal) scoredFinal = {};
+  }
   const atsReport = {
     ...scoredFinal,
     rewritten: Boolean(improved?.atsReport?.rewritten),

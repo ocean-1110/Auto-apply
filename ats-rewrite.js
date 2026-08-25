@@ -24,15 +24,17 @@ Rewrite this resume so it would pass a US ATS screen AND still read like a real 
 RULES:
 - Write the resume as though it existed before the candidate saw this job posting.
 - Do not make the resume appear custom-written for a single company. Never name the hiring company.
-- When a technology family contains many related capabilities, summarize them naturally rather than enumerating every feature.
-- Allow recruiters to infer adjacent expertise; do not dump every JD keyword into every bullet.
+- Paraphrase duties, processes, and responsibilities. Keep Salesforce product names, clouds, managed packages, and tools spelled EXACTLY as in missingKeywords / the JD (for example nCino, Financial Services Cloud, Flow Builder, Apex, Copado, Gearset, Salesforce DX).
+- Put every missingKeywords item into the skills items strings using that exact spelling.
+- Mention each missing product in at most one experience bullet (prefer SFA Solutions, then Amazon). Use a real project sentence, not a keyword list.
+- Do not dump every JD keyword into every bullet. Do not copy generic JD phrases such as "processes and procedures" or benefits/EEO language.
 - Aim for strong ATS coverage in a natural band (about ${ATS_SCORE_TARGET_MIN}–${ATS_SCORE_DISPLAY_MAX}%). Do not keyword-stuff toward a perfect 100% score.
 - The resume should sound like an experienced engineer describing work completed over many years, not answering an exam.
 - Role titles should be aligned with the role in the JD, with a natural career arc: earlier roles more junior / narrower, later roles closer to the target seniority and scope.
 - Experience in each role must be appropriate for that point in the candidate's career — do not give the earliest job the same scope as the current one.
 - Keep bullets as one long sentence each (~170–240 characters), concrete, with tools and impact.
-- Skills: 6–9 categories. Dense comma-separated items. Mix JD-relevant tools with adjacent/broader stack so it does not mirror the JD.
-- Profile: 5–7 sentences, professional, not a paraphrase of the JD.
+- Skills: 6–9 categories. Dense comma-separated items. Mix exact JD product names with adjacent/broader stack so bullets stay human.
+- Profile: 5–7 sentences, professional, not a paraphrase of the JD. Named products may appear once in the profile.
 - Do not invent employers, dates, education, certifications, or contact details.
 - If certifications are empty, keep them empty.
 - Return ONLY valid JSON in the same schema as the input resume.
@@ -255,6 +257,7 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
             skillsCoverage: atsReport?.skillsCoverage,
             keywordCoverage: atsReport?.keywordCoverage,
             missingKeywords: atsReport?.missing || [],
+            plantTheseExactTermsInSkills: atsReport?.plantableMissing || atsReport?.criticalMissing || atsReport?.missing || [],
             issuesToFix: issues || [],
             lockedIdentity: locked,
             currentResume: data,
@@ -267,7 +270,7 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
       {
         role: "user",
         content:
-          "Return the COMPLETE rewritten resume JSON now. Keep lockedIdentity employers, dates, education, contact, and certification list. Align the latest title with the target job title; earlier titles should show career growth."
+          "Return the COMPLETE rewritten resume JSON now. Keep lockedIdentity employers, dates, education, contact, and certification list. Align the latest title with the target job title; earlier titles should show career growth. Put every plantTheseExactTermsInSkills value into skills items with that exact spelling. Mention each missing product in at most one SFA Solutions or Amazon bullet."
       }
     ]
   });
@@ -286,6 +289,7 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
 
 function needsRewrite(atsReport, localIssues, judge) {
   if (Number(atsReport?.score) < ATS_REWRITE_MIN_SCORE) return true;
+  if ((atsReport?.criticalMissing || []).length) return true;
   if (localIssues.length) return true;
   if (judge && (judge.realistic === false || judge.customWrittenForThisJob === true)) return true;
   return false;
@@ -298,18 +302,19 @@ export async function ensureAtsReadyResume(
   data,
   { apiKey, model, jdText = "", jobTitle = "", companyName = "", setStatus } = {}
 ) {
-  const scoreOpts = { jdText, jobTitle };
+  const scoreOpts = { jdText, jobTitle, apiKey, model };
   let current = data;
-  let atsReport = scoreResumeAgainstJd(current, scoreOpts);
-  const previousScore = atsReport.score;
-
   const status = async (text) => {
     if (typeof setStatus === "function") await setStatus(text);
   };
+  await status("Asking GPT for ATS score vs the job description...");
+  let atsReport = await scoreResumeAgainstJd(current, scoreOpts);
+  const previousScore = atsReport.score;
 
   let localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
   let judge = null;
-  if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length) {
+  const hasCriticalGaps = (atsReport?.criticalMissing || []).length > 0;
+  if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length && !hasCriticalGaps) {
     await status(`ATS ${atsReport.score}% — checking that the resume still reads as a realistic career...`);
     try {
       judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
@@ -336,6 +341,9 @@ export async function ensureAtsReadyResume(
     ...(judge?.issues || []),
     atsReport.score < ATS_REWRITE_MIN_SCORE
       ? `ATS score ${atsReport.score} is below ${ATS_REWRITE_MIN_SCORE}.`
+      : "",
+    (atsReport?.criticalMissing || []).length
+      ? `Named JD products still missing: ${atsReport.criticalMissing.join(", ")}.`
       : ""
   ].filter(Boolean);
 
@@ -356,10 +364,15 @@ export async function ensureAtsReadyResume(
     });
     if (!rewritten) break;
     current = rewritten;
-    atsReport = scoreResumeAgainstJd(current, scoreOpts);
+    atsReport = await scoreResumeAgainstJd(current, scoreOpts);
     localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
     judge = null;
-    if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length && attempts < MAX_REWRITE_ATTEMPTS) {
+    if (
+      atsReport.score >= ATS_REWRITE_MIN_SCORE &&
+      !localIssues.length &&
+      attempts < MAX_REWRITE_ATTEMPTS &&
+      !(atsReport?.criticalMissing || []).length
+    ) {
       try {
         judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
       } catch (err) {
