@@ -23,6 +23,10 @@ html, body {
   font: 15px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
+html.ocean-in-panel #closeBtn {
+  display: none;
+}
+
 .page {
   max-width: 980px;
   margin: 0 auto;

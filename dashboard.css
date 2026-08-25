@@ -36,6 +36,10 @@ body {
   font: 15px/1.45 Outfit, "Segoe UI", sans-serif;
 }
 
+html.ocean-in-panel #closeBtn {
+  display: none;
+}
+
 .page {
   max-width: 1180px;
   margin: 0 auto;

@@ -1,5 +1,6 @@
 import { getAllTemplates, DEFAULT_TEMPLATE_ID, resumeJsonToHtml } from "./templates/index.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
+import { closeHostWindow } from "./close-host.js";
 
 const els = {
   templateSelect: document.getElementById("templateSelect"),
@@ -119,7 +120,7 @@ els.refreshBtn.addEventListener("click", () => {
 els.printBtn.addEventListener("click", () => {
   els.previewFrame.contentWindow?.print();
 });
-els.closeBtn.addEventListener("click", () => window.close());
+els.closeBtn.addEventListener("click", () => closeHostWindow());
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;

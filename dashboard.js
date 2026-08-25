@@ -1,5 +1,6 @@
 import { getResumeProfiles } from "./profiles.js";
 import { getApplicationLog, buildDashboardStats, STATUS_META } from "./application-log.js";
+import { closeHostWindow } from "./close-host.js";
 
 const els = {
   profileFilter: document.getElementById("profileFilter"),
@@ -212,7 +213,7 @@ els.profileFilter.addEventListener("change", render);
 els.refreshBtn.addEventListener("click", () => {
   boot().catch(() => {});
 });
-els.closeBtn.addEventListener("click", () => window.close());
+els.closeBtn.addEventListener("click", () => closeHostWindow());
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;

@@ -44,6 +44,10 @@ const templateSelectEl = document.getElementById("templateSelect");
 const deleteProfileBtn = document.getElementById("deleteProfile");
 const openPreviewBtn = document.getElementById("openPreview");
 const openDashboardBtn = document.getElementById("openDashboard");
+const subpageOverlayEl = document.getElementById("subpageOverlay");
+const subpageFrameEl = document.getElementById("subpageFrame");
+const subpageTitleEl = document.getElementById("subpageTitle");
+const subpageBackBtn = document.getElementById("subpageBackBtn");
 const jobTitleEl = document.getElementById("jobTitle");
 const companyNameEl = document.getElementById("companyName");
 const jdLinkEl = document.getElementById("jdLink");
@@ -2046,144 +2050,61 @@ async function refreshQaBank() {
   }
 }
 
-let previewWindowId = null;
+function closeSubpage() {
+  if (!subpageOverlayEl || subpageOverlayEl.hidden) return;
+  const wasProfile = subpageFrameEl?.dataset.kind === "profile";
+  subpageOverlayEl.hidden = true;
+  document.body.classList.remove("subpage-open");
+  if (subpageFrameEl) {
+    subpageFrameEl.removeAttribute("src");
+    delete subpageFrameEl.dataset.kind;
+  }
+  if (wasProfile) {
+    refreshProfiles(profileSelectEl?.value || DEFAULT_PROFILE_ID).catch(() => {});
+    refreshQaBank().catch(() => {});
+  }
+}
 
-async function openPreview({ silent = false } = {}) {
+function openSubpage(href, { title, kind, silent = false } = {}) {
   if (!isExtensionContextValid()) {
     handleExtensionContextInvalidated();
     return;
   }
-
-  const href = chrome.runtime.getURL("preview.html");
-
-  if (previewWindowId != null) {
-    try {
-      await chrome.windows.update(previewWindowId, { focused: true });
-      if (!silent) setStatus("Opened document preview.", "done");
-      return;
-    } catch {
-      previewWindowId = null;
-    }
+  if (!subpageOverlayEl || !subpageFrameEl) {
+    setStatus("Could not open page in the panel.", "error");
+    return;
   }
-
-  try {
-    const win = await chrome.windows.create({
-      url: href,
-      type: "popup",
-      width: 1180,
-      height: 900,
-      focused: true
-    });
-    if (win?.id != null) {
-      previewWindowId = win.id;
-      await chrome.windows.update(win.id, { focused: true });
-    }
-    if (!silent) setStatus("Opened document preview.", "done");
-  } catch (err) {
-    if (isContextInvalidatedError(err)) {
-      handleExtensionContextInvalidated();
-      return;
-    }
-    try {
-      const tab = await chrome.tabs.create({ url: href, active: true });
-      if (tab?.windowId != null) {
-        previewWindowId = tab.windowId;
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
-      if (!silent) setStatus("Opened document preview in a browser tab.", "done");
-    } catch (tabErr) {
-      setStatus(
-        `Could not open preview: ${String(tabErr?.message || tabErr || err?.message || err)}`,
-        "error"
-      );
-    }
+  if (subpageTitleEl) subpageTitleEl.textContent = title || "Ocean";
+  subpageFrameEl.dataset.kind = kind || "";
+  if (subpageFrameEl.getAttribute("src") === href) {
+    subpageFrameEl.removeAttribute("src");
   }
+  subpageFrameEl.src = href;
+  subpageOverlayEl.hidden = false;
+  document.body.classList.add("subpage-open");
+  if (!silent) setStatus(`Opened ${title || "page"}.`, "done");
+}
+
+async function openPreview({ silent = false } = {}) {
+  openSubpage(chrome.runtime.getURL("preview.html"), {
+    title: "Preview",
+    kind: "preview",
+    silent
+  });
 }
 
 async function openDashboard() {
-  if (!isExtensionContextValid()) {
-    handleExtensionContextInvalidated();
-    return;
-  }
-
   const url = new URL(chrome.runtime.getURL("dashboard.html"));
   const profileId = profileSelectEl?.value || "";
   if (profileId) url.searchParams.set("profileId", profileId);
-  const href = url.toString();
-
-  try {
-    const win = await chrome.windows.create({
-      url: href,
-      type: "popup",
-      width: 1180,
-      height: 860,
-      focused: true
-    });
-    if (win?.id != null) {
-      await chrome.windows.update(win.id, { focused: true });
-    }
-    setStatus("Opened application dashboard.", "done");
-  } catch (err) {
-    if (isContextInvalidatedError(err)) {
-      handleExtensionContextInvalidated();
-      return;
-    }
-    try {
-      const tab = await chrome.tabs.create({ url: href, active: true });
-      if (tab?.windowId != null) {
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
-      setStatus("Opened application dashboard in a browser tab.", "done");
-    } catch (tabErr) {
-      setStatus(
-        `Could not open dashboard: ${String(tabErr?.message || tabErr || err?.message || err)}`,
-        "error"
-      );
-    }
-  }
+  openSubpage(url.toString(), { title: "Dashboard", kind: "dashboard" });
 }
 
 async function openQaEditor() {
-  if (!isExtensionContextValid()) {
-    handleExtensionContextInvalidated();
-    return;
-  }
-
   const url = new URL(chrome.runtime.getURL("qa-editor.html"));
   const profileId = profileSelectEl?.value || "";
   if (profileId) url.searchParams.set("profileId", profileId);
-  const href = url.toString();
-
-  try {
-    const win = await chrome.windows.create({
-      url: href,
-      type: "popup",
-      width: 980,
-      height: 860,
-      focused: true
-    });
-    if (win?.id != null) {
-      await chrome.windows.update(win.id, { focused: true });
-    }
-    setStatus("Opened Q&A editor.", "done");
-  } catch (err) {
-    if (isContextInvalidatedError(err)) {
-      handleExtensionContextInvalidated();
-      return;
-    }
-    try {
-      const tab = await chrome.tabs.create({ url: href, active: true });
-      if (tab?.windowId != null) {
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
-      setStatus("Opened Q&A editor in a browser tab.", "done");
-    } catch (tabErr) {
-      setStatus(
-        `Could not open Q&A editor: ${String(tabErr?.message || tabErr || err?.message || err)}`,
-        "error"
-      );
-    }
-  }
+  openSubpage(url.toString(), { title: "Q&A Editor", kind: "qa" });
 }
 
 async function applyAutofillButtonState(button = null) {
@@ -2346,55 +2267,15 @@ async function resetWorkflow() {
 }
 
 async function openProfileEditor({ mode = "edit", profileId = null } = {}) {
-  if (!isExtensionContextValid()) {
-    handleExtensionContextInvalidated();
-    return;
-  }
-
   const url = new URL(chrome.runtime.getURL("profile-editor.html"));
   url.searchParams.set("mode", mode);
   if (mode === "edit" && profileId) {
     url.searchParams.set("profileId", profileId);
   }
-  const href = url.toString();
-
-  try {
-    // The main panel is a popup window. chrome.tabs.create() would open the
-    // editor in a normal browser window behind this panel — looks like a no-op.
-    // Open a dedicated focused popup instead.
-    const win = await chrome.windows.create({
-      url: href,
-      type: "popup",
-      width: 960,
-      height: 820,
-      focused: true
-    });
-    if (win?.id != null) {
-      await chrome.windows.update(win.id, { focused: true });
-    }
-    setStatus(
-      mode === "new" ? "Opened Add profile window." : "Opened Edit profile window.",
-      "done"
-    );
-  } catch (err) {
-    if (isContextInvalidatedError(err)) {
-      handleExtensionContextInvalidated();
-      return;
-    }
-    // Fallback if windows.create is blocked for some reason.
-    try {
-      const tab = await chrome.tabs.create({ url: href, active: true });
-      if (tab?.windowId != null) {
-        await chrome.windows.update(tab.windowId, { focused: true });
-      }
-      setStatus("Opened profile editor in a browser tab.", "done");
-    } catch (tabErr) {
-      setStatus(
-        `Could not open profile editor: ${String(tabErr?.message || tabErr || err?.message || err)}`,
-        "error"
-      );
-    }
-  }
+  openSubpage(url.toString(), {
+    title: mode === "new" ? "Add profile" : "Edit profile",
+    kind: "profile"
+  });
 }
 
 async function editSelectedProfile() {
@@ -2550,9 +2431,15 @@ confirmModalEl?.querySelectorAll("[data-confirm-dismiss]").forEach((el) => {
   el.addEventListener("click", () => closeConfirmModal(false));
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && confirmModalEl && !confirmModalEl.hidden) {
+  if (e.key !== "Escape") return;
+  if (confirmModalEl && !confirmModalEl.hidden) {
     e.preventDefault();
     closeConfirmModal(false);
+    return;
+  }
+  if (subpageOverlayEl && !subpageOverlayEl.hidden) {
+    e.preventDefault();
+    closeSubpage();
   }
 });
 
@@ -2630,11 +2517,13 @@ autofillBtn.addEventListener("click", () => {
 openPreviewBtn?.addEventListener("click", () => {
   openPreview().catch((err) => setStatus(String(err.message || err)));
 });
-chrome.windows?.onRemoved?.addListener((windowId) => {
-  if (windowId === previewWindowId) previewWindowId = null;
-});
 openDashboardBtn?.addEventListener("click", () => {
   openDashboard().catch((err) => setStatus(String(err.message || err)));
+});
+subpageBackBtn?.addEventListener("click", () => closeSubpage());
+window.addEventListener("message", (event) => {
+  if (event.origin !== `chrome-extension://${chrome.runtime.id}`) return;
+  if (event.data?.type === "ocean-close-subpage") closeSubpage();
 });
 qaOpenEditorBtn?.addEventListener("click", () => {
   openQaEditor().catch((err) => setStatus(String(err.message || err)));
@@ -2681,8 +2570,7 @@ grantFolderAccessBtn?.addEventListener("click", () => {
   );
 });
 
-// The profile editor runs in its own tab, so the panel has to pick up profiles
-// it creates or renames instead of only reading the list once at startup.
+// Profile edits happen in the overlay iframe; refresh the list when storage changes.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (extensionContextDead || !isExtensionContextValid()) return;
   if (area !== "local") return;

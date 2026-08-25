@@ -20,6 +20,7 @@ import {
   ENGLISH_LEVEL_OPTIONS,
   HISPANIC_OPTIONS
 } from "./applicant-info.js";
+import { closeHostWindow } from "./close-host.js";
 
 const APPLICANT_FIELD_IDS = Object.keys(createEmptyApplicantInfo());
 
@@ -196,8 +197,8 @@ async function saveEditor() {
       setStatus(`Saved: ${updated.label}`);
     }
 
-    // Close the editor tab/window after a successful save.
-    setTimeout(() => window.close(), 150);
+    // Return to the main panel after a successful save.
+    setTimeout(() => closeHostWindow(), 150);
   } catch (err) {
     setStatus(String(err.message || err), true);
     els.saveBtn.disabled = false;
@@ -221,7 +222,7 @@ async function resetBuiltinPrompt() {
 }
 
 function closeEditor() {
-  window.close();
+  closeHostWindow();
 }
 
 els.saveBtn.addEventListener("click", () => {

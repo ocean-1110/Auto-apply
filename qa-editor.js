@@ -15,6 +15,7 @@ import {
   dismissPendingQa,
   dismissPendingMatchingQuestion
 } from "./pending-qa.js";
+import { closeHostWindow } from "./close-host.js";
 
 const SHARED_ID = "";
 const ALL_ID = "__all__";
@@ -474,7 +475,7 @@ els.importInput.addEventListener("change", () => {
 els.clearBtn.addEventListener("click", () => {
   clearShown().catch((err) => setStatus(String(err.message || err), true));
 });
-els.closeBtn.addEventListener("click", () => window.close());
+els.closeBtn.addEventListener("click", () => closeHostWindow());
 
 let reloadTimer = 0;
 chrome.storage.onChanged.addListener((changes, area) => {
