@@ -26,7 +26,14 @@ Rules:
 - missing: real JD products/tools/skills that are absent from the resume. Never include generic phrases, locations, benefits language, or the employer name.
 - criticalMissing: must-have named products/tools still missing (for example nCino, FSC, Copado, a required cloud). Empty if none.
 - plantableMissing: missing product/tool names that can be added to the skills section. Exclude certifications the resume does not already list.
-- Calibrate scores: a clearly matching senior resume is typically 80–90. A partial match is 50–79. A weak match is below 50. Do not give 100.
+
+Scoring calibration (IMPORTANT — use the full range; do NOT default to 85):
+- Weak / few JD keywords: 35–55
+- Partial match: 56–74
+- Solid match with some gaps: 75–82
+- Strong match with most named products present: 83–90
+- Near-complete match: 88–92 (still not 100)
+- Pick an integer that reflects THIS resume vs THIS JD. Avoid rounding every good resume to 85.
 
 Return ONLY JSON with this shape:
 {
@@ -41,7 +48,7 @@ Return ONLY JSON with this shape:
   "missing": ["..."],
   "criticalMissing": ["..."],
   "plantableMissing": ["..."],
-  "rationale": "one short sentence"
+  "rationale": "one short sentence naming the main gap or strength"
 }`;
 
 function clamp(n, min, max) {
@@ -235,7 +242,7 @@ export function formatAtsTooltip(report) {
     lines.push(report.rationale);
   }
   lines.push(
-    `Score band: ${ATS_SCORE_TARGET_MIN}–${ATS_SCORE_DISPLAY_MAX}% (never shown above ${ATS_SCORE_DISPLAY_MAX}%)`
+    `Display cap: scores above ${ATS_SCORE_DISPLAY_MAX}% are shown as ${ATS_SCORE_DISPLAY_MAX}% max`
   );
   return lines.join("\n");
 }

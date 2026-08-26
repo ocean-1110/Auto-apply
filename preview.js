@@ -1,5 +1,6 @@
 import { getAllTemplates, DEFAULT_TEMPLATE_ID, resumeJsonToHtml } from "./templates/index.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
+import { formatAtsTooltip } from "./ats-score.js";
 import { closeHostWindow } from "./close-host.js";
 
 const els = {
@@ -13,6 +14,9 @@ const els = {
   emptyState: document.getElementById("emptyState"),
   genBanner: document.getElementById("genBanner"),
   pendingBanner: document.getElementById("pendingBanner"),
+  atsPreviewBadge: document.getElementById("atsPreviewBadge"),
+  atsPreviewValue: document.getElementById("atsPreviewValue"),
+  atsPreviewDetail: document.getElementById("atsPreviewDetail"),
   revisePanel: document.getElementById("revisePanel"),
   revisePrompt: document.getElementById("revisePrompt"),
   regenerateBtn: document.getElementById("regenerateBtn"),
@@ -25,6 +29,7 @@ let view = "resume";
 let resumeData = null;
 let coverText = "";
 let jobMeta = {};
+let atsReport = null;
 let generating = false;
 let previewMode = false;
 let pendingSave = false;
@@ -55,6 +60,34 @@ function setReviseStatus(text, { error = false } = {}) {
   els.reviseStatus.style.color = error ? "#9b2c2c" : "";
 }
 
+function renderAtsPreview() {
+  if (!els.atsPreviewBadge || !els.atsPreviewValue) return;
+  const score = Number(atsReport?.finalScore ?? atsReport?.score);
+  if (!Number.isFinite(score) || score <= 0) {
+    els.atsPreviewBadge.hidden = true;
+    return;
+  }
+  els.atsPreviewBadge.hidden = false;
+  els.atsPreviewBadge.classList.remove("is-high", "is-mid", "is-low");
+  els.atsPreviewBadge.classList.add(score >= 85 ? "is-high" : score >= 75 ? "is-mid" : "is-low");
+  els.atsPreviewValue.textContent = `${Math.round(score)}%`;
+  const bits = [];
+  if (Number.isFinite(Number(atsReport?.rawScore)) && Number(atsReport.rawScore) !== score) {
+    bits.push(`GPT raw ${Math.round(Number(atsReport.rawScore))}%`);
+  }
+  if (atsReport?.keywordCoverage != null) bits.push(`Keywords ${atsReport.keywordCoverage}%`);
+  if (atsReport?.skillsCoverage != null) bits.push(`Skills ${atsReport.skillsCoverage}%`);
+  if (atsReport?.missing?.length) {
+    bits.push(`Missing: ${atsReport.missing.slice(0, 4).join(", ")}`);
+  } else if (atsReport?.rationale) {
+    bits.push(String(atsReport.rationale).slice(0, 160));
+  }
+  if (els.atsPreviewDetail) {
+    els.atsPreviewDetail.textContent = bits.join(" · ") || formatAtsTooltip(atsReport);
+  }
+  els.atsPreviewBadge.title = formatAtsTooltip(atsReport) || "Final ATS score";
+}
+
 function updateChrome() {
   const hasResume = Boolean(resumeData && typeof resumeData === "object");
   const showTools = (previewMode || pendingSave) && hasResume;
@@ -67,12 +100,11 @@ function updateChrome() {
   }
   if (els.regenerateBtn) els.regenerateBtn.disabled = busy || generating || !hasResume;
   if (els.revisePrompt) els.revisePrompt.disabled = busy || generating;
+  renderAtsPreview();
 }
 
 function render() {
-  if (els.genBanner) {
-    els.genBanner.hidden = !generating;
-  }
+  if (els.genBanner) els.genBanner.hidden = !generating;
   updateChrome();
 
   if (view === "cover") {
@@ -113,6 +145,7 @@ async function load() {
   const stored = await chrome.storage.local.get([
     "last_resume_json",
     "last_cover_letter_response",
+    "last_ats_report",
     "selected_template_id",
     "last_job_title",
     "last_company_name",
@@ -129,6 +162,10 @@ async function load() {
       ? stored.last_resume_json
       : null;
   coverText = String(stored.last_cover_letter_response || "");
+  atsReport =
+    stored.last_ats_report && typeof stored.last_ats_report === "object"
+      ? stored.last_ats_report
+      : null;
   const pendingMeta =
     stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
       ? stored.preview_pending_meta
@@ -168,11 +205,14 @@ async function regenerateFromPrompt() {
       templateId: els.templateSelect?.value || ""
     });
     if (!res?.ok) throw new Error(res?.error || "Regenerate failed.");
-    if (res.resume && typeof res.resume === "object") {
-      resumeData = res.resume;
-    }
+    if (res.resume && typeof res.resume === "object") resumeData = res.resume;
+    if (res.atsReport && typeof res.atsReport === "object") atsReport = res.atsReport;
     pendingSave = true;
-    setReviseStatus(res.status || "Resume updated. Review the preview, then Save PDFs.");
+    const score = Number(atsReport?.finalScore ?? atsReport?.score);
+    const scoreNote = Number.isFinite(score) && score > 0 ? ` ATS ${Math.round(score)}%.` : "";
+    setReviseStatus(
+      (res.status || "Resume updated. Review the preview, then Save PDFs.") + scoreNote
+    );
     view = "resume";
     render();
   } catch (err) {
@@ -240,6 +280,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (
     changes.last_resume_json ||
     changes.last_cover_letter_response ||
+    changes.last_ats_report ||
     changes.selected_template_id ||
     changes.last_job_title ||
     changes.last_company_name ||

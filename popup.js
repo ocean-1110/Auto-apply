@@ -6,15 +6,7 @@ import {
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet } from "./sheets.js";
 import { formatAtsTooltip } from "./ats-score.js";
-import {
-  getSheetPresets,
-  getPresetForProfile,
-  saveSheetPreset,
-  deleteSheetPreset,
-  setProfileSheetPresetId,
-  presetDisplayLabel,
-  validateSheetPreset
-} from "./sheet-presets.js";
+import { getPresetForProfile } from "./sheet-presets.js";
 import {
   saveOutputDirectoryHandle,
   getOutputDirectoryName,
@@ -36,6 +28,13 @@ import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
 import { setGeneratedDocsForJob } from "./upload-assets.js";
 
+const UI_MODE = new URLSearchParams(location.search).get("mode") === "sidebar" ? "sidebar" : "window";
+document.body.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
+document.documentElement.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
+if (UI_MODE === "sidebar") {
+  document.body.classList.add("ocean-in-panel");
+}
+
 const statusEl = document.getElementById("status");
 const atsScoreBadgeEl = document.getElementById("atsScoreBadge");
 const atsScoreValueEl = document.getElementById("atsScoreValue");
@@ -55,37 +54,19 @@ const jdLinkEl = document.getElementById("jdLink");
 const jdTextEl = document.getElementById("jdText");
 const outputDirLabelEl = document.getElementById("outputDirLabel");
 const selectOutputDirBtn = document.getElementById("selectOutputDir");
-const spreadsheetSectionEl = document.getElementById("spreadsheetSection");
-const sheetSummaryNoteEl = document.getElementById("sheetSummaryNote");
 const aiQaSectionEl = document.getElementById("aiQaSection");
-const spreadsheetUrlEl = document.getElementById("spreadsheetUrl");
-const sheetTabNameEl = document.getElementById("sheetTabName");
-const sheetsWebAppUrlEl = document.getElementById("sheetsWebAppUrl");
-const trackSheetStatusToggleEl = document.getElementById("trackSheetStatusToggle");
-const sheetPresetSelectEl = document.getElementById("sheetPresetSelect");
-const sheetPresetLabelEl = document.getElementById("sheetPresetLabel");
-const saveSheetPresetBtn = document.getElementById("saveSheetPreset");
-const deleteSheetPresetBtn = document.getElementById("deleteSheetPreset");
-const copyAppsScriptBtn = document.getElementById("copyAppsScript");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const previewModeToggleEl = document.getElementById("previewModeToggle");
+const sidebarModeToggleEl = document.getElementById("sidebarModeToggle");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
 const qaBankSectionEl = document.getElementById("qaBankSection");
 const qaBankNoteEl = document.getElementById("qaBankNote");
 const qaOpenEditorBtn = document.getElementById("qaOpenEditorBtn");
 const qaLearnToggleEl = document.getElementById("qaLearnToggle");
-const credentialsSectionEl = document.getElementById("credentialsSection");
-const credentialsNoteEl = document.getElementById("credentialsNote");
-const accountEmailEl = document.getElementById("accountEmail");
-const accountUsernameEl = document.getElementById("accountUsername");
-const accountPasswordEl = document.getElementById("accountPassword");
-const accountShowPasswordEl = document.getElementById("accountShowPassword");
-const accountSaveBtn = document.getElementById("accountSaveBtn");
-const accountClearBtn = document.getElementById("accountClearBtn");
 const manualQuestionEl = document.getElementById("manualQuestion");
 const manualAnswerEl = document.getElementById("manualAnswer");
 const generateAiAnswerBtn = document.getElementById("generateAiAnswerBtn");
@@ -140,8 +121,6 @@ let confirmModalResolve = null;
 
 let profilesCache = [];
 let templatesCache = [];
-let sheetPresetsCache = [];
-let applyingSheetPreset = false;
 let wasGenerationRunning = false;
 /** True after Generate click until SW sets generation_running (avoids poll wiping the status UI). */
 let generationStartPending = false;
@@ -257,102 +236,45 @@ async function refreshAtsBadge() {
   renderAtsForCurrentJob(data.last_ats_report);
 }
 
-function readSheetFields() {
+async function getSheetSettings() {
+  const data = await chrome.storage.local.get([
+    "spreadsheet_url",
+    "sheets_sheet_name",
+    "sheets_web_app_url",
+    "track_application_status"
+  ]);
   return {
-    id: sheetPresetSelectEl?.value || "",
-    label: (sheetPresetLabelEl?.value || "").trim(),
-    spreadsheetUrl: (spreadsheetUrlEl?.value || "").trim(),
-    sheetName: (sheetTabNameEl?.value || "").trim(),
-    webAppUrl: (sheetsWebAppUrlEl?.value || "").trim(),
-    trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
+    spreadsheetUrl: String(data.spreadsheet_url || "").trim(),
+    sheetName: String(data.sheets_sheet_name || "").trim(),
+    sheetsWebAppUrl: String(data.sheets_web_app_url || "").trim(),
+    trackApplicationStatus: Boolean(data.track_application_status)
   };
 }
 
-function applySheetFields(preset = null, { keepWebApp = true } = {}) {
-  applyingSheetPreset = true;
-  try {
-    if (sheetPresetSelectEl) sheetPresetSelectEl.value = preset?.id || "";
-    if (sheetPresetLabelEl) sheetPresetLabelEl.value = preset?.label || "";
-    if (spreadsheetUrlEl) spreadsheetUrlEl.value = preset?.spreadsheetUrl || "";
-    if (sheetTabNameEl) sheetTabNameEl.value = preset?.sheetName || "";
-    if (sheetsWebAppUrlEl) {
-      const nextUrl = preset?.webAppUrl || (keepWebApp ? sheetsWebAppUrlEl.value : "");
-      sheetsWebAppUrlEl.value = nextUrl || "";
-    }
-    if (trackSheetStatusToggleEl) {
-      trackSheetStatusToggleEl.checked = Boolean(preset?.trackApplicationStatus);
-    }
-  } finally {
-    applyingSheetPreset = false;
+function sheetSettingsValidationError(settings) {
+  const { spreadsheetUrl, sheetName, sheetsWebAppUrl } = settings;
+  if (!spreadsheetUrl && !sheetsWebAppUrl && !sheetName) return "";
+  if (!extractSpreadsheetId(spreadsheetUrl)) {
+    return "Open Edit profile and enter a valid Google Spreadsheet link.";
   }
-  syncSheetSummaryNote();
-}
-
-function populateSheetPresetSelect(selectedId = "") {
-  if (!sheetPresetSelectEl) return;
-  const current = selectedId || sheetPresetSelectEl.value || "";
-  sheetPresetSelectEl.innerHTML = "";
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "— None —";
-  sheetPresetSelectEl.appendChild(none);
-  for (const preset of sheetPresetsCache) {
-    const option = document.createElement("option");
-    option.value = preset.id;
-    option.textContent = presetDisplayLabel(preset);
-    sheetPresetSelectEl.appendChild(option);
+  if (!sheetsWebAppUrl) {
+    return "Open Edit profile and paste the Apps Script Web App URL, or clear the spreadsheet link.";
   }
-  const valid = new Set(sheetPresetsCache.map((p) => p.id));
-  sheetPresetSelectEl.value = valid.has(current) ? current : "";
-}
-
-async function refreshSheetPresets(selectedId = "") {
-  sheetPresetsCache = await getSheetPresets();
-  populateSheetPresetSelect(selectedId);
+  if (!sheetName && !/[?#&]gid=\d+/i.test(spreadsheetUrl)) {
+    return "Open Edit profile: use a sheet URL with gid=..., or enter the Sheet tab name.";
+  }
+  return "";
 }
 
 async function applySheetPresetForProfile(profileId) {
   const preset = await getPresetForProfile(profileId);
-  applySheetFields(preset, { keepWebApp: !preset });
-  await persistJobFields();
-}
-
-async function onSheetPresetSelectChange() {
-  const id = sheetPresetSelectEl?.value || "";
-  const profileId = profileSelectEl?.value || "";
-  const preset = sheetPresetsCache.find((p) => p.id === id) || null;
-  applySheetFields(preset, { keepWebApp: !preset });
-  if (profileId) await setProfileSheetPresetId(profileId, id);
-  await persistJobFields();
-}
-
-async function saveCurrentSheetPreset() {
-  const profileId = profileSelectEl?.value || "";
-  const fields = readSheetFields();
-  const error = validateSheetPreset(fields);
-  if (error) {
-    setStatus(error, "error");
-    return;
-  }
-  const saved = await saveSheetPreset(fields, { profileId });
-  await refreshSheetPresets(saved.id);
-  applySheetFields(saved);
-  await persistJobFields();
-  setStatus(`Saved sheet "${presetDisplayLabel(saved)}" for this profile.`, "done");
-}
-
-async function deleteCurrentSheetPreset() {
-  const id = sheetPresetSelectEl?.value || "";
-  if (!id) {
-    setStatus("Select a saved sheet to delete.");
-    return;
-  }
-  const preset = sheetPresetsCache.find((p) => p.id === id);
-  await deleteSheetPreset(id);
-  await refreshSheetPresets("");
-  applySheetFields(null, { keepWebApp: true });
-  await persistJobFields();
-  setStatus(`Deleted saved sheet${preset ? `: ${presetDisplayLabel(preset)}` : "."}`);
+  if (!preset) return;
+  await chrome.storage.local.set({
+    spreadsheet_url: preset.spreadsheetUrl || "",
+    sheets_sheet_name: preset.sheetName || "",
+    sheets_web_app_url: preset.webAppUrl || "",
+    track_application_status: Boolean(preset.trackApplicationStatus)
+  });
 }
 
 function updateJobsWorkStatus({ running, statusText = "" } = {}) {
@@ -477,11 +399,7 @@ async function persistJobFields() {
     last_job_title: jobTitleEl.value,
     last_company_name: companyNameEl.value,
     last_jd_link: jdLinkEl.value,
-    last_jd_text: jdTextEl.value,
-    spreadsheet_url: spreadsheetUrlEl.value.trim(),
-    sheets_sheet_name: (sheetTabNameEl?.value || "").trim(),
-    sheets_web_app_url: sheetsWebAppUrlEl.value.trim(),
-    track_application_status: Boolean(trackSheetStatusToggleEl?.checked)
+    last_jd_text: jdTextEl.value
   });
 }
 
@@ -552,21 +470,6 @@ async function refreshSaveBannerForCurrentJob() {
   }
   const meta = await getLastSaveMeta();
   if (meta?.pathLabel) showSaveBanner(meta.pathLabel);
-}
-
-function syncSheetSummaryNote() {
-  if (!sheetSummaryNoteEl) return;
-  const spreadsheetUrl = (spreadsheetUrlEl?.value || "").trim();
-  const webAppUrl = (sheetsWebAppUrlEl?.value || "").trim();
-  const tabName = (sheetTabNameEl?.value || "").trim();
-  const hasTarget = Boolean(tabName) || /[?#&]gid=\d+/i.test(spreadsheetUrl);
-  const connected =
-    Boolean(spreadsheetUrl) &&
-    Boolean(webAppUrl) &&
-    Boolean(extractSpreadsheetId(spreadsheetUrl)) &&
-    hasTarget;
-  sheetSummaryNoteEl.textContent = connected ? "Connected" : "Not connected";
-  sheetSummaryNoteEl.classList.toggle("is-connected", connected);
 }
 
 function wireAccordion(el, storageKey) {
@@ -1454,17 +1357,15 @@ async function markImportedJobCompleted(jobId) {
   });
 
   let sheetNote = "";
-  if (trackSheetStatusToggleEl?.checked) {
-    const spreadsheetUrl = (spreadsheetUrlEl?.value || "").trim();
-    const sheetsWebAppUrl = (sheetsWebAppUrlEl?.value || "").trim();
-    const sheetName = (sheetTabNameEl?.value || "").trim();
+  const sheet = await getSheetSettings();
+  if (sheet.trackApplicationStatus) {
     const jdLink = String(job.jdLink || job.url || "").trim();
-    if (spreadsheetUrl && sheetsWebAppUrl && jdLink) {
+    if (sheet.spreadsheetUrl && sheet.sheetsWebAppUrl && jdLink) {
       try {
         await updateJobStatusInSpreadsheet({
-          spreadsheetUrl,
-          webAppUrl: sheetsWebAppUrl,
-          sheetName,
+          spreadsheetUrl: sheet.spreadsheetUrl,
+          webAppUrl: sheet.sheetsWebAppUrl,
+          sheetName: sheet.sheetName,
           jdLink,
           applicationStatus: "Applied"
         });
@@ -1615,43 +1516,6 @@ async function tryFlushPendingOutput({ interactive = false } = {}) {
   }
 }
 
-function updateCredentialsNote(creds = {}) {
-  if (!credentialsNoteEl) return;
-  const parts = [];
-  if (String(creds.email || "").trim()) parts.push("email");
-  if (String(creds.username || "").trim()) parts.push("username");
-  if (String(creds.password || "")) parts.push("password");
-  credentialsNoteEl.textContent = parts.length ? `Set: ${parts.join(", ")}` : "Not set";
-}
-
-function applyAccountCredentials(creds = {}) {
-  if (accountEmailEl) accountEmailEl.value = String(creds.email || "");
-  if (accountUsernameEl) accountUsernameEl.value = String(creds.username || "");
-  if (accountPasswordEl) accountPasswordEl.value = String(creds.password || "");
-  updateCredentialsNote(creds);
-}
-
-function readAccountCredentialsFromForm() {
-  return {
-    email: String(accountEmailEl?.value || "").trim(),
-    username: String(accountUsernameEl?.value || "").trim(),
-    password: String(accountPasswordEl?.value || "")
-  };
-}
-
-async function saveAccountCredentials() {
-  const creds = readAccountCredentialsFromForm();
-  await chrome.storage.local.set({ account_credentials: creds });
-  updateCredentialsNote(creds);
-  setStatus("Login credentials saved.");
-}
-
-async function clearAccountCredentials() {
-  applyAccountCredentials({});
-  await chrome.storage.local.remove("account_credentials");
-  setStatus("Login credentials cleared.");
-}
-
 async function loadSettings() {
   const data = await chrome.storage.local.get([
     "selected_profile_id",
@@ -1660,23 +1524,17 @@ async function loadSettings() {
     "last_company_name",
     "last_jd_link",
     "last_jd_text",
-    "spreadsheet_url",
-    "sheets_sheet_name",
-    "sheets_web_app_url",
-    "track_application_status",
     "generation_status",
     "generation_running",
     "pending_fs_write",
-    "ui_sheet_section_open",
     "ui_ai_qa_section_open",
     "ui_qa_bank_section_open",
-    "ui_credentials_section_open",
     "qa_learn_enabled",
     "imported_jobs_filter",
-    "account_credentials",
     "scraped_job_meta",
     "generate_resume_only",
-    "preview_mode_enabled"
+    "preview_mode_enabled",
+    "ui_panel_mode"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -1686,34 +1544,17 @@ async function loadSettings() {
   companyNameEl.value = data.last_company_name || "";
   jdLinkEl.value = data.last_jd_link || "";
   jdTextEl.value = data.last_jd_text || "";
-  spreadsheetUrlEl.value = data.spreadsheet_url || "";
-  if (sheetTabNameEl) sheetTabNameEl.value = data.sheets_sheet_name || "";
-  sheetsWebAppUrlEl.value = data.sheets_web_app_url || "";
-  if (trackSheetStatusToggleEl) {
-    trackSheetStatusToggleEl.checked = Boolean(data.track_application_status);
-  }
-  await refreshSheetPresets();
-  const boundPreset = await getPresetForProfile(profileSelectEl.value);
-  if (boundPreset) {
-    applySheetFields(boundPreset);
-    await persistJobFields();
-  } else {
-    populateSheetPresetSelect("");
-    if (trackSheetStatusToggleEl && data.track_application_status != null) {
-      trackSheetStatusToggleEl.checked = Boolean(data.track_application_status);
-    }
-  }
-  syncSheetSummaryNote();
+  await applySheetPresetForProfile(profileSelectEl.value);
   await refreshAtsBadge();
 
-  if (spreadsheetSectionEl) spreadsheetSectionEl.open = Boolean(data.ui_sheet_section_open);
   if (aiQaSectionEl) aiQaSectionEl.open = Boolean(data.ui_ai_qa_section_open);
   if (qaBankSectionEl) qaBankSectionEl.open = Boolean(data.ui_qa_bank_section_open);
-  if (credentialsSectionEl) credentialsSectionEl.open = Boolean(data.ui_credentials_section_open);
-  applyAccountCredentials(data.account_credentials || {});
   if (qaLearnToggleEl) qaLearnToggleEl.checked = data.qa_learn_enabled !== false;
   if (previewModeToggleEl) {
     previewModeToggleEl.checked = data.preview_mode_enabled === true;
+  }
+  if (sidebarModeToggleEl) {
+    sidebarModeToggleEl.checked = data.ui_panel_mode === "sidebar" || UI_MODE === "sidebar";
   }
   if (resumeOnlyToggleEl) {
     // Default unchecked (false) — only check when user previously enabled it.
@@ -1869,16 +1710,43 @@ async function scrapeCurrentJobPage() {
   }
 }
 
-async function copyAppsScript() {
-  try {
-    const res = await fetch(chrome.runtime.getURL("apps-script/Code.gs"));
-    const text = await res.text();
-    if (!String(text || "").trim()) throw new Error("empty");
-    await navigator.clipboard.writeText(text);
-    setStatus("Apps Script copied. Paste it into Extensions → Apps Script, then deploy as Web app.");
-  } catch {
-    setStatus("Could not copy. Open apps-script/Code.gs in the project instead.");
+async function collectBatchGenerateSettings() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
+  const sheet = await getSheetSettings();
+  const sheetError = sheetSettingsValidationError(sheet);
+  if (sheetError) {
+    setStatus(sheetError, "error");
+    return null;
   }
+
+  const outputFolderName = (await getOutputDirectoryName()) || "";
+  if (!outputFolderName) {
+    setStatus(
+      "Select an output folder first (Select folder), then run batch resume build.",
+      "error"
+    );
+    selectOutputDirBtn?.focus();
+    return null;
+  }
+
+  await chrome.storage.local.set({
+    selected_profile_id: profileId,
+    selected_template_id: templateId,
+    generate_resume_only: isResumeOnlyEnabled()
+  });
+
+  return {
+    profileId,
+    jobMeta: {
+      outputDir: outputFolderName,
+      spreadsheetUrl: sheet.spreadsheetUrl,
+      sheetName: sheet.sheetName,
+      sheetsWebAppUrl: sheet.sheetsWebAppUrl,
+      templateId,
+      trackApplicationStatus: sheet.trackApplicationStatus
+    }
+  };
 }
 
 async function copySheetRow() {
@@ -1891,8 +1759,6 @@ async function copySheetRow() {
     return;
   }
 
-  // Pull the extra history columns from the currently selected imported job,
-  // or from the last page scrape when applying a job opened directly.
   const selJob =
     (importedJobsSelectedId && importedJobsById[importedJobsSelectedId]) ||
     scrapedJobMeta ||
@@ -1916,62 +1782,6 @@ async function copySheetRow() {
   }
 }
 
-async function collectBatchGenerateSettings() {
-  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
-  const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
-  const spreadsheetUrl = (spreadsheetUrlEl.value || "").trim();
-  const sheetTabName = (sheetTabNameEl?.value || "").trim();
-  const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
-
-  if (spreadsheetUrl || sheetsWebAppUrl || sheetTabName) {
-    if (!extractSpreadsheetId(spreadsheetUrl)) {
-      setStatus("Enter a valid Google Spreadsheet link.", "error");
-      spreadsheetUrlEl.focus();
-      return null;
-    }
-    if (!sheetsWebAppUrl) {
-      setStatus(
-        "Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.",
-        "error"
-      );
-      sheetsWebAppUrlEl.focus();
-      return null;
-    }
-  }
-
-  const outputFolderName = (await getOutputDirectoryName()) || "";
-  if (!outputFolderName) {
-    setStatus(
-      "Select an output folder first (Select folder), then run batch resume build.",
-      "error"
-    );
-    selectOutputDirBtn?.focus();
-    return null;
-  }
-
-  await chrome.storage.local.set({
-    selected_profile_id: profileId,
-    selected_template_id: templateId,
-    spreadsheet_url: spreadsheetUrl,
-    sheets_sheet_name: sheetTabName,
-    sheets_web_app_url: sheetsWebAppUrl,
-    track_application_status: Boolean(trackSheetStatusToggleEl?.checked),
-    generate_resume_only: isResumeOnlyEnabled()
-  });
-
-  return {
-    profileId,
-    jobMeta: {
-      outputDir: outputFolderName,
-      spreadsheetUrl,
-      sheetName: sheetTabName,
-      sheetsWebAppUrl,
-      templateId,
-      trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
-    }
-  };
-}
-
 async function collectJobMetaOrShowError() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
@@ -1979,9 +1789,7 @@ async function collectJobMetaOrShowError() {
   const companyName = (companyNameEl.value || "").trim();
   const jdLink = (jdLinkEl.value || "").trim();
   const jd = (jdTextEl.value || "").trim();
-  const spreadsheetUrl = (spreadsheetUrlEl.value || "").trim();
-  const sheetTabName = (sheetTabNameEl?.value || "").trim();
-  const sheetsWebAppUrl = (sheetsWebAppUrlEl.value || "").trim();
+  const sheet = await getSheetSettings();
 
   if (!jobTitle) {
     setStatus("Enter a job title first.", "error");
@@ -1999,28 +1807,10 @@ async function collectJobMetaOrShowError() {
     return null;
   }
 
-  if (spreadsheetUrl || sheetsWebAppUrl || sheetTabName) {
-    if (!extractSpreadsheetId(spreadsheetUrl)) {
-      setStatus("Enter a valid Google Spreadsheet link.", "error");
-      spreadsheetUrlEl.focus();
-      return null;
-    }
-    if (!sheetsWebAppUrl) {
-      setStatus(
-        "Paste the Apps Script Web App URL (one-time setup), or clear the spreadsheet link.",
-        "error"
-      );
-      sheetsWebAppUrlEl.focus();
-      return null;
-    }
-    if (!sheetTabName && !/[?#&]gid=\d+/i.test(spreadsheetUrl)) {
-      setStatus(
-        "Open your target sheet tab in Google Sheets, copy that URL (must include gid=...), or enter the Sheet tab name.",
-        "error"
-      );
-      spreadsheetUrlEl.focus();
-      return null;
-    }
+  const sheetError = sheetSettingsValidationError(sheet);
+  if (sheetError) {
+    setStatus(sheetError, "error");
+    return null;
   }
 
   const outputFolderName = (await getOutputDirectoryName()) || "";
@@ -2037,10 +1827,6 @@ async function collectJobMetaOrShowError() {
     last_company_name: companyName,
     last_jd_link: jdLink,
     last_jd_text: jd,
-    spreadsheet_url: spreadsheetUrl,
-    sheets_sheet_name: sheetTabName,
-    sheets_web_app_url: sheetsWebAppUrl,
-    track_application_status: Boolean(trackSheetStatusToggleEl?.checked),
     generate_resume_only: isResumeOnlyEnabled()
   });
 
@@ -2052,9 +1838,9 @@ async function collectJobMetaOrShowError() {
       jdLink,
       jdText: jd,
       outputDir: outputFolderName,
-      spreadsheetUrl,
-      sheetName: sheetTabName,
-      sheetsWebAppUrl,
+      spreadsheetUrl: sheet.spreadsheetUrl,
+      sheetName: sheet.sheetName,
+      sheetsWebAppUrl: sheet.sheetsWebAppUrl,
       templateId,
       workArrangement: scrapedJobMeta?.workArrangement || "",
       employmentType: scrapedJobMeta?.employmentType || "",
@@ -2064,7 +1850,7 @@ async function collectJobMetaOrShowError() {
       importedJobId: importedJobsSelectedId || "",
       resumeOnly: isResumeOnlyEnabled(),
       previewMode: isPreviewModeEnabled(),
-      trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
+      trackApplicationStatus: sheet.trackApplicationStatus
     }
   };
 }
@@ -2463,54 +2249,14 @@ templateSelectEl.addEventListener("change", () => {
   saveSelectedTemplate(templateSelectEl.value).catch(() => {});
 });
 
-for (const el of [
-  jobTitleEl,
-  companyNameEl,
-  jdLinkEl,
-  jdTextEl,
-  spreadsheetUrlEl,
-  sheetTabNameEl,
-  sheetsWebAppUrlEl,
-  sheetPresetLabelEl
-].filter(Boolean)) {
+for (const el of [jobTitleEl, companyNameEl, jdLinkEl, jdTextEl].filter(Boolean)) {
   el.addEventListener("change", () => {
-    if (applyingSheetPreset) return;
     persistJobFields().catch(() => {});
-    syncSheetSummaryNote();
   });
 }
 
-sheetPresetSelectEl?.addEventListener("change", () => {
-  onSheetPresetSelectChange().catch((err) => setStatus(String(err?.message || err)));
-});
-saveSheetPresetBtn?.addEventListener("click", () => {
-  saveCurrentSheetPreset().catch((err) => setStatus(String(err?.message || err)));
-});
-deleteSheetPresetBtn?.addEventListener("click", () => {
-  deleteCurrentSheetPreset().catch((err) => setStatus(String(err?.message || err)));
-});
-
-wireAccordion(spreadsheetSectionEl, "ui_sheet_section_open");
 wireAccordion(aiQaSectionEl, "ui_ai_qa_section_open");
 wireAccordion(qaBankSectionEl, "ui_qa_bank_section_open");
-wireAccordion(credentialsSectionEl, "ui_credentials_section_open");
-
-accountShowPasswordEl?.addEventListener("change", () => {
-  if (accountPasswordEl) {
-    accountPasswordEl.type = accountShowPasswordEl.checked ? "text" : "password";
-  }
-});
-accountSaveBtn?.addEventListener("click", () => {
-  saveAccountCredentials().catch((err) => setStatus(String(err?.message || err)));
-});
-accountClearBtn?.addEventListener("click", () => {
-  clearAccountCredentials().catch((err) => setStatus(String(err?.message || err)));
-});
-for (const el of [accountEmailEl, accountUsernameEl, accountPasswordEl].filter(Boolean)) {
-  el.addEventListener("change", () => {
-    saveAccountCredentials().catch(() => {});
-  });
-}
 
 selectOutputDirBtn.addEventListener("click", () => {
   selectOutputDirectory().catch((err) => setStatus(String(err.message || err)));
@@ -2520,7 +2266,6 @@ pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
 scrapePageBtn?.addEventListener("click", () => {
   scrapeCurrentJobPage().catch((err) => setStatus(String(err.message || err)));
 });
-copyAppsScriptBtn.addEventListener("click", copyAppsScript);
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
 stopGenerateBtn?.addEventListener("click", () => {
@@ -2532,8 +2277,44 @@ stopGenerateBtn?.addEventListener("click", () => {
     })
     .catch((err) => setStatus(String(err?.message || err), "error"));
 });
-trackSheetStatusToggleEl?.addEventListener("change", () => {
-  persistJobFields().catch(() => {});
+
+sidebarModeToggleEl?.addEventListener("change", () => {
+  const wantSidebar = Boolean(sidebarModeToggleEl.checked);
+  (async () => {
+    await chrome.storage.local.set({ ui_panel_mode: wantSidebar ? "sidebar" : "window" });
+    if (wantSidebar) {
+      if (UI_MODE === "sidebar") return;
+      const current = await chrome.windows.getCurrent().catch(() => null);
+      const normals = await chrome.windows.getAll({ windowTypes: ["normal"] });
+      let windowId =
+        normals.find((w) => w.id !== current?.id)?.id || normals[0]?.id || null;
+      if (windowId == null) {
+        const res = await chrome.runtime.sendMessage({ type: "open_side_panel" });
+        windowId = res?.windowId ?? null;
+      }
+      if (windowId == null) {
+        throw new Error("Open a browser tab first, then enable Sidebar.");
+      }
+      await chrome.sidePanel.setOptions({
+        path: "popup.html?mode=sidebar",
+        enabled: true
+      });
+      await chrome.sidePanel.open({ windowId });
+      await chrome.runtime.sendMessage({ type: "close_panel_window" }).catch(() => {});
+      if (current?.type === "popup" && current.id != null) {
+        await chrome.windows.remove(current.id).catch(() => {});
+      } else {
+        window.close();
+      }
+      return;
+    }
+    if (UI_MODE === "window") return;
+    const res = await chrome.runtime.sendMessage({ type: "open_panel_window" });
+    if (!res?.ok) throw new Error(res?.error || "Could not open window.");
+  })().catch((err) => {
+    if (sidebarModeToggleEl) sidebarModeToggleEl.checked = UI_MODE === "sidebar";
+    setStatus(String(err?.message || err), "error");
+  });
 });
 
 // Sidebar mode switching

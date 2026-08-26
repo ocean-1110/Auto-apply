@@ -14,6 +14,13 @@
           <p class="brand-name">Ocean</p>
           <h1>Auto Application App</h1>
         </div>
+        <label
+          class="inline-check panel-mode-toggle"
+          title="Show Ocean in Chrome's browser sidebar instead of a pop-out window"
+        >
+          <input type="checkbox" id="sidebarModeToggle" />
+          <span>Sidebar</span>
+        </label>
         <button type="button" id="closePanel" class="secondary compact close-btn" title="Close">
           Close
         </button>
@@ -206,78 +213,10 @@
             </button>
           </div>
           <p class="hint">Files save to: selected folder / {job_title}-{company}-{name}/</p>
-
-          <details class="accordion" id="spreadsheetSection">
-            <summary>
-              <span>Google Sheet</span>
-              <span class="accordion-note" id="sheetSummaryNote">Not connected</span>
-            </summary>
-            <div class="accordion-body">
-              <label class="field">
-                <span>Saved sheet (per profile)</span>
-                <select id="sheetPresetSelect">
-                  <option value="">— None —</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Sheet nickname</span>
-                <input
-                  id="sheetPresetLabel"
-                  type="text"
-                  placeholder="e.g. Steven Avon applications"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="field">
-                <span>Spreadsheet link (open the target tab first, then paste that URL)</span>
-                <input
-                  id="spreadsheetUrl"
-                  type="url"
-                  placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=123456789"
-                  autocomplete="off"
-                />
-              </label>
-              <label class="field">
-                <span>Sheet tab name (optional override)</span>
-                <input
-                  id="sheetTabName"
-                  type="text"
-                  placeholder="Exact tab name, e.g. Applications"
-                  autocomplete="off"
-                />
-              </label>
-              <div class="row-split">
-                <label class="field grow">
-                  <span>Apps Script Web App URL</span>
-                  <input
-                    id="sheetsWebAppUrl"
-                    type="url"
-                    placeholder="https://script.google.com/macros/s/.../exec"
-                    autocomplete="off"
-                  />
-                </label>
-                <button type="button" id="copyAppsScript" class="secondary compact">Copy script</button>
-              </div>
-              <label class="inline-check" title="Write status in the last sheet column (J)">
-                <input type="checkbox" id="trackSheetStatusToggle" />
-                <span>Track application status in sheet (column J)</span>
-              </label>
-              <p class="hint">
-                When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>. Redeploy Apps Script after enabling.
-              </p>
-              <div class="row-split sheet-preset-actions">
-                <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for the selected profile">
-                  Save for this profile
-                </button>
-                <button type="button" id="deleteSheetPreset" class="secondary compact danger" title="Remove the selected saved sheet">
-                  Delete saved
-                </button>
-              </div>
-              <p class="hint">
-                Save once, then pick the sheet when you switch profiles. The Apps Script URL is stored with each sheet so you do not paste it every time. Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
-              </p>
-            </div>
-          </details>
+          <p class="hint">
+            Google Sheet tracking and login credentials are in
+            <strong>Edit profile</strong>.
+          </p>
 
           <div class="row row-2">
             <button type="button" id="generateResume" title="Alt+Shift+G">
@@ -297,40 +236,6 @@
             Open panel: <kbd>Alt+J</kbd>. Rebind shortcuts at
             <code>chrome://extensions/shortcuts</code> if needed.
           </p>
-
-          <details class="accordion" id="credentialsSection">
-            <summary>
-              <span>Login / signup credentials</span>
-              <span class="accordion-note" id="credentialsNote">Not set</span>
-            </summary>
-            <div class="accordion-body">
-              <p class="hint">
-                Used to autofill <strong>login / sign-up</strong> forms on application pages
-                (only when a password field is present). Stored locally in this browser.
-                We never submit login forms automatically.
-              </p>
-              <label class="field">
-                <span>Email</span>
-                <input type="email" id="accountEmail" placeholder="e.g. steven.avon1213@outlook.com" autocomplete="off" />
-              </label>
-              <label class="field">
-                <span>Username</span>
-                <input type="text" id="accountUsername" placeholder="e.g. steven_1213" autocomplete="off" />
-              </label>
-              <label class="field">
-                <span>Password</span>
-                <input type="password" id="accountPassword" placeholder="Account password" autocomplete="off" />
-              </label>
-              <div class="qa-toolbar">
-                <label class="cred-show">
-                  <input type="checkbox" id="accountShowPassword" />
-                  <span>Show password</span>
-                </label>
-                <button type="button" id="accountSaveBtn" class="secondary compact">Save credentials</button>
-                <button type="button" id="accountClearBtn" class="secondary danger compact">Clear</button>
-              </div>
-            </div>
-          </details>
 
           <details class="accordion" id="qaBankSection">
             <summary>

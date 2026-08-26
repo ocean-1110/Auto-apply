@@ -77,7 +77,9 @@ let lastFocusedNormalWindowId = null;
 const PANEL_WIDTH = 1280;
 const PANEL_HEIGHT = 900;
 const PANEL_WINDOW_ID_KEY = "panel_window_id";
-const PANEL_URL = () => chrome.runtime.getURL("popup.html");
+const PANEL_URL = (mode = "window") =>
+  `${chrome.runtime.getURL("popup.html")}?mode=${mode === "sidebar" ? "sidebar" : "window"}`;
+const PANEL_MODE_KEY = "ui_panel_mode";
 
 // Imported CSV job queue (UI sidebar)
 const IMPORTED_JOBS_BY_ID_KEY = "imported_jobs_by_id";
@@ -116,7 +118,7 @@ async function findExistingPanelWindow() {
     }
   }
 
-  const panelUrl = PANEL_URL();
+  const panelUrl = chrome.runtime.getURL("popup.html");
   const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["popup"] });
   for (const win of windows) {
     const match = win.tabs?.some((t) => typeof t.url === "string" && t.url.startsWith(panelUrl));
@@ -126,6 +128,42 @@ async function findExistingPanelWindow() {
     }
   }
   return null;
+}
+
+async function getPreferredPanelMode() {
+  const data = await chrome.storage.local.get(PANEL_MODE_KEY);
+  return data[PANEL_MODE_KEY] === "sidebar" ? "sidebar" : "window";
+}
+
+async function closePanelWindow() {
+  const existing = await findExistingPanelWindow();
+  if (existing?.id != null) {
+    await chrome.windows.remove(existing.id).catch(() => {});
+  }
+}
+
+async function resolveSidebarHostWindowId() {
+  if (lastFocusedNormalWindowId != null) {
+    const remembered = await chrome.windows.get(lastFocusedNormalWindowId).catch(() => null);
+    if (remembered?.type === "normal") return remembered.id;
+  }
+  const last = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  if (last?.id != null) return last.id;
+  const all = await chrome.windows.getAll({ windowTypes: ["normal"] });
+  return all[0]?.id ?? null;
+}
+
+async function openSidePanelForBrowser() {
+  const windowId = await resolveSidebarHostWindowId();
+  if (windowId == null) {
+    throw new Error("No browser window available for the sidebar.");
+  }
+  await chrome.sidePanel.setOptions({
+    path: "popup.html?mode=sidebar",
+    enabled: true
+  });
+  await chrome.sidePanel.open({ windowId });
+  return windowId;
 }
 
 async function openPanelWindow() {
@@ -144,7 +182,7 @@ async function openPanelWindow() {
   }
 
   const win = await chrome.windows.create({
-    url: PANEL_URL(),
+    url: PANEL_URL("window"),
     type: "popup",
     width: PANEL_WIDTH,
     height: PANEL_HEIGHT,
@@ -194,6 +232,15 @@ chrome.tabs.onActivated.addListener(({ windowId }) => {
 
 async function handleOpenPanel() {
   try {
+    const mode = await getPreferredPanelMode();
+    if (mode === "sidebar") {
+      try {
+        await openSidePanelForBrowser();
+        return;
+      } catch (sideErr) {
+        console.error("Failed to open sidebar, falling back to window:", sideErr);
+      }
+    }
     await openPanelWindow();
   } catch (err) {
     console.error("Failed to open panel:", err);
@@ -3684,6 +3731,52 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
     })();
 
+    return true;
+  }
+
+  if (message?.type === "open_side_panel") {
+    (async () => {
+      try {
+        await chrome.storage.local.set({ [PANEL_MODE_KEY]: "sidebar" });
+        const windowId = await openSidePanelForBrowser();
+        await closePanelWindow();
+        safeSendResponse(sendResponse, { ok: true, windowId });
+      } catch (err) {
+        // Still return a host window id so the popup can open the side panel
+        // from a user gesture if SW open() was blocked.
+        try {
+          const windowId = await resolveSidebarHostWindowId();
+          safeSendResponse(sendResponse, {
+            ok: windowId != null,
+            windowId,
+            error: String(err?.message || err)
+          });
+        } catch (inner) {
+          safeSendResponse(sendResponse, { ok: false, error: String(inner?.message || inner) });
+        }
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "open_panel_window") {
+    (async () => {
+      try {
+        await chrome.storage.local.set({ [PANEL_MODE_KEY]: "window" });
+        await openPanelWindow();
+        safeSendResponse(sendResponse, { ok: true });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "close_panel_window") {
+    (async () => {
+      await closePanelWindow();
+      safeSendResponse(sendResponse, { ok: true });
+    })();
     return true;
   }
 

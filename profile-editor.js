@@ -21,6 +21,7 @@ import {
   HISPANIC_OPTIONS
 } from "./applicant-info.js";
 import { closeHostWindow } from "./close-host.js";
+import { initIntegrationsSettings } from "./integrations-settings.js";
 
 const APPLICANT_FIELD_IDS = Object.keys(createEmptyApplicantInfo());
 
@@ -225,6 +226,11 @@ function closeEditor() {
   closeHostWindow();
 }
 
+const integrations = initIntegrationsSettings({
+  getProfileId: () => editorState.profileId,
+  setStatus: (message, isError = false) => setStatus(message, Boolean(isError))
+});
+
 els.saveBtn.addEventListener("click", () => {
   saveEditor().catch(() => {});
 });
@@ -246,4 +252,6 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-loadEditor().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, true));
+loadEditor()
+  .then(() => integrations.load())
+  .catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, true));

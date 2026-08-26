@@ -204,6 +204,106 @@
       </section>
 
       <section class="card">
+        <h2 class="section-title">Google Sheet</h2>
+        <p class="hint">
+          Track applications per profile. Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
+        </p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Saved sheet (per profile)</span>
+            <select id="sheetPresetSelect">
+              <option value="">— None —</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Sheet nickname</span>
+            <input
+              id="sheetPresetLabel"
+              type="text"
+              placeholder="e.g. Steven Avon applications"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field span-2">
+            <span>Spreadsheet link (open the target tab first, then paste that URL)</span>
+            <input
+              id="spreadsheetUrl"
+              type="url"
+              placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=123456789"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field">
+            <span>Sheet tab name (optional override)</span>
+            <input
+              id="sheetTabName"
+              type="text"
+              placeholder="Exact tab name, e.g. Applications"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field">
+            <span>Apps Script Web App URL</span>
+            <input
+              id="sheetsWebAppUrl"
+              type="url"
+              placeholder="https://script.google.com/macros/s/.../exec"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+        <div class="row-split" style="margin-top: 10px; gap: 8px; display: flex; flex-wrap: wrap; align-items: center">
+          <button type="button" id="copyAppsScript" class="secondary compact">Copy Apps Script</button>
+          <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for this profile">
+            Save for this profile
+          </button>
+          <button type="button" id="deleteSheetPreset" class="secondary compact danger" title="Remove the selected saved sheet">
+            Delete saved
+          </button>
+          <span class="accordion-note" id="sheetSummaryNote">Not connected</span>
+        </div>
+        <label class="inline-check" style="margin-top: 10px" title="Write status in the last sheet column (J)">
+          <input type="checkbox" id="trackSheetStatusToggle" />
+          <span>Track application status in sheet (column J)</span>
+        </label>
+        <p class="hint">
+          When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>. Redeploy Apps Script after enabling.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Login / signup credentials</h2>
+        <p class="hint">
+          Used to autofill <strong>login / sign-up</strong> forms on application pages
+          (only when a password field is present). Stored locally in this browser.
+          We never submit login forms automatically.
+        </p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="accountEmail" placeholder="e.g. you@example.com" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Username</span>
+            <input type="text" id="accountUsername" placeholder="e.g. your_username" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="accountPassword" placeholder="Account password" autocomplete="off" />
+          </label>
+        </div>
+        <div class="qa-toolbar" style="margin-top: 10px">
+          <label class="cred-show">
+            <input type="checkbox" id="accountShowPassword" />
+            <span>Show password</span>
+          </label>
+          <button type="button" id="accountSaveBtn" class="secondary compact">Save credentials</button>
+          <button type="button" id="accountClearBtn" class="secondary danger compact">Clear</button>
+          <span class="accordion-note" id="credentialsNote">Not set</span>
+        </div>
+      </section>
+
+      <section class="card">
         <h2 class="section-title">Template answers</h2>
         <div class="grid-2">
           <label class="field span-2">

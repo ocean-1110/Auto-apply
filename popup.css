@@ -104,6 +104,38 @@ html.ocean-in-panel #cancelBtnBottom {
   min-width: 0;
 }
 
+.panel-mode-toggle {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+body.ui-sidebar .close-btn {
+  display: none;
+}
+
+body.ui-sidebar .layout {
+  flex-direction: column;
+}
+
+body.ui-sidebar .sidebar {
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+body.ui-sidebar .jobs-list {
+  max-height: min(420px, 46vh);
+}
+
+body.ui-sidebar .content {
+  width: 100%;
+  min-width: 0;
+}
+
+body.ui-sidebar .toolbar {
+  flex-wrap: wrap;
+}
+
 .sidebar {
   width: min(330px, 100%);
   flex: 0 1 330px;
