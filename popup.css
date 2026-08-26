@@ -553,6 +553,55 @@ html.ocean-in-panel #cancelBtnBottom {
   word-break: break-word;
 }
 
+.job-summary-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-summary-sub-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-ats-chip {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #9ec9f5;
+  background: var(--accent-soft);
+  color: var(--sky);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.job-ats-chip.is-high {
+  border-color: #86efac;
+  background: var(--mint-soft);
+  color: var(--mint);
+}
+
+.job-ats-chip.is-mid {
+  border-color: #fcd34d;
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.job-ats-chip.is-low {
+  border-color: #fca5a5;
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
 .job-summary-toolbar {
   display: flex;
   flex-wrap: nowrap;

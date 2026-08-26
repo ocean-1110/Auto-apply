@@ -1,7 +1,7 @@
 /**
  * After resume JSON is generated, score it against the JD.
- * If ATS < 70 or the resume is not realistic, rewrite once or twice, then
- * the caller renders PDF from the resulting JSON as usual.
+ * If ATS >= 80, keep that resume. If ATS < 80, rewrite until it reaches 80
+ * (or max rewrite passes), then the caller renders PDF as usual.
  */
 
 import { chatCompletion } from "./openai.js";
@@ -14,9 +14,9 @@ import {
 } from "./ats-score.js";
 import { logLlmCall } from "./cost-tracker.js";
 
-/** Rewrite when below this display score (target band is 75–90). */
+/** Rewrite when below this display score (must reach 80%+). */
 export const ATS_REWRITE_MIN_SCORE = ATS_SCORE_TARGET_MIN;
-const MAX_REWRITE_ATTEMPTS = 2;
+const MAX_REWRITE_ATTEMPTS = 3;
 
 const REWRITE_RULES = `
 Rewrite this resume so it would pass a US ATS screen AND still read like a real career history.
@@ -288,6 +288,7 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
 }
 
 function needsRewrite(atsReport, localIssues, judge) {
+  // Hard rule: under 80% must rewrite.
   if (Number(atsReport?.score) < ATS_REWRITE_MIN_SCORE) return true;
   if ((atsReport?.criticalMissing || []).length) return true;
   if (localIssues.length) return true;
@@ -311,20 +312,12 @@ export async function ensureAtsReadyResume(
   let atsReport = await scoreResumeAgainstJd(current, scoreOpts);
   const previousScore = atsReport.score;
 
-  let localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
-  let judge = null;
-  const hasCriticalGaps = (atsReport?.criticalMissing || []).length > 0;
-  if (atsReport.score >= ATS_REWRITE_MIN_SCORE && !localIssues.length && !hasCriticalGaps) {
-    await status(`ATS ${atsReport.score}% — checking that the resume still reads as a realistic career...`);
-    try {
-      judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
-    } catch (err) {
-      if (/cancelled by user/i.test(String(err?.message || err || ""))) throw err;
-      judge = null;
-    }
-  }
-
-  if (!needsRewrite(atsReport, localIssues, judge)) {
+  // Fast path: 80%+ with no critical product gaps → accept without rewrite.
+  if (
+    Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE &&
+    !(atsReport?.criticalMissing || []).length
+  ) {
+    await status(`ATS ${atsReport.score}% (>= ${ATS_REWRITE_MIN_SCORE}%) — keeping this resume.`);
     return {
       data: current,
       atsReport: withAtsMeta(atsReport, {
@@ -336,9 +329,20 @@ export async function ensureAtsReadyResume(
     };
   }
 
+  let localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
+  let judge = null;
+  if (Number(atsReport.score) < ATS_REWRITE_MIN_SCORE) {
+    await status(
+      `ATS ${atsReport.score}% is below ${ATS_REWRITE_MIN_SCORE}% — rewriting resume...`
+    );
+  } else {
+    await status(
+      `ATS ${atsReport.score}% but critical JD products are missing — rewriting resume...`
+    );
+  }
+
   const collectedIssues = [
     ...localIssues,
-    ...(judge?.issues || []),
     atsReport.score < ATS_REWRITE_MIN_SCORE
       ? `ATS score ${atsReport.score} is below ${ATS_REWRITE_MIN_SCORE}.`
       : "",
@@ -351,7 +355,7 @@ export async function ensureAtsReadyResume(
   while (attempts < MAX_REWRITE_ATTEMPTS && needsRewrite(atsReport, localIssues, judge)) {
     attempts += 1;
     await status(
-      `ATS ${atsReport.score}% — rewriting resume for ATS coverage and realistic career growth (pass ${attempts}/${MAX_REWRITE_ATTEMPTS})...`
+      `ATS ${atsReport.score}% — rewrite pass ${attempts}/${MAX_REWRITE_ATTEMPTS} (need ${ATS_REWRITE_MIN_SCORE}%+)...`
     );
     const rewritten = await rewriteResumeJson(current, {
       apiKey,
@@ -367,20 +371,14 @@ export async function ensureAtsReadyResume(
     atsReport = await scoreResumeAgainstJd(current, scoreOpts);
     localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
     judge = null;
+    // Accept as soon as we hit 80%+ without critical product gaps.
     if (
-      atsReport.score >= ATS_REWRITE_MIN_SCORE &&
-      !localIssues.length &&
-      attempts < MAX_REWRITE_ATTEMPTS &&
+      Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE &&
       !(atsReport?.criticalMissing || []).length
     ) {
-      try {
-        judge = await judgeResumeRealism(current, { apiKey, model, jdText, jobTitle, atsReport });
-      } catch (err) {
-        if (/cancelled by user/i.test(String(err?.message || err || ""))) throw err;
-        judge = null;
-      }
+      await status(`ATS ${atsReport.score}% after rewrite — keeping this resume.`);
+      break;
     }
-    if (!needsRewrite(atsReport, localIssues, judge)) break;
     collectedIssues.push(
       `After rewrite ${attempts}: ATS ${atsReport.score}. Missing: ${(atsReport.missing || []).join(", ")}`
     );

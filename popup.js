@@ -616,6 +616,23 @@ function displayImportedJobStatus(job) {
   }
 }
 
+function displayJobSource(job) {
+  const source = String(job?.source || "").trim();
+  if (!source) return "Other";
+  if (isDiceSource(source)) return "Dice";
+  if (isJobrightSource(source)) return "Jobright";
+  if (isLinkedInSource(source)) return "LinkedIn";
+  return source.charAt(0).toUpperCase() + source.slice(1);
+}
+
+function jobFinalAtsScore(job) {
+  const fromField = Number(job?.atsScore);
+  if (Number.isFinite(fromField) && fromField > 0) return Math.round(fromField);
+  const fromReport = Number(job?.atsReport?.finalScore ?? job?.atsReport?.score);
+  if (Number.isFinite(fromReport) && fromReport > 0) return Math.round(fromReport);
+  return null;
+}
+
 function shortError(job) {
   const d = String(job?.statusDetail || job?.error || "").trim();
   return d ? d.slice(0, 220) : "";
@@ -820,6 +837,26 @@ function renderImportedJobs() {
     title.textContent = String(job.jobTitle || jobId || "Untitled");
     summary.appendChild(title);
 
+    const sub = document.createElement("div");
+    sub.className = "job-summary-sub";
+    const company = String(job.companyName || "").trim() || "Unknown company";
+    const site = displayJobSource(job);
+    const ats = jobFinalAtsScore(job);
+    const subLeft = document.createElement("span");
+    subLeft.className = "job-summary-sub-text";
+    subLeft.textContent = `${company}  ·  ${site}`;
+    subLeft.title = `${company} | ${site}`;
+    sub.appendChild(subLeft);
+    if (ats != null) {
+      const atsChip = document.createElement("span");
+      atsChip.className = "job-ats-chip";
+      atsChip.classList.add(ats >= 85 ? "is-high" : ats >= 80 ? "is-mid" : "is-low");
+      atsChip.textContent = `ATS ${ats}%`;
+      atsChip.title = "Final ATS score after generation/rewrite";
+      sub.appendChild(atsChip);
+    }
+    summary.appendChild(sub);
+
     const toolbar = document.createElement("div");
     toolbar.className = "job-summary-toolbar";
 
@@ -951,15 +988,12 @@ function renderImportedJobs() {
     const details = document.createElement("div");
     details.className = "job-card-details";
 
-    const meta = document.createElement("p");
-    meta.className = "job-meta";
-    meta.textContent = `${job.companyName || ""}  |  ${String(job.source || "").trim() || "n/a"}`;
-    details.appendChild(meta);
-
     const skills = document.createElement("p");
     skills.className = "job-meta";
     const skillsPreview = String(job.keySkills || "").trim().slice(0, 180);
-    skills.textContent = skillsPreview ? `Key skills: ${skillsPreview}${String(job.keySkills || "").length > 180 ? "…" : ""}` : "";
+    skills.textContent = skillsPreview
+      ? `Key skills: ${skillsPreview}${String(job.keySkills || "").length > 180 ? "…" : ""}`
+      : "";
     if (skills.textContent) details.appendChild(skills);
 
     const actions = document.createElement("div");

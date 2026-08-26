@@ -53,26 +53,43 @@ export async function chatCompletion({
   }
 
   const abortSignal = signal || activeChatAbortSignal || undefined;
+  const delaysMs = [2000, 4000];
   let response;
-  try {
-    response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body),
-      ...(abortSignal ? { signal: abortSignal } : null)
-    });
-  } catch (err) {
-    if (
-      err?.name === "AbortError" ||
-      abortSignal?.aborted ||
-      /aborted|abort/i.test(String(err?.message || ""))
-    ) {
-      throw new Error("Generation cancelled by user.");
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body),
+        ...(abortSignal ? { signal: abortSignal } : null)
+      });
+      lastErr = null;
+      break;
+    } catch (err) {
+      if (
+        err?.name === "AbortError" ||
+        abortSignal?.aborted ||
+        /aborted|abort/i.test(String(err?.message || ""))
+      ) {
+        throw new Error("Generation cancelled by user.");
+      }
+      lastErr = err;
+      if (attempt >= 3) {
+        throw new Error(`OpenAI request failed: ${String(err?.message || err)}`);
+      }
+      const waitEnd = Date.now() + (delaysMs[attempt - 1] || 3000);
+      while (Date.now() < waitEnd) {
+        if (abortSignal?.aborted) throw new Error("Generation cancelled by user.");
+        await new Promise((r) => setTimeout(r, 200));
+      }
     }
-    throw new Error(`OpenAI request failed: ${String(err?.message || err)}`);
+  }
+  if (!response) {
+    throw new Error(`OpenAI request failed: ${String(lastErr?.message || lastErr || "network error")}`);
   }
 
   let payload = null;
@@ -88,8 +105,10 @@ export async function chatCompletion({
     if (response.status === 401) {
       throw new Error("OpenAI API key is invalid or revoked (401).");
     }
-    if (response.status === 429) {
-      throw new Error(`OpenAI rate limit exceeded (429): ${apiMessage}`);
+    if (response.status === 429 || response.status >= 500) {
+      throw new Error(
+        `OpenAI ${response.status === 429 ? "rate limit" : "server"} error (HTTP ${response.status}): ${apiMessage}`
+      );
     }
     throw new Error(`OpenAI error (HTTP ${response.status}): ${apiMessage}`);
   }

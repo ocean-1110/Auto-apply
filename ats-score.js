@@ -4,14 +4,14 @@
  * normalizes the JSON and maps it into the popup display band.
  *
  * Displayed overall scores are kept in a realistic band (up to 90%).
- * Rewrite pipeline targets at least 75%.
+ * Rewrite pipeline targets at least 80%.
  */
 
 import { chatCompletion, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { logLlmCall } from "./cost-tracker.js";
 
 export const ATS_SCORE_DISPLAY_MAX = 90;
-export const ATS_SCORE_TARGET_MIN = 75;
+export const ATS_SCORE_TARGET_MIN = 80;
 
 const ATS_SCORE_SYSTEM = `You are a US Applicant Tracking System (ATS) evaluator for technical / Salesforce roles.
 
@@ -26,7 +26,7 @@ Rules:
 - missing: real JD products/tools/skills that are absent from the resume. Never include generic phrases, locations, benefits language, or the employer name.
 - criticalMissing: must-have named products/tools still missing (for example nCino, FSC, Copado, a required cloud). Empty if none.
 - plantableMissing: missing product/tool names that can be added to the skills section. Exclude certifications the resume does not already list.
-- Calibrate scores: a clearly matching senior resume is typically 75–90. A partial match is 50–74. A weak match is below 50. Do not give 100.
+- Calibrate scores: a clearly matching senior resume is typically 80–90. A partial match is 50–79. A weak match is below 50. Do not give 100.
 
 Return ONLY JSON with this shape:
 {
@@ -104,7 +104,7 @@ function compactResumeForAts(resumeData = {}) {
 
 /**
  * Map a raw coverage score into the display band.
- * Never shows 91–100 (those look fake); keeps strong resumes in ~75–90.
+ * Never shows 91–100 (those look fake); keeps strong resumes in ~80–90.
  */
 export function toDisplayAtsScore(raw) {
   const n = clamp(Math.round(Number(raw) || 0), 0, 100);

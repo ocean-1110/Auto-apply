@@ -362,6 +362,40 @@ function isCancelError(err) {
   return /cancelled by user/i.test(String(err?.message || err || ""));
 }
 
+function isRetryableGenerationError(err) {
+  if (isCancelError(err)) return false;
+  const msg = String(err?.message || err || "");
+  if (/api key is (missing|invalid)|401\b/i.test(msg)) return false;
+  if (/missing job description/i.test(msg)) return false;
+  return /openai request failed|failed to fetch|networkerror|network|timeout|timed out|429|rate limit|HTTP 5\d\d|502|503|504|empty response|not valid resume json|econnreset|err_network|err_internet|err_connection|temporarily unavailable|overloaded/i.test(
+    msg
+  );
+}
+
+/**
+ * Retry a job step up to 3 times, then throw so the batch can skip to the next job.
+ * Waits 3s, then 6s between attempts.
+ */
+async function runWithRetries(task, { attempts = 3, delaysMs = [3000, 6000], onRetry } = {}) {
+  const max = Math.max(1, Number(attempts) || 3);
+  let lastErr;
+  for (let n = 1; n <= max; n += 1) {
+    try {
+      assertNotCancelled();
+      return await task(n, max);
+    } catch (err) {
+      lastErr = err;
+      if (isCancelError(err) || n >= max || !isRetryableGenerationError(err)) throw err;
+      const wait = Number(delaysMs[Math.min(n - 1, delaysMs.length - 1)] || 3000);
+      if (typeof onRetry === "function") {
+        await onRetry({ attempt: n, nextAttempt: n + 1, max, waitMs: wait, err });
+      }
+      await sleepMs(wait);
+    }
+  }
+  throw lastErr;
+}
+
 async function getImportedJobsById() {
   const data = await chrome.storage.local.get(IMPORTED_JOBS_BY_ID_KEY);
   return data[IMPORTED_JOBS_BY_ID_KEY] || {};
@@ -1493,7 +1527,13 @@ async function runAutofillStep(
  * On the final Submit page, clicks Submit.
  */
 async function sleepMs(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+  const end = Date.now() + Math.max(0, Number(ms) || 0);
+  while (Date.now() < end) {
+    if (generationCancelRequested || generationAbortController?.signal?.aborted) {
+      throw new Error("Generation cancelled by user.");
+    }
+    await new Promise((r) => setTimeout(r, Math.min(200, Math.max(0, end - Date.now()))));
+  }
 }
 
 function isHttpUrl(url) {
@@ -3213,6 +3253,8 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const costLine = await getCostSummaryText();
   return {
     ...saved,
+    atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0,
+    atsReport,
     status: `${saved.status} Click Autofill on the application page when ready. ${costLine}`.trim()
   };
 }
@@ -3940,100 +3982,130 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           true;
 
         for (let i = 0; i < jobIds.length; i += 1) {
+          let importedJobId = "";
           try {
             assertNotCancelled();
-          } catch {
-            cancelled = true;
-            break;
-          }
 
-          const importedJobId = jobIds[i];
-          byId = await getImportedJobsById();
-          const job = byId[importedJobId];
-          if (!job) {
-            failCount += 1;
-            continue;
-          }
-
-          const jobUrl = String(job.jdLink || job.url || "").trim();
-          const jdText = String(job.jdText || shared.jdText || "").trim();
-
-          await setImportedJobStatus(importedJobId, {
-            status: "opening",
-            statusDetail: `Checking if still open (${i + 1}/${jobIds.length})...`,
-            markAttempt: true,
-            profileId
-          });
-          await setStatus(
-            `Batch ${i + 1}/${jobIds.length}: checking ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
-          );
-
-          if (jobUrl) {
-            const probe = await openAndProbeJobAvailability(jobUrl, {
-              active: false,
-              reuseTabId: probeTabId
-            });
-            probeTabId = probe.tabId || probeTabId;
-            if (probe.closed) {
-              closedCount += 1;
-              await removeImportedJobFromStorage(importedJobId);
-              await setStatus(
-                `Closed — removed from list: ${job.jobTitle || importedJobId} (${probe.closed})`
-              );
+            importedJobId = jobIds[i];
+            byId = await getImportedJobsById();
+            const job = byId[importedJobId];
+            if (!job) {
+              failCount += 1;
               continue;
             }
-          }
 
-          if (!jdText) {
-            failCount += 1;
+            const jobUrl = String(job.jdLink || job.url || "").trim();
+            const jdText = String(job.jdText || shared.jdText || "").trim();
+
             await setImportedJobStatus(importedJobId, {
-              status: "failed",
-              statusDetail: "Missing job description — cannot generate a resume.",
+              status: "opening",
+              statusDetail: `Checking if still open (${i + 1}/${jobIds.length})...`,
+              markAttempt: true,
               profileId
             });
-            continue;
-          }
+            await setStatus(
+              `Batch ${i + 1}/${jobIds.length}: checking ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
+            );
 
-          const jobMeta = {
-            jobTitle: job.jobTitle || "",
-            companyName: job.companyName || "",
-            jdLink: jobUrl,
-            jdText,
-            templateId: shared.templateId || DEFAULT_TEMPLATE_ID,
-            spreadsheetUrl: shared.spreadsheetUrl || "",
-            sheetName: shared.sheetName || "",
-            sheetsWebAppUrl: shared.sheetsWebAppUrl || "",
-            workArrangement: job.workArrangement || "",
-            employmentType: job.employmentType || "",
-            salaryMin: job.salaryMin || "",
-            salaryMax: job.salaryMax || "",
-            datePosted: job.datePosted || "",
-            resumeOnly: resumeOnlyStored,
-            trackApplicationStatus:
-              shared.trackApplicationStatus === true || trackStored,
-            importedJobId
-          };
+            if (jobUrl) {
+              const probe = await probeJobAvailabilityWithRetries(jobUrl, {
+                attempts: 3,
+                reuseTabId: probeTabId,
+                onAttempt: async (attempt, max) => {
+                  await setStatus(
+                    `Batch ${i + 1}/${jobIds.length}: checking job (try ${attempt}/${max})...`
+                  );
+                }
+              });
+              probeTabId = probe.tabId || probeTabId;
+              if (probe.closed) {
+                closedCount += 1;
+                await removeImportedJobFromStorage(importedJobId);
+                await setStatus(
+                  `Closed — removed from list: ${job.jobTitle || importedJobId} (${probe.closed})`
+                );
+                continue;
+              }
+              if (probe.error) {
+                failCount += 1;
+                await setImportedJobStatus(importedJobId, {
+                  status: "check_failed",
+                  statusDetail: `Skipped after 3 checks: ${probe.error}`,
+                  profileId
+                });
+                await setStatus(
+                  `Batch ${i + 1}/${jobIds.length}: skipped ${job.jobTitle || importedJobId} (${probe.error}). Continuing...`
+                );
+                continue;
+              }
+            }
 
-          await chrome.storage.local.set({
-            selected_profile_id: profileId,
-            selected_template_id: jobMeta.templateId,
-            last_job_title: jobMeta.jobTitle,
-            last_company_name: jobMeta.companyName,
-            last_jd_link: jobMeta.jdLink,
-            last_jd_text: jobMeta.jdText
-          });
+            if (!jdText) {
+              failCount += 1;
+              await setImportedJobStatus(importedJobId, {
+                status: "failed",
+                statusDetail: "Missing job description — cannot generate a resume.",
+                profileId
+              });
+              continue;
+            }
 
-          await setImportedJobStatus(importedJobId, {
-            status: "generating",
-            statusDetail: `Batch resume ${i + 1}/${jobIds.length}...`,
-            profileId
-          });
-          await setStatus(
-            `Batch resume ${i + 1}/${jobIds.length}: ${jobMeta.jobTitle || importedJobId} @ ${jobMeta.companyName || ""}`
-          );
+            const jobMeta = {
+              jobTitle: job.jobTitle || "",
+              companyName: job.companyName || "",
+              jdLink: jobUrl,
+              jdText,
+              templateId: shared.templateId || DEFAULT_TEMPLATE_ID,
+              spreadsheetUrl: shared.spreadsheetUrl || "",
+              sheetName: shared.sheetName || "",
+              sheetsWebAppUrl: shared.sheetsWebAppUrl || "",
+              workArrangement: job.workArrangement || "",
+              employmentType: job.employmentType || "",
+              salaryMin: job.salaryMin || "",
+              salaryMax: job.salaryMax || "",
+              datePosted: job.datePosted || "",
+              resumeOnly: resumeOnlyStored,
+              trackApplicationStatus:
+                shared.trackApplicationStatus === true || trackStored,
+              importedJobId
+            };
 
-          try {
-            const saved = await runGenerationPipeline({ profileId, jobMeta });
+            await chrome.storage.local.set({
+              selected_profile_id: profileId,
+              selected_template_id: jobMeta.templateId,
+              last_job_title: jobMeta.jobTitle,
+              last_company_name: jobMeta.companyName,
+              last_jd_link: jobMeta.jdLink,
+              last_jd_text: jobMeta.jdText
+            });
+
+            await setImportedJobStatus(importedJobId, {
+              status: "generating",
+              statusDetail: `Batch resume ${i + 1}/${jobIds.length}...`,
+              profileId
+            });
+            await setStatus(
+              `Batch resume ${i + 1}/${jobIds.length}: ${jobMeta.jobTitle || importedJobId} @ ${jobMeta.companyName || ""}`
+            );
+
+            const saved = await runWithRetries(
+              () => runGenerationPipeline({ profileId, jobMeta }),
+              {
+                attempts: 3,
+                delaysMs: [3000, 6000],
+                onRetry: async ({ nextAttempt, max, waitMs, err }) => {
+                  const why = String(err?.message || err).slice(0, 160);
+                  await setImportedJobStatus(importedJobId, {
+                    status: "generating",
+                    statusDetail: `Retry ${nextAttempt}/${max} in ${Math.round(waitMs / 1000)}s — ${why}`,
+                    profileId
+                  });
+                  await setStatus(
+                    `Batch ${i + 1}/${jobIds.length}: network/API issue. Retry ${nextAttempt}/${max} in ${Math.round(waitMs / 1000)}s...`
+                  );
+                }
+              }
+            );
             okCount += 1;
             await setImportedJobStatus(importedJobId, {
               status: "generated",
@@ -4043,27 +4115,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 hasGeneratedResume: true,
                 resumeFolder: saved?.folderName || "",
                 resumeFileName: saved?.resumeFileName || "",
-                coverLetterFileName: saved?.coverLetterFileName || ""
+                coverLetterFileName: saved?.coverLetterFileName || "",
+                atsScore: Number(saved?.atsScore) || undefined
               }
             });
           } catch (err) {
             if (isCancelError(err)) {
               cancelled = true;
-              await setImportedJobStatus(importedJobId, {
-                status: "failed",
-                statusDetail: "Cancelled by user.",
-                profileId
-              });
+              if (importedJobId) {
+                await setImportedJobStatus(importedJobId, {
+                  status: "failed",
+                  statusDetail: "Cancelled by user.",
+                  profileId
+                });
+              }
               break;
             }
             failCount += 1;
             const error = String(err?.message || err);
-            await setImportedJobStatus(importedJobId, {
-              status: "failed",
-              statusDetail: error,
-              profileId
-            });
-            await setStatus(`Batch item failed (${jobMeta.jobTitle || importedJobId}): ${error}`);
+            if (importedJobId) {
+              await setImportedJobStatus(importedJobId, {
+                status: "failed",
+                statusDetail: `Skipped after 3 tries: ${error}`,
+                profileId
+              });
+            }
+            await setStatus(
+              `Batch item skipped (${importedJobId || "job"}): ${error}. Continuing...`
+            );
           }
         }
 
