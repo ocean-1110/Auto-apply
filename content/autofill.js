@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-25.dice-submit.1";
+  const SCRIPT_BUILD = "2026-08-26.dice-apply-not-profile.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -1449,6 +1449,63 @@
     return clicked;
   }
 
+  function uploadsStillBusy() {
+    const scope = getApplyScope() || document;
+    const blob = cleanLabelText(scope.innerText || "").slice(0, 8000).toLowerCase();
+    if (/\b(uploading|upload in progress|processing (your )?(file|document|resume|cover)|please wait while .{0,40}upload)\b/i.test(blob)) {
+      return true;
+    }
+    const busySel = [
+      '[class*="upload"][class*="progress"]',
+      '[class*="Upload"][class*="Progress"]',
+      '[class*="file-upload"] [role="progressbar"]',
+      '[data-testid*="upload"] [role="progressbar"]',
+      '[aria-busy="true"]',
+      ".MuiCircularProgress-root",
+      '[class*="spinner"]',
+      '[class*="Spinner"]',
+      '[class*="loading-bar"]'
+    ].join(", ");
+    for (const el of scope.querySelectorAll?.(busySel) || []) {
+      if (!isElVisible(el)) continue;
+      // Ignore global page spinners far from file widgets.
+      if (el.closest?.('input[type="file"], [class*="drop"], [class*="upload"], [class*="Upload"], [class*="attachment"]')) {
+        return true;
+      }
+      if (/\b(upload|file|resume|cover|document)\b/i.test(fileFieldContext(el) || el.getAttribute?.("aria-label") || "")) {
+        return true;
+      }
+    }
+    // File inputs that still look empty after we intended to attach something.
+    for (const input of collectFileInputs()) {
+      const kind = classifyFileInput(input);
+      if (kind !== "resume" && kind !== "coverLetter") continue;
+      if (!(input.files && input.files.length)) {
+        // Some SPAs clear the input after ingesting; only treat as busy if UI still asks to upload.
+        const ctx = fileFieldContext(input).toLowerCase();
+        if (/\b(required|upload|attach|drag)\b/.test(ctx) && !/\b(uploaded|attached|selected|replace)\b/.test(ctx)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function waitForUploadsToSettle(timeoutMs = 20000) {
+    const start = Date.now();
+    // Give the SPA a moment to start its upload handler after change/drop.
+    await sleep(600);
+    while (Date.now() - start < timeoutMs) {
+      if (!uploadsStillBusy()) {
+        // Require two quiet samples so brief spinners don't false-clear.
+        await sleep(450);
+        if (!uploadsStillBusy()) return true;
+      }
+      await sleep(400);
+    }
+    return !uploadsStillBusy();
+  }
+
   async function uploadApplicationFiles(uploadFiles = {}) {
     await revealApplicationUploads();
     const uploaded = [];
@@ -1468,12 +1525,12 @@
       );
 
     if (!resumeFile && !coverFile) {
-      return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-docs" }] };
+      return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-docs" }], settled: true };
     }
 
     const inputs = collectFileInputs();
     if (!inputs.length) {
-      return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-file-inputs" }] };
+      return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-file-inputs" }], settled: true };
     }
 
     const classified = inputs.map((input) => ({
@@ -1504,9 +1561,21 @@
       if (leftover) targets.push({ ...leftover, file: coverFile, kind: "coverLetter" });
     }
 
+    // Top → bottom: resume first, then cover letter.
+    targets.sort((a, b) => {
+      const order = { resume: 0, coverLetter: 1 };
+      const byKind = (order[a.kind] ?? 9) - (order[b.kind] ?? 9);
+      if (byKind) return byKind;
+      const ay = a.input.getBoundingClientRect?.().top || 0;
+      const by = b.input.getBoundingClientRect?.().top || 0;
+      return ay - by;
+    });
+
     const used = new WeakSet();
     for (const row of targets) {
       if (!row.file || used.has(row.input)) continue;
+      scrollElIntoView(row.input);
+      await sleep(200);
       const ok = setFileOnInput(row.input, row.file);
       if (ok) {
         used.add(row.input);
@@ -1515,6 +1584,8 @@
           fileName: row.file.name,
           label: row.label
         });
+        // Wait for each file to finish before attaching the next / clicking Next.
+        await waitForUploadsToSettle(row.kind === "coverLetter" ? 25000 : 20000);
       } else {
         skipped.push({
           reason: "set-failed",
@@ -1530,7 +1601,8 @@
       }
     }
 
-    return { uploadedCount: uploaded.length, uploaded, skipped };
+    const settled = await waitForUploadsToSettle(8000);
+    return { uploadedCount: uploaded.length, uploaded, skipped, settled };
   }
 
   function looksLikeQuestionLabel(label) {
@@ -2703,6 +2775,11 @@
   ) {
     suppressLearn();
     const filled = [];
+
+    // Top → bottom: attach docs first and wait for the host to finish ingesting
+    // them before filling fields or clicking Next (avoids Dice "Leave site?" prompts).
+    const uploadResult = await uploadApplicationFiles(uploadFiles);
+
     const historyFilled = await fillHistorySections(history.workHistory, history.educationHistory);
     for (const row of historyFilled) filled.push(row);
 
@@ -2729,7 +2806,11 @@
     };
     const credResult = fillLoginCredentials(creds);
 
-    const uploadResult = await uploadApplicationFiles(uploadFiles);
+    // One more quiet check so Next is never pressed mid-upload.
+    if (uploadResult.uploadedCount > 0 || uploadsStillBusy()) {
+      await waitForUploadsToSettle(12000);
+    }
+
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
     const unmatchedChoiceQuestions = await collectUnmatchedChoiceQuestions();
 
@@ -2742,6 +2823,7 @@
       uploadedCount: uploadResult.uploadedCount,
       uploaded: uploadResult.uploaded,
       uploadSkipped: uploadResult.skipped,
+      uploadsSettled: uploadResult.settled !== false && !uploadsStillBusy(),
       unmatchedQuestions,
       unmatchedChoiceQuestions
     };
@@ -2752,7 +2834,7 @@
     const seen = new Set();
 
     const applyRe = isDiceJobBrowsePage()
-      ? /\beasy\s*apply\b|\bapply now\b/i
+      ? /\beasy\s*apply\b|\bapply(\s+now)?\b/i
       : /\beasy\s*apply\b|\bapply now\b|\bstart application\b|\bbegin application\b/i;
 
     function pushUrl(href) {
@@ -3102,17 +3184,123 @@
     if (!isDiceApplicationPath()) return null;
     const selectors = [
       '[data-testid*="wizard"]',
+      '[data-testid*="application-wizard"]',
       '[class*="application-wizard"]',
+      '[class*="ApplicationWizard"]',
       '[class*="job-application"]',
-      'form',
-      'main',
-      '[role="main"]'
+      '[class*="JobApplication"]',
+      '[id*="job-application"]',
+      'form[action*="job-application"]',
+      'form'
     ];
     for (const sel of selectors) {
       const el = document.querySelector(sel);
-      if (el && el.querySelector("button, [role='button'], input[type='submit']")) return el;
+      if (!el) continue;
+      if (el.querySelector("button, [role='button'], input[type='submit']")) return el;
     }
+    // Prefer main content without the site header/avatar chrome.
+    const main = document.querySelector('main, [role="main"], #content, #main');
+    if (main && main.querySelector("button, [role='button'], input[type='submit']")) return main;
     return document;
+  }
+
+  /** Header / avatar / account menu — never treat as Apply / Next / Submit. */
+  function isSiteChromeControl(el) {
+    if (!el || typeof el.closest !== "function") return true;
+
+    const href = String(el.href || el.getAttribute?.("href") || el.getAttribute?.("data-href") || "");
+    if (/dice\.com\/(profile|account|settings|dashboard|preferences)\b/i.test(href)) return true;
+    if (/^https?:\/\/([^/]*\.)?dice\.com\/(profile|account|settings|dashboard|preferences)\b/i.test(href)) {
+      return true;
+    }
+    if (/\/(dashboard|settings|profile|account|preferences)(\/|\?|#|$)/i.test(href)) return true;
+
+    // Avatar / account menus (global nav) — these open /profile.
+    if (
+      el.closest(
+        [
+          '[data-testid*="avatar" i]',
+          '[class*="avatar"]',
+          '[class*="Avatar"]',
+          '[data-testid*="user-menu" i]',
+          '[data-testid*="account-menu" i]',
+          '[data-testid*="profile-menu" i]',
+          '[aria-label*="account menu" i]',
+          '[aria-label*="user menu" i]',
+          '[aria-label*="my profile" i]',
+          '[aria-label*="view profile" i]',
+          'a[href*="/profile"]',
+          'a[href*="/account"]',
+          'a[href*="/settings"]',
+          'a[href*="/dashboard"]',
+          'a[href*="/preferences"]'
+        ].join(", ")
+      )
+    ) {
+      return true;
+    }
+
+    const text = elActionText(el);
+    if (/\b(my profile|account settings|view profile|edit profile)\b/i.test(text)) return true;
+
+    // Only treat the TOP site banner/nav as chrome. Job-detail panes often wrap
+    // their own <header> around the teal Apply button — do NOT exclude that.
+    const inJobSurface = Boolean(
+      el.closest(
+        [
+          '[data-testid*="job-detail" i]',
+          '[data-testid*="jobDetail" i]',
+          '[class*="job-detail"]',
+          '[class*="JobDetail"]',
+          '[class*="jobDetail"]',
+          '[class*="job-description"]',
+          '[class*="JobDescription"]',
+          '[class*="search-detail"]',
+          '[class*="SearchDetail"]',
+          '[class*="details-pane"]',
+          '[class*="DetailsPane"]',
+          '[class*="job-view"]',
+          '[class*="JobView"]'
+        ].join(", ")
+      )
+    );
+    if (inJobSurface) return false;
+
+    const banner = el.closest('header, [role="banner"], nav, [role="navigation"]');
+    if (banner) {
+      try {
+        const top = banner.getBoundingClientRect().top;
+        // Global Dice nav sits at the very top of the viewport.
+        if (top < 96) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function actionButtonScore(btn, type) {
+    let score = type === "submit" ? 30 : type === "review" ? 20 : 10;
+    const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
+    if (new RegExp(type, "i").test(hint)) score += 40;
+    if (/next|continue|submit|review|wizard|footer|action/i.test(hint)) score += 25;
+    if (
+      btn.closest(
+        '[class*="footer"], [class*="Footer"], [data-testid*="footer"], [class*="wizard-action"], [class*="step-action"], [class*="form-action"], [class*="sticky"]'
+      )
+    ) {
+      score += 80;
+    }
+    if (isSiteChromeControl(btn)) score -= 250;
+    if (isInsideAdOrOverlay(btn)) score -= 200;
+    try {
+      const top = btn.getBoundingClientRect().top;
+      // Wizard Next/Submit sit near the bottom of the viewport.
+      score += Math.max(0, Math.min(50, Math.floor(top / 16)));
+    } catch {
+      /* ignore */
+    }
+    return score;
   }
 
   /** The most form-dense visible dialog/modal, or the document when none. */
@@ -3156,9 +3344,57 @@
     );
   }
 
-  function findEasyApplyEntryButton() {
+  /** Dice search/detail: the teal Apply button in the job detail panel (top-right). */
+  function findDiceJobDetailApplyButton() {
+    if (!/(^|\.)dice\.com$/i.test(location.hostname)) return null;
+    if (isDiceApplicationPath()) return null;
+
     const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
-      (el) => isElVisible(el) && isElEnabled(el)
+      (el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el)
+    );
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (!APPLY_ONLY_TEXT_RE.test(text) && !EASY_APPLY_TEXT_RE.test(text)) continue;
+      if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(el)) continue;
+      const href = String(el.href || el.getAttribute?.("href") || "");
+      if (/\/profile\b/i.test(href)) continue;
+
+      let score = EASY_APPLY_TEXT_RE.test(text) ? 120 : 90;
+      const hint = `${el.getAttribute("data-testid") || ""} ${el.id || ""} ${el.className || ""}`;
+      if (/easy[-_ ]?apply|apply-button|job-detail|jobDetail/i.test(hint)) score += 40;
+
+      // Prefer the right-hand detail pane (Apply sits top-right of that panel).
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.left > window.innerWidth * 0.35) score += 50;
+        if (rect.top > 60 && rect.top < window.innerHeight * 0.45) score += 35;
+        // Big filled CTA, not a tiny icon button.
+        if (rect.width >= 72 && rect.height >= 28) score += 25;
+      } catch {
+        /* ignore */
+      }
+
+      if (
+        el.closest(
+          '[data-testid*="job-detail" i], [class*="job-detail"], [class*="JobDetail"], [class*="search-detail"], [class*="details-pane"], [class*="job-view"]'
+        )
+      ) {
+        score += 60;
+      }
+
+      scored.push({ type: "entry", el, text, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
+  function findEasyApplyEntryButton() {
+    const diceDetail = findDiceJobDetailApplyButton();
+    if (diceDetail) return diceDetail;
+
+    const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
+      (el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el)
     );
     const scored = [];
     for (const el of controls) {
@@ -3167,6 +3403,7 @@
       if (ENTRY_JUNK_RE.test(text) || EASY_BACK_RE.test(text)) continue;
       if (isInsideAdOrOverlay(el)) continue;
       const href = String(el.href || el.getAttribute?.("href") || el.getAttribute?.("data-href") || "");
+      if (/\/profile\b|\/account\b|\/settings\b/i.test(href)) continue;
       const hint = `${el.getAttribute("data-testid") || ""} ${el.id || ""} ${el.className || ""} ${href}`;
       let score = 0;
       if (EASY_APPLY_TEXT_RE.test(text) || /easy[-_ ]?apply/i.test(hint)) score = 100;
@@ -3192,17 +3429,16 @@
     return null;
   };
 
-  const findActionButton = function (scope) {
+  const findActionButton = function (scope, { includeDisabledSubmit = false } = {}) {
     const scopeEl = scope || getApplyScope();
-    const buttons = [
+    const allButtons = [
       ...scopeEl.querySelectorAll(
         'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
       )
-    ].filter((el) => isElVisible(el) && isElEnabled(el));
+    ].filter((el) => isElVisible(el) && !isSiteChromeControl(el));
+    const buttons = allButtons.filter((el) => isElEnabled(el));
 
-    let next = null;
-    let review = null;
-    let submit = null;
+    const candidates = { next: [], review: [], submit: [] };
     for (const btn of buttons) {
       const text = elActionText(btn);
       const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
@@ -3211,18 +3447,60 @@
       if (EASY_BACK_RE.test(text) && !EASY_NEXT_RE.test(text) && !EASY_SUBMIT_RE.test(text)) {
         continue;
       }
+      // Ignore job-carousel / listing "Next" while inside the application wizard.
+      if (isDiceApplicationPath() && /\b(next job|previous job|next posting)\b/i.test(text)) {
+        continue;
+      }
       const cls = classifyActionButton(text);
-      if (cls === "next" && !next) next = { type: "next", el: btn, text };
-      else if (cls === "review" && !review) review = { type: "review", el: btn, text };
-      else if (cls === "submit" && !submit) submit = { type: "submit", el: btn, text };
-      else if (
-        !submit &&
+      if (cls && candidates[cls]) {
+        candidates[cls].push({ type: cls, el: btn, text, score: actionButtonScore(btn, cls) });
+      } else if (
         (typeAttr === "submit" || /submit/i.test(hint)) &&
         !EASY_BACK_RE.test(text)
       ) {
-        submit = { type: "submit", el: btn, text: text || "Submit" };
+        candidates.submit.push({
+          type: "submit",
+          el: btn,
+          text: text || "Submit",
+          score: actionButtonScore(btn, "submit")
+        });
       }
     }
+
+    const pickBest = (list) => {
+      if (!list.length) return null;
+      list.sort((a, b) => b.score - a.score);
+      return list[0].score > -100 ? list[0] : null;
+    };
+
+    let next = pickBest(candidates.next);
+    let review = pickBest(candidates.review);
+    let submit = pickBest(candidates.submit);
+
+    // Dice final step often keeps Submit disabled until the SPA settles.
+    if (!submit && (includeDisabledSubmit || isDiceApplicationPath())) {
+      for (const btn of allButtons) {
+        if (isElEnabled(btn)) continue;
+        const text = elActionText(btn);
+        const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
+        const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
+        const isSubmit =
+          classifyActionButton(text) === "submit" ||
+          typeAttr === "submit" ||
+          /^\s*(submit|apply(\s+now)?)\s*$/i.test(text) ||
+          /submit/i.test(hint);
+        if (!isSubmit || isInsideAdOrOverlay(btn) || ENTRY_JUNK_RE.test(text)) continue;
+        submit = {
+          type: "submit",
+          el: btn,
+          text: text || "Submit",
+          disabled: true,
+          score: actionButtonScore(btn, "submit")
+        };
+        break;
+      }
+    }
+
     // Dice wizard chrome often still has a "Next" (job carousel). The last
     // application step is Submit — always prefer it when it is on the wizard.
     if (isDiceApplicationPath()) {
@@ -3242,15 +3520,19 @@
       }
     }
     return null;
-  }
+  };
 
   function describeAction(action) {
     if (!action) return null;
-    return { type: action.type, text: action.text || elActionText(action.el) };
+    return {
+      type: action.type,
+      text: action.text || elActionText(action.el),
+      disabled: Boolean(action.disabled)
+    };
   }
 
-  async function clickKeepingSameTab(el) {
-    if (!el) return { clicked: false, navigateUrl: "" };
+  async function clickKeepingSameTab(el, { preferNewTab = false } = {}) {
+    if (!el) return { clicked: false, navigateUrl: "", openInNewTab: false };
     let capturedUrl = "";
     const origOpen = window.open;
     window.open = function (url) {
@@ -3261,10 +3543,10 @@
       if (el.tagName === "A") {
         const href = String(el.href || "").trim();
         const target = String(el.getAttribute("target") || "").toLowerCase();
-        if (/^https?:/i.test(href) && (target === "_blank" || target === "blank")) {
-          return { clicked: false, navigateUrl: href };
+        if (/^https?:/i.test(href) && (preferNewTab || target === "_blank" || target === "blank")) {
+          return { clicked: false, navigateUrl: href, openInNewTab: true };
         }
-        el.setAttribute("target", "_self");
+        if (!preferNewTab) el.setAttribute("target", "_self");
       }
       scrollElIntoView(el);
       try {
@@ -3305,23 +3587,28 @@
       el.click();
       await sleep(400);
       if (/^https?:/i.test(capturedUrl)) {
-        return { clicked: false, navigateUrl: capturedUrl };
+        return {
+          clicked: false,
+          navigateUrl: capturedUrl,
+          openInNewTab: Boolean(preferNewTab)
+        };
       }
-      return { clicked: true, navigateUrl: "" };
+      return { clicked: true, navigateUrl: "", openInNewTab: false };
     } finally {
       window.open = origOpen;
     }
   }
 
-  async function clickEasyApplyEntry() {
+  async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
     const target = findEasyApplyEntryButton();
-    if (!target?.el) return { ok: false, clicked: false, navigateUrl: "" };
-    const res = await clickKeepingSameTab(target.el);
+    if (!target?.el) return { ok: false, clicked: false, navigateUrl: "", openInNewTab: false };
+    const res = await clickKeepingSameTab(target.el, { preferNewTab });
     await sleep(res.clicked ? 800 : 200);
     return {
       ok: Boolean(res.clicked || res.navigateUrl),
       clicked: Boolean(res.clicked),
       navigateUrl: res.navigateUrl || "",
+      openInNewTab: Boolean(res.openInNewTab || preferNewTab),
       text: target.text || elActionText(target.el)
     };
   }
@@ -3337,8 +3624,18 @@
 
   function formNeedsFill() {
     if (detectApplicationSuccess()) return false;
+    if (uploadsStillBusy()) return true;
     const fileInputs = collectFileInputs();
-    if (fileInputs.some((el) => !(el.files && el.files.length))) return true;
+    for (const el of fileInputs) {
+      const kind = classifyFileInput(el);
+      if (kind !== "resume" && kind !== "coverLetter") continue;
+      if (el.files && el.files.length) continue;
+      const ctx = fileFieldContext(el).toLowerCase();
+      // After Dice ingests a file it often clears the input but shows "Replace" / file name.
+      if (/\b(uploaded|attached|selected|replace|remove)\b/.test(ctx)) continue;
+      if (/\b(optional|not required|cover letter is not required)\b/.test(ctx)) continue;
+      return true;
+    }
     const controls = collectFillableControls();
     let empty = 0;
     for (const el of controls) {
@@ -3372,16 +3669,21 @@
         applicationSuccess: detectApplicationSuccess(),
         action: entry ? { type: "entry", text: entry.text } : null,
         needsFill: false,
+        uploadsBusy: false,
         applyUrls: probe.applyUrls || []
       };
     }
-    let action = findActionButton();
+    let action = findActionButton(null, { includeDisabledSubmit: true });
     if (action?.type === "submit" && !probe.isApplicationForm) {
       const t = action.text || elActionText(action.el);
       if (EASY_ENTRY_RE.test(t)) {
         action = { type: "entry", el: action.el, text: t };
       }
     }
+    const busy = uploadsStillBusy();
+    // On the final Submit step, optional empty fields must not block Auto Apply.
+    const needsFill =
+      action?.type === "submit" ? busy : formNeedsFill() || busy;
     return {
       ok: true,
       href: location.href,
@@ -3391,21 +3693,23 @@
       jobUnavailable: probe.jobUnavailable || "",
       applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
-      needsFill: formNeedsFill(),
+      needsFill,
+      uploadsBusy: busy,
       applyUrls: probe.applyUrls || []
     };
   }
 
-  async function clickApplyAction(preferredType = "") {
+  async function clickApplyAction(preferredType = "", { preferNewTab = false } = {}) {
     const before = getApplyActionSnapshot();
     let action = findActionButton();
     if (preferredType === "entry") {
-      const entryRes = await clickEasyApplyEntry();
+      const entryRes = await clickEasyApplyEntry({ preferNewTab });
       await sleep(400);
       return {
         ok: Boolean(entryRes?.clicked || entryRes?.navigateUrl),
         clicked: Boolean(entryRes?.clicked),
         navigateUrl: entryRes?.navigateUrl || "",
+        openInNewTab: Boolean(entryRes?.openInNewTab),
         isSubmit: false,
         action:
           entryRes?.clicked || entryRes?.navigateUrl
@@ -3415,31 +3719,72 @@
         after: getApplyActionSnapshot()
       };
     }
-    if (preferredType) {
+
+    // Never advance while files are still uploading — triggers "Leave site?" on Dice.
+    if (
+      (preferredType === "next" || preferredType === "review" || preferredType === "submit" || !preferredType) &&
+      (before.uploadsBusy || uploadsStillBusy())
+    ) {
+      await waitForUploadsToSettle(15000);
+      if (uploadsStillBusy()) {
+        return {
+          ok: false,
+          clicked: false,
+          navigateUrl: "",
+          openInNewTab: false,
+          isSubmit: false,
+          deferred: "uploads-busy",
+          action: null,
+          before,
+          after: getApplyActionSnapshot()
+        };
+      }
+    }
+
+    if (preferredType === "submit") {
+      // Dice enables Submit a moment after the last step renders.
+      for (let i = 0; i < 12; i += 1) {
+        action = findActionButton(null, { includeDisabledSubmit: true });
+        if (action?.type === "submit" && action.el && isElEnabled(action.el)) break;
+        if (action?.type === "submit" && action.el && i >= 2) break;
+        await sleep(250);
+      }
+      if (action?.type === "submit" && action.el && !isElEnabled(action.el)) {
+        try {
+          action.el.disabled = false;
+          action.el.removeAttribute("disabled");
+          action.el.setAttribute("aria-disabled", "false");
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (preferredType) {
       const scopeEl = getApplyScope();
       const buttons = [
         ...scopeEl.querySelectorAll(
           'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
         )
-      ].filter((el) => isElVisible(el) && isElEnabled(el));
-      const match = buttons.find((btn) => {
+      ].filter((el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el));
+      const scored = [];
+      for (const btn of buttons) {
         const text = elActionText(btn);
-        if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) return false;
+        if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) continue;
         const cls = classifyActionButton(text);
-        if (preferredType === "entry") return Boolean(findEasyApplyEntryButton()?.el === btn);
-        if (cls === preferredType) return true;
-        if (preferredType === "submit") {
-          const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
-          return typeAttr === "submit" || /^\s*submit\b/i.test(text);
+        let match = false;
+        if (preferredType === "entry") match = Boolean(findEasyApplyEntryButton()?.el === btn);
+        else if (cls === preferredType) match = true;
+        if (match) {
+          scored.push({
+            type: preferredType,
+            el: btn,
+            text: elActionText(btn),
+            score: actionButtonScore(btn, preferredType)
+          });
         }
-        return false;
-      });
-      if (match) {
-        action = {
-          type: preferredType,
-          el: match,
-          text: elActionText(match)
-        };
+      }
+      scored.sort((a, b) => b.score - a.score);
+      if (scored[0] && scored[0].score > -100) {
+        action = scored[0];
       }
     }
     // Remap listing-page Apply → entry (same as snapshot).
@@ -3450,13 +3795,16 @@
       }
     }
     if (!action) {
-      return { ok: false, clicked: false, before, after: before };
+      return { ok: false, clicked: false, openInNewTab: false, before, after: before };
     }
-    const clickRes = await clickKeepingSameTab(action.el);
+    const clickRes = await clickKeepingSameTab(action.el, {
+      preferNewTab: preferNewTab && action.type === "entry"
+    });
     return {
       ok: Boolean(clickRes.clicked || clickRes.navigateUrl),
       clicked: Boolean(clickRes.clicked),
       navigateUrl: clickRes.navigateUrl || "",
+      openInNewTab: Boolean(clickRes.openInNewTab),
       isSubmit: action.type === "submit",
       action: describeAction(action),
       before,
@@ -3603,6 +3951,10 @@
       }
       summary.steps = step + 1;
 
+      if (uploadsStillBusy() || Number(fillRes.uploadedCount || 0) > 0) {
+        await waitForUploadsToSettle(20000);
+      }
+
       const action = findActionButton();
       if (!action) {
         const stillForm = probeApplicationForm().isApplicationForm;
@@ -3615,6 +3967,7 @@
 
       if (action.type === "submit") {
         if (autoSubmit) {
+          if (uploadsStillBusy()) await waitForUploadsToSettle(15000);
           scrollElIntoView(action.el);
           action.el.click();
           const start = Date.now();
@@ -3634,6 +3987,13 @@
         }
         summary.status = "ready_for_review";
         summary.detail = "Reached the final Submit step. Stopped so you can review and submit.";
+        return summary;
+      }
+
+      if (uploadsStillBusy()) {
+        summary.status = "needs_review";
+        summary.detail =
+          "File upload is still in progress. Wait for it to finish, then run Auto Apply again.";
         return summary;
       }
 
@@ -4585,13 +4945,15 @@
       return true;
     }
     if (message?.type === "click_apply_action") {
-      clickApplyAction(message.preferredType || "")
+      clickApplyAction(message.preferredType || "", {
+        preferNewTab: Boolean(message.preferNewTab)
+      })
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
       return true;
     }
     if (message?.type === "click_easy_apply_entry") {
-      clickEasyApplyEntry()
+      clickEasyApplyEntry({ preferNewTab: Boolean(message.preferNewTab) })
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
       return true;

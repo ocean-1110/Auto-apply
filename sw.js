@@ -1,4 +1,4 @@
-﻿import { appendJobToSpreadsheet } from "./sheets.js";
+﻿import { appendJobToSpreadsheet, updateJobStatusInSpreadsheet } from "./sheets.js";
 import {
   ensureCaptureAlarm,
   registerCaptureAlarmListener,
@@ -620,7 +620,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-25.dice-submit.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-26.dice-apply-not-profile.1";
 const AUTOFILL_READY_SUBMIT_URL_KEY = "autofill_ready_submit_url";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
@@ -1577,6 +1577,31 @@ function applicationSuccessFromUrl(url) {
   return "";
 }
 
+function isDiceProfileUrl(url) {
+  try {
+    const u = new URL(String(url || ""));
+    if (!/(^|\.)dice\.com$/i.test(u.hostname)) return false;
+    return /^\/profile(?:\/|$)/i.test(u.pathname || "");
+  } catch {
+    return /dice\.com\/profile(?:\/|\?|#|$)/i.test(String(url || ""));
+  }
+}
+
+/** Close every Dice tab sitting on /wizard/success (or equivalent). */
+async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
+  if (delayMs > 0) await sleepMs(delayMs);
+  const tabs = await chrome.tabs.query({});
+  let closed = 0;
+  for (const t of tabs) {
+    if (t.id == null) continue;
+    const href = t.url || t.pendingUrl || "";
+    if (!applicationSuccessFromUrl(href)) continue;
+    await closeTabQuietly(t.id);
+    closed += 1;
+  }
+  return closed;
+}
+
 /** Wait for load + a short SPA settle so the job/apply page is actually visible. */
 async function waitForPageReady(tabId, timeoutMs = 30000) {
   await awaitTabComplete(tabId, timeoutMs);
@@ -1664,6 +1689,7 @@ function pickBestApplyAction(frameResults = []) {
     applicationSuccess,
     applyUrls,
     needsFill: frameResults.some((f) => f?.needsFill),
+    uploadsBusy: frameResults.some((f) => f?.uploadsBusy),
     signature: best?.signature || frameResults[0]?.signature || "",
     href: best?.href || frameResults[0]?.href || ""
   };
@@ -1684,11 +1710,31 @@ async function getApplyActionFromTab(tabId) {
 
 async function waitForApplicationSuccess(tabId, timeoutMs = 25000) {
   const start = Date.now();
+  const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  knownTabIds.add(tabId);
+
   while (Date.now() - start < timeoutMs) {
     const live = await chrome.tabs.get(tabId).catch(() => null);
     if (!live?.id) return { success: false, tabGone: true, detail: "", tabId };
     const urlHit = applicationSuccessFromUrl(live.url || live.pendingUrl || "");
     if (urlHit) return { success: true, tabGone: false, detail: urlHit, tabId };
+
+    // Some flows open confirmation in a new tab — adopt it so we can close it.
+    const tabs = await chrome.tabs.query({});
+    for (const t of tabs) {
+      if (t.id == null || knownTabIds.has(t.id)) continue;
+      const raw = t.url || t.pendingUrl || "";
+      if (!isHttpUrl(raw)) {
+        knownTabIds.add(t.id);
+        continue;
+      }
+      const hit = applicationSuccessFromUrl(raw);
+      if (hit) {
+        return { success: true, tabGone: false, detail: hit, tabId: t.id };
+      }
+      knownTabIds.add(t.id);
+    }
+
     try {
       await ensureAutofillScript(tabId);
       const probe = await getApplyActionFromTab(tabId);
@@ -1734,24 +1780,42 @@ async function closeTabQuietly(tabId) {
 async function finishSubmittedApplication(tabId, { closeOnSuccess = false, clickLabel = "Submit" } = {}) {
   await waitForPageReady(tabId).catch(() => {});
   const waited = await waitForApplicationSuccess(tabId, 25000);
+  const successTabId = waited.tabId || tabId;
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
-      await closeTabQuietly(tabId);
+      await setStatus("Application submitted — closing success tab...");
+      // Always sweep every Dice success URL tab (same tab or a redirect target).
+      await closeAllDiceSuccessTabs({ delayMs: 1000 });
+      await closeTabQuietly(successTabId);
+      if (successTabId !== tabId) await closeTabQuietly(tabId);
     }
     return {
       status: "submitted",
       detail: `Clicked ${clickLabel}. ${waited.detail}`,
       tabClosed: Boolean(closeOnSuccess && !waited.tabGone),
-      tabId: waited.tabGone || closeOnSuccess ? null : tabId
+      tabId: waited.tabGone || closeOnSuccess ? null : successTabId
     };
   }
   if (waited.tabGone) {
+    if (closeOnSuccess) await closeAllDiceSuccessTabs({ delayMs: 0 });
     return {
       status: "submitted",
       detail: `Clicked ${clickLabel}. The application tab closed after submit.`,
       tabClosed: true,
       tabId: null
     };
+  }
+  // Even if DOM probe missed it, close any success URL tabs we can see.
+  if (closeOnSuccess) {
+    const closed = await closeAllDiceSuccessTabs({ delayMs: 1000 });
+    if (closed > 0) {
+      return {
+        status: "submitted",
+        detail: `Clicked ${clickLabel}. Closed Dice success tab.`,
+        tabClosed: true,
+        tabId: null
+      };
+    }
   }
   return {
     status: "needs_review",
@@ -1761,15 +1825,37 @@ async function finishSubmittedApplication(tabId, { closeOnSuccess = false, click
   };
 }
 
-async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
+async function clickSubmitOnTab(tabId, { frameId, clickLabel = "Submit", settleMs = 1000 } = {}) {
+  await setStatus(`Auto Apply: on Submit page — waiting ${Math.round(settleMs / 1000)}s...`);
+  await sleepMs(settleMs);
+  await setStatus(`Auto Apply: clicking ${clickLabel}...`);
+  let clickRes = await sendMessageToTab(
+    tabId,
+    { type: "click_apply_action", preferredType: "submit" },
+    { attempts: 2, frameId }
+  ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (clickRes?.clicked || clickRes?.navigateUrl) break;
+    await sleepMs(500);
+    clickRes = await sendMessageToTab(
+      tabId,
+      { type: "click_apply_action", preferredType: "submit" },
+      { attempts: 2, frameId }
+    ).catch((err) => clickRes || { ok: false, error: String(err?.message || err) });
+  }
+  return clickRes;
+}
+
+async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false } = {}) {
   const start = Date.now();
   const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
 
   while (Date.now() - start < timeoutMs) {
     await sleepMs(400);
 
-    // Apply links often use target=_blank. Fold that new tab back into THIS tab
-    // so we never leave two copies of the same application page.
+    // Apply links often use target=_blank. For Dice we keep the application in that
+    // new tab; elsewhere we fold it back into the original tab.
     const tabs = await chrome.tabs.query({});
     for (const t of tabs) {
       if (t.id == null || knownTabIds.has(t.id) || t.id === tabId) continue;
@@ -1789,6 +1875,18 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
         if (fresh?.id) knownTabIds.add(fresh.id);
         continue;
       }
+
+      if (preferNewTab && isAllowedApplyNavUrl(newUrl) && !isDiceProfileUrl(newUrl)) {
+        await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
+        await waitForPageReady(fresh.id).catch(() => {});
+        return { advanced: true, tabId: fresh.id, reason: "adopted_new_tab" };
+      }
+      if (isDiceProfileUrl(newUrl)) {
+        await chrome.tabs.remove(fresh.id).catch(() => {});
+        knownTabIds.add(fresh.id);
+        continue;
+      }
+
       const orig = await chrome.tabs.get(tabId).catch(() => null);
       const origUrl = orig?.url || "";
       if (orig?.id && normalizeUrlForMatch(origUrl) !== normalizeUrlForMatch(newUrl)) {
@@ -1833,6 +1931,79 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
   return { advanced: false, tabId, reason: "timeout" };
 }
 
+async function openApplyUrlInNewTab(url, openerTabId = null) {
+  const href = String(url || "").trim();
+  if (!isHttpUrl(href)) return null;
+  const createOpts = { url: href, active: true };
+  if (openerTabId != null) {
+    const opener = await chrome.tabs.get(openerTabId).catch(() => null);
+    if (opener?.windowId != null) createOpts.windowId = opener.windowId;
+    if (opener?.index != null) createOpts.index = opener.index + 1;
+  }
+  const tab = await chrome.tabs.create(createOpts);
+  if (!tab?.id) return null;
+  await waitForPageReady(tab.id).catch(() => {});
+  return tab.id;
+}
+
+/**
+ * After Auto Apply marks a job submitted, mirror the job-card "Applied" action
+ * (status + optional Google Sheet "Applied" update).
+ */
+async function finalizeImportedJobAsApplied(importedJobId, {
+  profileId = "",
+  jobMeta = {},
+  site = "",
+  detail = ""
+} = {}) {
+  await setImportedJobStatus(importedJobId, {
+    status: "completed",
+    statusDetail: detail || "Application submitted.",
+    profileId,
+    completedAt: Date.now()
+  });
+
+  await appendApplicationEvent({
+    profileId,
+    importedJobId,
+    jobTitle: jobMeta.jobTitle || "",
+    companyName: jobMeta.companyName || "",
+    jdLink: jobMeta.jdLink || "",
+    status: "completed",
+    source: site || "",
+    detail: detail || "Application submitted."
+  });
+
+  let sheetNote = "";
+  try {
+    const stored = await chrome.storage.local.get([
+      "track_application_status",
+      "spreadsheet_url",
+      "sheets_web_app_url",
+      "sheets_sheet_name"
+    ]);
+    const track =
+      jobMeta.trackApplicationStatus === true || stored.track_application_status === true;
+    const spreadsheetUrl = String(jobMeta.spreadsheetUrl || stored.spreadsheet_url || "").trim();
+    const webAppUrl = String(jobMeta.sheetsWebAppUrl || stored.sheets_web_app_url || "").trim();
+    const sheetName = String(jobMeta.sheetName || stored.sheets_sheet_name || "").trim();
+    const jdLink = String(jobMeta.jdLink || "").trim();
+    if (track && spreadsheetUrl && webAppUrl && jdLink) {
+      await updateJobStatusInSpreadsheet({
+        spreadsheetUrl,
+        webAppUrl,
+        sheetName,
+        jdLink,
+        applicationStatus: "Applied"
+      });
+      sheetNote = " Sheet status → Applied.";
+    }
+  } catch (err) {
+    sheetNote = ` Sheet status update failed: ${String(err?.message || err)}`;
+  }
+  return sheetNote;
+}
+
 /**
  * Universal multi-step Auto Apply: fill → Next if no Submit →
  * wait for next page/tab → refill. On the last page, clicks Submit,
@@ -1841,7 +2012,7 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000) {
 async function startMultiStepApplyOnTab(
   profileId,
   tabId = null,
-  { maxSteps = 14, uploadDocs = null, closeOnSuccess = false } = {}
+  { maxSteps = 14, uploadDocs = null, closeOnSuccess = false, preferNewTab = false } = {}
 ) {
   const tab = tabId
     ? await chrome.tabs.get(tabId).catch(() => null)
@@ -1857,6 +2028,7 @@ async function startMultiStepApplyOnTab(
 
   let currentTabId = tab.id;
   const site = detectSiteFromUrl(tab.url);
+  const useNewTab = preferNewTab || site === "dice";
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
   const summary = {
@@ -1893,7 +2065,11 @@ async function startMultiStepApplyOnTab(
     }));
 
     if (probe.applicationSuccess) {
-      if (closeOnSuccess) await closeTabQuietly(currentTabId);
+      if (closeOnSuccess) {
+        await setStatus("Application submitted — closing success tab...");
+        await closeAllDiceSuccessTabs({ delayMs: 1000 });
+        await closeTabQuietly(currentTabId);
+      }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
       summary.tabId = closeOnSuccess ? null : currentTabId;
@@ -1907,39 +2083,82 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
-    // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel).
+    // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel / profile).
     if (!probe.anyForm) {
       const live = await chrome.tabs.get(currentTabId).catch(() => null);
       const prevUrl = live?.url || "";
       const prevSig = probe.signature || "";
-      const allowedApplyUrl = (probe.applyUrls || []).find((u) => isAllowedApplyNavUrl(u));
+      const allowedApplyUrl = (probe.applyUrls || []).find(
+        (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
+      );
 
       if (probe.best?.action?.type === "entry") {
-        await setStatus(`Auto Apply: clicking ${probe.best.action.text || "Easy Apply"}...`);
+        await setStatus(`Auto Apply: clicking ${probe.best.action.text || "Apply"}...`);
         const clickRes = await sendMessageToTab(
           currentTabId,
-          { type: "click_apply_action", preferredType: "entry" },
+          { type: "click_apply_action", preferredType: "entry", preferNewTab: useNewTab },
           { attempts: 2, frameId: probe.best.frameId }
         );
+        if (clickRes?.navigateUrl && isDiceProfileUrl(clickRes.navigateUrl)) {
+          summary.status = "needs_review";
+          summary.detail =
+            "Dice tried to open Profile instead of Apply. Click the teal Apply button in the job detail panel, then run Auto Apply again.";
+          return summary;
+        }
         if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
+          if (useNewTab || clickRes.openInNewTab) {
+            const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, currentTabId);
+            if (newId) {
+              currentTabId = newId;
+              summary.tabId = currentTabId;
+              summary.tabUrl = clickRes.navigateUrl;
+              summary.steps = step + 1;
+              continue;
+            }
+          }
           await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
         }
       } else if (allowedApplyUrl) {
-        await setStatus("Auto Apply: opening the application page...");
+        await setStatus(
+          useNewTab
+            ? "Auto Apply: opening the application page in a new tab..."
+            : "Auto Apply: opening the application page..."
+        );
+        if (useNewTab) {
+          const newId = await openApplyUrlInNewTab(allowedApplyUrl, currentTabId);
+          if (newId) {
+            currentTabId = newId;
+            summary.tabId = currentTabId;
+            summary.tabUrl = allowedApplyUrl;
+            summary.steps = step + 1;
+            continue;
+          }
+        }
         await navigateTabToUrl(currentTabId, allowedApplyUrl);
       } else {
         summary.status = "needs_review";
         summary.detail =
           probe.blockedReason ||
-          "No Easy Apply / Apply button found on this page.";
+          "No Apply / Easy Apply button found in the job detail panel.";
         summary.tabId = currentTabId;
         return summary;
       }
 
-      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000);
+      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000, {
+        preferNewTab: useNewTab
+      });
       currentTabId = advanced.tabId;
       summary.tabId = currentTabId;
       summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+
+      // Mis-click on the avatar lands on /profile — stop instead of continuing there.
+      if (isDiceProfileUrl(summary.tabUrl)) {
+        summary.status = "needs_review";
+        summary.detail =
+          "Landed on Dice Profile instead of the application. The extension will only click the teal Apply button in the job detail panel — try Apply again.";
+        return summary;
+      }
+
       summary.steps = step + 1;
       continue;
     }
@@ -1990,14 +2209,43 @@ async function startMultiStepApplyOnTab(
     summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
 
     if (Number(fillRes?.uploadedCount || 0) > 0) {
-      await sleepMs(1200);
+      // Dice keeps processing the PDF after the input change; wait before Next.
+      await sleepMs(site === "dice" ? 2500 : 1200);
     }
 
     probe = await getApplyActionFromTab(currentTabId).catch(() => ({
       best: null,
       anyForm: false,
-      applicationSuccess: ""
+      applicationSuccess: "",
+      needsFill: false,
+      uploadsBusy: false
     }));
+
+    // Do not click Next while the step still has empty fields or an in-flight upload
+    // (Dice shows "Leave site?" and can bounce to profile/settings).
+    // Skip this when Submit is already on the page — final step should auto-submit.
+    if (
+      (probe.uploadsBusy || probe.needsFill) &&
+      probe.best?.action?.type !== "submit"
+    ) {
+      for (let wait = 0; wait < 12; wait += 1) {
+        await sleepMs(700);
+        if (probe.needsFill && !probe.uploadsBusy) {
+          await setStatus("Auto Apply: finishing remaining fields before Next...");
+          const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
+          summary.filled += Number(again?.filledCount || 0);
+          summary.uploaded += Number(again?.uploadedCount || 0);
+          summary.aiFilled += Number(again?.aiFilledCount || 0);
+          summary.choiceFilled += Number(again?.choiceFilledCount || 0);
+          summary.bankHits += Number(again?.bankHits || 0);
+        } else {
+          await setStatus("Auto Apply: waiting for file upload to finish...");
+        }
+        probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+        if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
+        if (!probe.uploadsBusy && !probe.needsFill) break;
+      }
+    }
 
     // Dice last wizard step: Submit can stay disabled until the SPA finishes
     // rendering. Wait briefly so we click Submit instead of a leftover Next.
@@ -2008,15 +2256,43 @@ async function startMultiStepApplyOnTab(
         if (!again) continue;
         probe = again;
         if (again.applicationSuccess || again.best?.action?.type === "submit") break;
+        if (again.uploadsBusy) continue;
+        if (!again.needsFill && again.best?.action?.type === "next") break;
       }
     }
 
     if (probe.applicationSuccess) {
-      if (closeOnSuccess) await closeTabQuietly(currentTabId);
+      if (closeOnSuccess) {
+        await setStatus("Application submitted — closing success tab...");
+        await closeAllDiceSuccessTabs({ delayMs: 1000 });
+        await closeTabQuietly(currentTabId);
+      }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
       summary.tabId = closeOnSuccess ? null : currentTabId;
       return summary;
+    }
+
+    if (probe.uploadsBusy) {
+      summary.status = "needs_review";
+      summary.detail =
+        "File upload is still in progress on this page. Wait for the resume/cover letter to finish uploading, then run Auto Apply again.";
+      return summary;
+    }
+
+    // Dice last page: Submit may appear a beat after fill. Keep polling briefly
+    // instead of stopping with "ready for review".
+    if (
+      (!probe.best || probe.best.action?.type !== "submit") &&
+      site === "dice" &&
+      probe.anyForm
+    ) {
+      await setStatus("Auto Apply: waiting for Submit on the last page...");
+      for (let i = 0; i < 8; i += 1) {
+        await sleepMs(400);
+        probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+        if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
+      }
     }
 
     if (!probe.best) {
@@ -2029,20 +2305,11 @@ async function startMultiStepApplyOnTab(
 
     if (probe.best.action.type === "submit") {
       const clickLabel = probe.best.action.text || "Submit";
-      await setStatus(`Autofill: clicking ${clickLabel}...`);
-      let clickRes = await sendMessageToTab(
-        currentTabId,
-        { type: "click_apply_action", preferredType: "submit" },
-        { attempts: 2, frameId: probe.best.frameId }
-      ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
-      if (!clickRes?.clicked && !clickRes?.navigateUrl) {
-        await sleepMs(700);
-        clickRes = await sendMessageToTab(
-          currentTabId,
-          { type: "click_apply_action", preferredType: "submit" },
-          { attempts: 2, frameId: probe.best.frameId }
-        ).catch((err) => clickRes || { ok: false, error: String(err?.message || err) });
-      }
+      const clickRes = await clickSubmitOnTab(currentTabId, {
+        frameId: probe.best.frameId,
+        clickLabel,
+        settleMs: site === "dice" ? 1000 : 400
+      });
       if (clickRes?.navigateUrl) {
         await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
       }
@@ -2068,11 +2335,27 @@ async function startMultiStepApplyOnTab(
     }
 
     await setStatus(`Autofill: clicking ${probe.best.action.text || actionType}...`);
-    const clickRes = await sendMessageToTab(
+    let clickRes = await sendMessageToTab(
       currentTabId,
       { type: "click_apply_action", preferredType: actionType },
       { attempts: 2, frameId: probe.best.frameId }
     ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+
+    if (clickRes?.deferred === "uploads-busy") {
+      await setStatus("Auto Apply: upload still running — waiting before Next...");
+      await sleepMs(3000);
+      clickRes = await sendMessageToTab(
+        currentTabId,
+        { type: "click_apply_action", preferredType: actionType },
+        { attempts: 2, frameId: probe.best.frameId }
+      ).catch((err) => clickRes || { ok: false, error: String(err?.message || err) });
+      if (clickRes?.deferred === "uploads-busy") {
+        summary.status = "needs_review";
+        summary.detail =
+          "Could not click Next because the cover letter/resume upload was still finishing.";
+        return summary;
+      }
+    }
 
     if (clickRes?.isSubmit) {
       const finished = await finishSubmittedApplication(currentTabId, {
@@ -2085,16 +2368,36 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
     if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
-      await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+      if (useNewTab || clickRes.openInNewTab) {
+        const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, currentTabId);
+        if (newId) currentTabId = newId;
+        else await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+      } else {
+        await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+      }
     }
 
-    const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000);
+    const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000, {
+      preferNewTab: useNewTab
+    });
     currentTabId = advanced.tabId;
     summary.tabId = currentTabId;
+    summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+
+    if (isDiceProfileUrl(summary.tabUrl)) {
+      summary.status = "needs_review";
+      summary.detail =
+        "Navigation hit Dice Profile instead of the next application step. Stopped so your profile page is left alone.";
+      return summary;
+    }
 
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
     if (afterAdvance?.applicationSuccess) {
-      if (closeOnSuccess) await closeTabQuietly(currentTabId);
+      if (closeOnSuccess) {
+        await setStatus("Application submitted — closing success tab...");
+        await closeAllDiceSuccessTabs({ delayMs: 1000 });
+        await closeTabQuietly(currentTabId);
+      }
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;
       summary.tabId = closeOnSuccess ? null : currentTabId;
@@ -3844,7 +4147,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const ea = await startMultiStepApplyOnTab(profileId, tabId, {
           maxSteps: 14,
           uploadDocs,
-          closeOnSuccess: true
+          closeOnSuccess: true,
+          preferNewTab: site === "dice"
         });
         if (!ea.ok && ea.error) throw new Error(ea.error);
 
@@ -3854,12 +4158,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
 
+        if (ea.status === "submitted") {
+          const sheetNote = await finalizeImportedJobAsApplied(importedJobId, {
+            profileId,
+            jobMeta,
+            site,
+            detail:
+              `Auto Apply (${site}): submitted. ` +
+              `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}. ` +
+              `${ea.detail || ""}`.trim()
+          });
+          await setStatus(
+            `Applied — tab closed.${sheetNote} ${await getCostSummaryText()}`.trim()
+          );
+          return;
+        }
+
         const nextStatus =
-          ea.status === "submitted"
-            ? "completed"
-            : ea.status === "needs_review"
-              ? "needs_review"
-              : "ready_for_review";
+          ea.status === "needs_review" ? "needs_review" : "ready_for_review";
         await setImportedJobStatus(importedJobId, {
           status: nextStatus,
           statusDetail:
