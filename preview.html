@@ -21,6 +21,9 @@
           </label>
           <button type="button" id="printBtn" class="ghost">Print</button>
           <button type="button" id="refreshBtn" class="ghost">Refresh</button>
+          <button type="button" id="saveBtn" class="primary" hidden title="Render PDFs and save to the output folder">
+            Save PDFs
+          </button>
           <button type="button" id="closeBtn" class="ghost">Close</button>
         </div>
       </header>
@@ -30,6 +33,25 @@
         <button type="button" id="tabCover" class="tab" role="tab">Cover letter</button>
       </div>
 
+      <section id="revisePanel" class="revise-panel" hidden>
+        <label class="revise-label" for="revisePrompt">
+          Update this resume
+          <span class="revise-hint">Sends the current resume JSON + JD + your instructions to GPT</span>
+        </label>
+        <textarea
+          id="revisePrompt"
+          rows="3"
+          placeholder="e.g. Emphasize nCino and Copado in the most recent role. Shorten the summary to 3 lines."
+        ></textarea>
+        <div class="revise-actions">
+          <button type="button" id="regenerateBtn" class="primary">Regenerate</button>
+          <p id="reviseStatus" class="revise-status" hidden></p>
+        </div>
+      </section>
+
+      <p id="pendingBanner" class="pending-banner" hidden>
+        Preview mode — PDFs are not saved yet. Review, optionally regenerate, then click <strong>Save PDFs</strong>.
+      </p>
       <p id="genBanner" class="gen-banner" hidden>Generating resume… preview will update when it is ready.</p>
       <p id="emptyState" class="empty" hidden></p>
       <iframe id="previewFrame" class="preview-frame" title="Document preview"></iframe>

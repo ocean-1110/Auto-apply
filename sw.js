@@ -3507,6 +3507,75 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const rewriteNote = atsReport.rewritten
     ? ` Final ATS ${finalPct}% (was ${Math.round(Number(atsReport.previousScore))}%).`
     : ` Final ATS ${finalPct}%.`;
+
+  const previewStored = meta.previewMode === true;
+
+  // Preview mode: hold JSON for review — do not render/save PDFs until Save.
+  if (previewStored) {
+    await chrome.storage.local.set({
+      last_resume_json: data,
+      last_response: rawText,
+      last_ats_report: atsReport,
+      preview_pending_save: true,
+      preview_pending_meta: {
+        profileId,
+        jobTitle: meta.jobTitle || "",
+        companyName: meta.companyName || "",
+        jdLink: meta.jdLink || "",
+        jdText: meta.jdText || "",
+        outputDir: meta.outputDir || "",
+        spreadsheetUrl: meta.spreadsheetUrl || "",
+        sheetName: meta.sheetName || "",
+        sheetsWebAppUrl: meta.sheetsWebAppUrl || "",
+        templateId: meta.templateId || "",
+        resumeOnly,
+        trackApplicationStatus: meta.trackApplicationStatus === true,
+        importedJobId: meta.importedJobId || "",
+        workArrangement: meta.workArrangement || "",
+        employmentType: meta.employmentType || "",
+        salaryMin: meta.salaryMin || "",
+        salaryMax: meta.salaryMax || "",
+        datePosted: meta.datePosted || "",
+        atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0
+      },
+      ui_open_preview: Date.now()
+    });
+
+    if (meta?.importedJobId) {
+      const live = (await getImportedJobsById())[meta.importedJobId];
+      await setImportedJobStatus(meta.importedJobId, {
+        status: live?.status || "generated",
+        statusDetail: `Preview ready.${rewriteNote} Open Preview to revise or Save PDFs.`,
+        patch: {
+          hasGeneratedResume: false,
+          atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0,
+          atsReport
+        }
+      });
+    }
+
+    try {
+      await openPanelWindow();
+    } catch {
+      /* panel may already be open */
+    }
+
+    const costLine = await getCostSummaryText();
+    await setStatus(
+      `Preview ready.${rewriteNote} Review in Preview, optionally regenerate, then Save PDFs. ${costLine}`.trim()
+    );
+    return {
+      previewOnly: true,
+      folderName: "",
+      resumeFileName: "",
+      coverLetterFileName: "",
+      docs: null,
+      atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0,
+      atsReport,
+      status: `Preview ready.${rewriteNote} Save PDFs from the Preview page when ready. ${costLine}`.trim()
+    };
+  }
+
   await setStatus(
     resumeOnly
       ? `Resume JSON ready.${rewriteNote} Rendering PDF (skipping cover letter)...`
@@ -4073,7 +4142,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             resumeOnly: resumeOnlyStored,
             trackApplicationStatus:
               jobMeta.trackApplicationStatus === true || trackStored,
-            importedJobId
+            importedJobId,
+            previewMode: false
           };
           await setImportedJobStatus(importedJobId, {
             status: "generating",
@@ -4383,7 +4453,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               resumeOnly: resumeOnlyStored,
               trackApplicationStatus:
                 shared.trackApplicationStatus === true || trackStored,
-              importedJobId
+              importedJobId,
+              previewMode: false
             };
 
             await chrome.storage.local.set({
@@ -4658,6 +4729,256 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
 
     return false;
+  }
+
+  if (message?.type === "preview_regenerate_resume") {
+    (async () => {
+      try {
+        const prompt = String(message.prompt || "").trim();
+        if (!prompt) {
+          safeSendResponse(sendResponse, { ok: false, error: "Enter revision instructions first." });
+          return;
+        }
+        const stored = await chrome.storage.local.get([
+          "last_resume_json",
+          "last_jd_text",
+          "last_job_title",
+          "last_company_name",
+          "preview_pending_meta",
+          "selected_profile_id"
+        ]);
+        const current =
+          stored.last_resume_json && typeof stored.last_resume_json === "object"
+            ? stored.last_resume_json
+            : null;
+        if (!current) {
+          safeSendResponse(sendResponse, { ok: false, error: "No resume JSON to update. Generate first." });
+          return;
+        }
+        const pending =
+          stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
+            ? stored.preview_pending_meta
+            : {};
+        const jdText = String(pending.jdText || stored.last_jd_text || "").trim();
+        const jobTitle = String(pending.jobTitle || stored.last_job_title || "").trim();
+        const companyName = String(pending.companyName || stored.last_company_name || "").trim();
+
+        const { apiKey, model } = await getOpenAiSettings();
+        await setStatus("Preview: regenerating resume from your prompt...");
+        const userMsg = [
+          "Update the resume JSON using the instructions below.",
+          "Return ONLY one complete valid resume JSON object (same schema).",
+          "Keep identity fields accurate. Apply the user's edits while staying ATS-friendly and realistic.",
+          "",
+          `Job title: ${jobTitle || "(n/a)"}`,
+          `Company: ${companyName || "(n/a)"}`,
+          "",
+          "=== JOB DESCRIPTION ===",
+          jdText || "(no JD on file)",
+          "",
+          "=== CURRENT RESUME JSON ===",
+          JSON.stringify(current, null, 2),
+          "",
+          "=== USER INSTRUCTIONS ===",
+          prompt
+        ].join("\n");
+
+        const result = await chatCompletion({
+          apiKey,
+          model,
+          messages: [
+            { role: "system", content: RESUME_JSON_SYSTEM_PROMPT },
+            { role: "user", content: userMsg }
+          ],
+          jsonMode: true,
+          maxTokens: 16384
+        });
+        await logLlmCall({
+          purpose: "preview_regenerate",
+          model,
+          inputTokens: result.usage?.prompt_tokens,
+          outputTokens: result.usage?.completion_tokens
+        });
+
+        let data = extractResumeJson(result?.content || "");
+        if (!data) {
+          throw new Error("OpenAI did not return valid resume JSON. Try again with clearer instructions.");
+        }
+        data = await ensureResumeSkills(data, {
+          apiKey,
+          model,
+          jdText
+        });
+
+        let atsReport = null;
+        try {
+          atsReport = await scoreResumeAgainstJd(data, {
+            jdText,
+            jobTitle,
+            apiKey,
+            model
+          });
+        } catch {
+          atsReport = null;
+        }
+
+        const rawText = JSON.stringify(data, null, 2);
+        const nextPending = {
+          ...pending,
+          atsScore: Number(atsReport?.finalScore ?? atsReport?.score) || pending.atsScore || 0
+        };
+        await chrome.storage.local.set({
+          last_resume_json: data,
+          last_response: rawText,
+          ...(atsReport ? { last_ats_report: atsReport } : null),
+          preview_pending_save: true,
+          preview_pending_meta: nextPending
+        });
+
+        const costLine = await getCostSummaryText();
+        const status = `Resume updated from your prompt. Review Preview, then Save PDFs. ${costLine}`.trim();
+        await setStatus(status);
+        safeSendResponse(sendResponse, {
+          ok: true,
+          resume: data,
+          atsReport,
+          status
+        });
+      } catch (err) {
+        const error = String(err?.message || err);
+        await setStatus(`Preview regenerate failed: ${error}`);
+        safeSendResponse(sendResponse, { ok: false, error });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "preview_save_documents") {
+    (async () => {
+      try {
+        if (isRunning) {
+          safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+          return;
+        }
+        const stored = await chrome.storage.local.get([
+          "last_resume_json",
+          "last_response",
+          "preview_pending_meta",
+          "selected_profile_id",
+          "selected_template_id",
+          "generate_resume_only"
+        ]);
+        const resumeData =
+          stored.last_resume_json && typeof stored.last_resume_json === "object"
+            ? stored.last_resume_json
+            : null;
+        if (!resumeData) {
+          safeSendResponse(sendResponse, { ok: false, error: "No resume to save. Generate first." });
+          return;
+        }
+        const pending =
+          stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
+            ? stored.preview_pending_meta
+            : {};
+        const profileId = String(pending.profileId || stored.selected_profile_id || "").trim();
+        const resumeOnly =
+          pending.resumeOnly === true || stored.generate_resume_only === true;
+        const jobMeta = {
+          jobTitle: pending.jobTitle || "",
+          companyName: pending.companyName || "",
+          jdLink: pending.jdLink || "",
+          jdText: pending.jdText || "",
+          outputDir: pending.outputDir || "",
+          spreadsheetUrl: pending.spreadsheetUrl || "",
+          sheetName: pending.sheetName || "",
+          sheetsWebAppUrl: pending.sheetsWebAppUrl || "",
+          templateId: message.templateId || pending.templateId || stored.selected_template_id || "",
+          resumeOnly,
+          trackApplicationStatus: pending.trackApplicationStatus === true,
+          importedJobId: pending.importedJobId || "",
+          workArrangement: pending.workArrangement || "",
+          employmentType: pending.employmentType || "",
+          salaryMin: pending.salaryMin || "",
+          salaryMax: pending.salaryMax || "",
+          datePosted: pending.datePosted || ""
+        };
+
+        isRunning = true;
+        clearGenerationCancel();
+        startKeepAlive();
+        await chrome.storage.local.set({ generation_running: true });
+        await setStatus("Preview: saving resume PDFs...");
+
+        const { apiKey, model } = await getOpenAiSettings();
+        const rawText =
+          String(stored.last_response || "").trim() || JSON.stringify(resumeData, null, 2);
+        const saved = await saveResumeAndCoverLetter(rawText, resumeData, jobMeta, {
+          apiKey,
+          model,
+          runCoverLetter: !resumeOnly
+        });
+
+        if (jobMeta.importedJobId) {
+          await setImportedJobStatus(jobMeta.importedJobId, {
+            status: "generated",
+            statusDetail: saved?.status || "Resume saved from Preview.",
+            profileId,
+            patch: {
+              hasGeneratedResume: true,
+              resumeFolder: saved?.folderName || "",
+              resumeFileName: saved?.resumeFileName || "",
+              coverLetterFileName: saved?.coverLetterFileName || "",
+              atsScore: Number(pending.atsScore) || undefined
+            }
+          });
+        }
+
+        try {
+          if (profileId) {
+            const applicantInfo = await getApplicantInfo(profileId);
+            const brief = await generateApplicationBrief({
+              apiKey,
+              model,
+              resumeData,
+              jobMeta,
+              applicantInfo
+            });
+            await storeApplicationBrief(brief);
+          }
+        } catch {
+          await storeApplicationBrief(null);
+        }
+
+        await chrome.storage.local.set({
+          preview_pending_save: false,
+          generation_running: false
+        });
+        await chrome.storage.local.remove("ui_open_preview");
+
+        const cover =
+          (await chrome.storage.local.get("last_cover_letter_response")).last_cover_letter_response ||
+          "";
+        const costLine = await getCostSummaryText();
+        const status = `${saved.status || "Saved."} ${costLine}`.trim();
+        await setStatus(status);
+        safeSendResponse(sendResponse, {
+          ok: true,
+          ...saved,
+          coverLetter: cover,
+          status
+        });
+      } catch (err) {
+        await chrome.storage.local.set({ generation_running: false });
+        const error = String(err?.message || err);
+        await setStatus(`Preview save failed: ${error}`);
+        safeSendResponse(sendResponse, { ok: false, error });
+      } finally {
+        isRunning = false;
+        finishGenerationCancelState();
+        stopKeepAlive();
+      }
+    })();
+    return true;
   }
 
   if (message?.type !== "generate_resume") {

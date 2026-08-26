@@ -105,6 +105,93 @@ select {
   background: var(--indigo-soft);
 }
 
+.primary {
+  height: 42px;
+  padding: 0 16px;
+  border: 1px solid var(--indigo);
+  border-radius: 12px;
+  background: var(--indigo);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary:hover {
+  filter: brightness(1.06);
+}
+
+.primary:disabled,
+.ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.revise-panel {
+  margin: 0 0 14px;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.revise-label {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.revise-hint {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+#revisePrompt {
+  width: 100%;
+  min-height: 78px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfaf7;
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+
+#revisePrompt:focus {
+  outline: 2px solid #9ec9f5;
+  outline-offset: 1px;
+}
+
+.revise-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.revise-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pending-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid #9ec9f5;
+  border-radius: 12px;
+  background: var(--indigo-soft);
+  color: var(--indigo);
+  font-weight: 600;
+}
+
 .tabs {
   display: flex;
   gap: 8px;

@@ -71,6 +71,7 @@ const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
+const previewModeToggleEl = document.getElementById("previewModeToggle");
 const generateResumeBtn = document.getElementById("generateResume");
 const autofillBtn = document.getElementById("autofillBtn");
 const qaBankSectionEl = document.getElementById("qaBankSection");
@@ -1674,7 +1675,8 @@ async function loadSettings() {
     "imported_jobs_filter",
     "account_credentials",
     "scraped_job_meta",
-    "generate_resume_only"
+    "generate_resume_only",
+    "preview_mode_enabled"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -1710,6 +1712,9 @@ async function loadSettings() {
   if (credentialsSectionEl) credentialsSectionEl.open = Boolean(data.ui_credentials_section_open);
   applyAccountCredentials(data.account_credentials || {});
   if (qaLearnToggleEl) qaLearnToggleEl.checked = data.qa_learn_enabled !== false;
+  if (previewModeToggleEl) {
+    previewModeToggleEl.checked = data.preview_mode_enabled === true;
+  }
   if (resumeOnlyToggleEl) {
     // Default unchecked (false) — only check when user previously enabled it.
     resumeOnlyToggleEl.checked = data.generate_resume_only === true;
@@ -2058,6 +2063,7 @@ async function collectJobMetaOrShowError() {
       datePosted: scrapedJobMeta?.datePosted || "",
       importedJobId: importedJobsSelectedId || "",
       resumeOnly: isResumeOnlyEnabled(),
+      previewMode: isPreviewModeEnabled(),
       trackApplicationStatus: Boolean(trackSheetStatusToggleEl?.checked)
     }
   };
@@ -2097,6 +2103,19 @@ function updateGenerateButtonLabel() {
 async function persistResumeOnlySetting() {
   await chrome.storage.local.set({ generate_resume_only: isResumeOnlyEnabled() });
   updateGenerateButtonLabel();
+}
+
+function isPreviewModeEnabled() {
+  return Boolean(previewModeToggleEl?.checked);
+}
+
+async function persistPreviewModeSetting() {
+  await chrome.storage.local.set({ preview_mode_enabled: isPreviewModeEnabled() });
+  setStatus(
+    isPreviewModeEnabled()
+      ? "Preview mode on — generate opens Preview; Save PDFs when ready."
+      : "Preview mode off — generate saves PDFs immediately."
+  );
 }
 
 async function generateResumeAndCoverLetter() {
@@ -2826,6 +2845,9 @@ document.addEventListener("keydown", (e) => {
 resumeOnlyToggleEl?.addEventListener("change", () => {
   persistResumeOnlySetting().catch(() => {});
 });
+previewModeToggleEl?.addEventListener("change", () => {
+  persistPreviewModeSetting().catch(() => {});
+});
 
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));
 setSidebarMode("manual");
@@ -2849,8 +2871,14 @@ panelPollTimer = setInterval(async () => {
       "imported_jobs_selected_id",
       "imported_jobs_version",
       "last_ats_report",
-      "last_resume_json"
+      "last_resume_json",
+      "ui_open_preview"
     ]);
+
+    if (data.ui_open_preview) {
+      await chrome.storage.local.remove("ui_open_preview");
+      openPreview({ silent: true }).catch(() => {});
+    }
 
     const running = Boolean(data.generation_running);
     const statusText =
