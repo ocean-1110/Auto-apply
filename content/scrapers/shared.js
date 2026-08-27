@@ -3,7 +3,7 @@
  * Each site file calls OceanScrape.register({ id, label, hosts, scrape }).
  */
 (function (root) {
-  const BUILD = "2026-08-27.hiringcafe-scrape.1";
+  const BUILD = "2026-08-27.scrape-topframe.1";
   const Ocean = root.OceanScrape || (root.OceanScrape = {});
   if (Ocean.helperBuild === BUILD) return;
   Ocean.helperBuild = BUILD;
@@ -117,6 +117,48 @@
     return el ? String(el.textContent || "").replace(/\s+/g, " ").trim() : "";
   }
 
+  function queryAllDeep(selector, root = document) {
+    const out = [];
+    const visit = (node) => {
+      if (!node) return;
+      try {
+        if (node.querySelectorAll) out.push(...node.querySelectorAll(selector));
+      } catch {
+        /* invalid selector in this root */
+      }
+      const tree = node.querySelectorAll ? node.querySelectorAll("*") : [];
+      for (const el of tree) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  }
+
+  function findJobPostingLdJson(root = document) {
+    const scripts = queryAllDeep('script[type="application/ld+json"]', root);
+    for (const s of scripts) {
+      let data;
+      try {
+        data = JSON.parse(s.textContent || "");
+      } catch {
+        continue;
+      }
+      const nodes = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.["@graph"])
+          ? data["@graph"]
+          : [data];
+      for (const node of nodes) {
+        const type = node?.["@type"];
+        const isJob =
+          type === "JobPosting" || (Array.isArray(type) && type.includes("JobPosting"));
+        if (isJob) return node;
+      }
+    }
+    return null;
+  }
+
   function inferTitleFromJd(jdText) {
     return (String(jdText || "").match(/seeking a\s+([A-Z][A-Za-z0-9 /&+-]{3,80})\s+to join/i) || [])[1] || "";
   }
@@ -174,6 +216,8 @@
     sectionLines,
     salaryBoundsFromText,
     elementText,
+    queryAllDeep,
+    findJobPostingLdJson,
     inferTitleFromJd,
     inferCompanyFromJd,
     inferLocationFromJd,

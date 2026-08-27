@@ -674,7 +674,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-27.hiringcafe-scrape.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-27.greenhouse-select.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -697,6 +697,86 @@ function hostnameFromUrl(url) {
     return new URL(String(url || "")).hostname.toLowerCase();
   } catch {
     return "";
+  }
+}
+
+/**
+ * Job ids for HiringCafe live in the page's own network log
+ * (`/api/job-description?id=`), which content scripts cannot see.
+ * Read them from the MAIN world, then pass the id into the scraper.
+ */
+async function collectMainWorldScrapeHints(tabId, tabUrl = "") {
+  const host = hostnameFromUrl(tabUrl);
+  const isHiringCafe = /(^|\.)hiringcafe\.com$|(^|\.)hiring\.cafe$/i.test(host);
+  const isDice = /(^|\.)dice\.com$/i.test(host);
+  if (!isHiringCafe && !isDice) return {};
+  try {
+    const [row] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      world: "MAIN",
+      func: () => {
+        const ID_RE = /[a-z0-9-]+___[a-z0-9._-]+___[A-Za-z0-9._-]+/i;
+        const firstId = (...cands) => {
+          for (const c of cands) {
+            const m = String(c || "").match(ID_RE);
+            if (m) return m[0];
+          }
+          return "";
+        };
+        let jobId = "";
+        try {
+          const href = String(location.href || "");
+          const u = new URL(href);
+          jobId =
+            firstId(
+              u.searchParams.get("id"),
+              u.searchParams.get("jobId"),
+              u.searchParams.get("objectID"),
+              u.searchParams.get("selectedJobId"),
+              u.searchParams.get("searchState")
+            ) || firstId(href);
+        } catch {
+          /* ignore */
+        }
+        try {
+          const entries = performance.getEntriesByType("resource") || [];
+          for (let i = entries.length - 1; i >= 0; i -= 1) {
+            const name = String(entries[i].name || "");
+            const m = name.match(/\/api\/job-description\?[^#]*\bid=([^&]+)/i);
+            if (m) {
+              jobId = firstId(decodeURIComponent(m[1])) || jobId;
+              if (jobId) break;
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+        if (!jobId) {
+          try {
+            jobId = firstId(document.getElementById("__NEXT_DATA__")?.textContent || "");
+          } catch {
+            /* ignore */
+          }
+        }
+        let diceJobId = "";
+        try {
+          const u = new URL(location.href);
+          diceJobId =
+            u.searchParams.get("selectedJobId") ||
+            u.searchParams.get("jobId") ||
+            (location.pathname.match(/\/job-detail\/([^/?#]+)/) || [])[1] ||
+            "";
+        } catch {
+          /* ignore */
+        }
+        return { jobId, diceJobId };
+      }
+    });
+    const result = row?.result || {};
+    const jobId = String(result.jobId || (isDice ? result.diceJobId : "") || "").trim();
+    return jobId ? { jobId } : {};
+  } catch {
+    return {};
   }
 }
 
@@ -1633,6 +1713,11 @@ function isAllowedApplyNavUrl(url) {
     if (/(^|\.)indeed\.com$/i.test(host)) {
       return /\/(viewjob|apply|indeedapply|job)\b|jk=/i.test(path);
     }
+    if (/(^|\.)jobgether\.com$/i.test(host)) return true;
+    if (/(^|\.)smartrecruiters\.com$/i.test(host)) return true;
+    if (/(^|\.)zohorecruit\.com$/i.test(host)) return true;
+    if (/(^|\.)recruit\.zoho\./i.test(host)) return true;
+    if (/(^|\.)oraclecloud\.com$/i.test(host)) return true;
     return /\/(apply|application|job-applications)\b/i.test(path);
   } catch {
     return false;
@@ -2647,7 +2732,7 @@ async function startMultiStepApplyOnTab(
   const siteLabel = applySiteLabel(initialSite);
   const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
   let stepBudget = stepBudgetInit;
-  const useNewTab = preferNewTab || initialSite === "dice";
+  const useNewTab = preferNewTab || initialSite === "dice" || initialSite === "jobgether";
   const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
@@ -4583,10 +4668,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         await setStatus("Scraping the open job page...");
         await ensureAutofillScript(tab.id);
+        const hints = await collectMainWorldScrapeHints(tab.id, tab.url || "");
         const res = await sendMessageToTab(
           tab.id,
-          { type: "ocean_scrape_page", siteId: message.siteId || "auto" },
-          { attempts: 3 }
+          { type: "ocean_scrape_page", siteId: message.siteId || "auto", hints },
+          { attempts: 3, frameId: 0 }
         );
 
         if (!res?.ok) {

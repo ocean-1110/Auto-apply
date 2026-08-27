@@ -43,7 +43,8 @@
         u.searchParams.get("jobId"),
         u.searchParams.get("job_id"),
         u.searchParams.get("objectID"),
-        u.searchParams.get("selectedJobId")
+        u.searchParams.get("selectedJobId"),
+        u.searchParams.get("selected_job_id")
       );
       if (fromQuery) return fromQuery;
 
@@ -68,10 +69,58 @@
       const parts = u.pathname.split("/").filter(Boolean);
       const jobIdx = parts.findIndex((p) => /^jobs?$/i.test(p));
       if (jobIdx >= 0 && parts[jobIdx + 1]) {
-        const hit = firstJobId(decodeURIComponent(parts[jobIdx + 1]));
+        const slug = decodeURIComponent(parts[jobIdx + 1]);
+        const hit = firstJobId(slug) || firstJobId(slug.split("-").pop());
         if (hit) return hit;
       }
       return firstJobId(decodeURIComponent(u.pathname), u.hash);
+    } catch {
+      return "";
+    }
+  }
+
+  function walkForJobId(node, depth = 0) {
+    if (depth > 12 || node == null) return "";
+    if (typeof node === "string") return firstJobId(node);
+    if (typeof node !== "object") return "";
+    const preferred = [
+      "selectedJobId",
+      "selected_job_id",
+      "objectID",
+      "objectId"
+    ];
+    for (const k of preferred) {
+      const hit = firstJobId(node[k]);
+      if (hit) return hit;
+    }
+    if (node.job && typeof node.job === "object") {
+      const hit = firstJobId(node.job.id || node.job.objectID || node.job.objectId);
+      if (hit) return hit;
+    }
+    const idHit = firstJobId(node.id);
+    if (idHit && node.job_information) return idHit;
+    if (Array.isArray(node)) return "";
+    for (const [k, v] of Object.entries(node)) {
+      if (/ssrHits|hits|results|jobs/i.test(k) && Array.isArray(v)) continue;
+      const hit = walkForJobId(v, depth + 1);
+      if (hit) return hit;
+    }
+    return "";
+  }
+
+  function idFromNextData(doc = document) {
+    const raw = doc.getElementById("__NEXT_DATA__")?.textContent || "";
+    if (!raw) return "";
+    try {
+      return walkForJobId(JSON.parse(raw));
+    } catch {
+      return firstJobId(raw);
+    }
+  }
+
+  function idFromHistory() {
+    try {
+      return walkForJobId(history.state);
     } catch {
       return "";
     }
@@ -129,11 +178,21 @@
         firstJobId(el.getAttribute?.("href"), el.getAttribute?.("id"), el.textContent);
       if (hit) return hit;
     }
-    return firstJobId(doc.documentElement?.innerHTML?.slice?.(0, 200000));
+    return (
+      firstJobId(doc.documentElement?.innerHTML?.slice?.(0, 250000)) ||
+      firstJobId(String(doc.documentElement?.innerHTML || "").slice(-250000))
+    );
   }
 
-  function hiringCafeJobId(doc = document) {
-    return idFromUrl() || idFromPerformance() || idFromDom(doc);
+  function hiringCafeJobId(doc = document, hints = {}) {
+    return (
+      firstJobId(hints.jobId || hints.hiringCafeJobId) ||
+      idFromUrl() ||
+      idFromNextData(doc) ||
+      idFromHistory() ||
+      idFromPerformance() ||
+      idFromDom(doc)
+    );
   }
 
   function applyHrefFromDom(doc = document) {
@@ -157,12 +216,16 @@
       doc.querySelector('[class*="JobDetail"]') ||
       doc.querySelector('[class*="job-detail"]') ||
       doc.querySelector('[class*="JobSidebar"]') ||
+      doc.querySelector('[class*="job-sidebar"]') ||
+      doc.querySelector('[class*="JobPanel"]') ||
       doc.querySelector('[class*="drawer"]') ||
       doc.querySelector("aside") ||
       doc.querySelector('[role="dialog"]') ||
+      doc.querySelector("article") ||
       doc.body;
     const titleEl =
       panel.querySelector("h1") ||
+      panel.querySelector("h2") ||
       panel.querySelector('[class*="job-title"]') ||
       panel.querySelector('[class*="JobTitle"]') ||
       doc.querySelector("h1");
@@ -177,13 +240,20 @@
     const descEl =
       panel.querySelector('[class*="JobDescription"]') ||
       panel.querySelector('[class*="job-description"]') ||
-      panel.querySelector('[class*="description"]');
+      panel.querySelector('[class*="description"]') ||
+      panel.querySelector('[class*="Prose"]') ||
+      panel.querySelector("article") ||
+      panel.querySelector("[class*='rich-text']");
+    let descriptionHtml = String(descEl?.innerHTML || "").trim();
+    if (!descriptionHtml && panel && panel !== doc.body) {
+      descriptionHtml = String(panel.innerHTML || "").trim();
+    }
     return {
       jobTitle: H.elementText(titleEl),
       companyName: H.elementText(companyEl),
       jobLocation: H.elementText(locEl),
       applyLink: applyHrefFromDom(panel) || applyHrefFromDom(doc),
-      descriptionHtml: String(descEl?.innerHTML || "").trim()
+      descriptionHtml
     };
   }
 
@@ -214,7 +284,12 @@
   }
 
   function parseHiringCafeJob(payload, { fallbackUrl = "", dom = null } = {}) {
-    const job = payload?.job && typeof payload.job === "object" ? payload.job : payload;
+    const job =
+      payload?.job && typeof payload.job === "object"
+        ? payload.job
+        : payload?.data?.job && typeof payload.data.job === "object"
+          ? payload.data.job
+          : payload;
     if (!job || typeof job !== "object") return null;
 
     const info = job.job_information || job.jobInformation || {};
@@ -266,6 +341,19 @@
     };
   }
 
+  function jobPayloadFromNextData(doc = document) {
+    const raw = doc.getElementById("__NEXT_DATA__")?.textContent || "";
+    if (!raw) return null;
+    try {
+      const data = JSON.parse(raw);
+      const job = data?.props?.pageProps?.job;
+      if (job && typeof job === "object") return { job };
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+
   async function fetchJobDescription(id) {
     if (!id) return null;
     const url = `${originBase()}/api/job-description?id=${encodeURIComponent(id)}`;
@@ -278,18 +366,18 @@
     return res.json();
   }
 
-  async function waitForJobId(tries = 6) {
+  async function waitForJobId(tries = 8, hints = {}) {
     for (let i = 0; i < tries; i += 1) {
-      const id = hiringCafeJobId();
+      const id = hiringCafeJobId(document, hints);
       if (id) return id;
       await new Promise((r) => setTimeout(r, 250));
     }
-    return hiringCafeJobId();
+    return hiringCafeJobId(document, hints);
   }
 
-  async function scrapeHiringCafe() {
+  async function scrapeHiringCafe(hints = {}) {
     const dom = scrapeHiringCafeDom();
-    const id = await waitForJobId();
+    const id = await waitForJobId(8, hints);
     let apiJob = null;
     if (id) {
       try {
@@ -301,6 +389,10 @@
 
     const parsed =
       parseHiringCafeJob(apiJob, {
+        fallbackUrl: H.canonicalPageUrl(),
+        dom
+      }) ||
+      parseHiringCafeJob(jobPayloadFromNextData(), {
         fallbackUrl: H.canonicalPageUrl(),
         dom
       }) ||

@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-27.hiringcafe-scrape.1";
+  const SCRIPT_BUILD = "2026-08-27.greenhouse-select.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -510,7 +510,7 @@
     return out;
   }
 
-  function setNativeValue(el, value) {
+  function setNativeValue(el, value, { emitChange = true } = {}) {
     const proto =
       el instanceof HTMLTextAreaElement
         ? HTMLTextAreaElement.prototype
@@ -523,7 +523,7 @@
       return false;
     }
     el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+    if (emitChange) el.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
   }
 
@@ -981,6 +981,9 @@
       el.closest("[class*='select__control']") ||
       el.closest(".select__container") ||
       el.closest("[class*='react-select']") ||
+      el.closest(".select2") ||
+      el.closest("[class*='select2-container']") ||
+      el.closest("[class*='select-shell']") ||
       null
     );
   }
@@ -988,15 +991,45 @@
   function isReactSelectInput(el) {
     if (!el) return false;
     if (el.classList?.contains("select__input")) return true;
+    if (el.classList?.contains("select2-search__field")) return true;
     if (/^react-select-\d+-input$/i.test(el.id || "")) return true;
-    if (el.closest?.(".select__input-container, [class*='select__input']")) return true;
+    if (el.closest?.(".select__input-container, [class*='select__input'], .select2-search")) return true;
     return Boolean(getReactSelectRoot(el));
+  }
+
+  function controlPlaceholderText(el) {
+    if (!el) return "";
+    return String(
+      el.getAttribute?.("placeholder") ||
+        el.getAttribute?.("aria-placeholder") ||
+        el.getAttribute?.("data-placeholder") ||
+        ""
+    ).trim();
+  }
+
+  function isSelectPlaceholderText(text) {
+    return /^select(\s*\.{0,3})?$/i.test(String(text || "").trim());
+  }
+
+  /** Greenhouse custom questions: a fake dropdown with placeholder "Select...". */
+  function isSelectPlaceholderWidget(el) {
+    if (!el) return false;
+    if (isSelectPlaceholderText(controlPlaceholderText(el))) return true;
+    const root =
+      getReactSelectRoot(el) ||
+      el.closest?.("[class*='select'], [data-testid*='select'], label, .field") ||
+      el.parentElement;
+    if (!root) return false;
+    const ph = root.querySelector?.(
+      ".select__placeholder, [class*='select__placeholder'], .select2-selection__placeholder"
+    );
+    return isSelectPlaceholderText(cleanLabelText(ph?.textContent || ""));
   }
 
   function looksLikeCombobox(el) {
     if (!el) return false;
     if (isRichTextEditor(el)) return false;
-    if (isReactSelectInput(el)) return true;
+    if (isReactSelectInput(el) || isSelectPlaceholderWidget(el)) return true;
     const role = (el.getAttribute("role") || "").toLowerCase();
     if (role === "combobox" || role === "listbox") return true;
     if (el.getAttribute("aria-haspopup") === "listbox") return true;
@@ -1007,16 +1040,42 @@
     if (el.getAttribute("aria-expanded") != null && role === "combobox") return true;
     return Boolean(
       el.closest?.(
-        '[role="combobox"], .select__control, [class*="select__control"], [class*="dropdown"]'
+        '[role="combobox"], .select__control, [class*="select__control"], .select2, [class*="select2"]'
       )
     );
   }
 
+  function activeSelectMenu(root = document) {
+    const menus = queryAllDeep(
+      [
+        '[role="listbox"]',
+        ".select__menu",
+        "[class*='select__menu']",
+        ".select2-results",
+        ".select2-dropdown",
+        "[class*='Select-menu']",
+        "[id*='react-select'][id*='-listbox']"
+      ].join(", "),
+      root
+    );
+    const visible = [];
+    for (const menu of menus) {
+      const style = window.getComputedStyle(menu);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      const r = menu.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      visible.push(menu);
+    }
+    return visible[visible.length - 1] || null;
+  }
+
   function collectVisibleOptions(root = document) {
+    const menu = activeSelectMenu(root) || root;
     const selectors = [
       ".select__option",
       "[class*='select__option']",
       '[id*="react-select-"][id*="-option-"]',
+      ".select2-results__option",
       '[role="option"]',
       '[role="menuitem"]',
       '[role="menuitemradio"]',
@@ -1027,27 +1086,52 @@
     const nodes = [];
     for (const sel of selectors) {
       try {
-        nodes.push(...root.querySelectorAll(sel));
+        nodes.push(...menu.querySelectorAll(sel));
       } catch {
         /* ignore */
       }
+    }
+    if (!nodes.length && menu !== root) {
+      nodes.push(...menu.querySelectorAll("li, [data-value], button, div"));
     }
     const seen = new Set();
     const out = [];
     for (const node of nodes) {
       if (seen.has(node)) continue;
       seen.add(node);
-      // Skip disabled / placeholder options.
       if (node.getAttribute("aria-disabled") === "true") continue;
       if (node.classList?.contains("select__option--is-disabled")) continue;
       const text = cleanLabelText(node.textContent);
-      if (!text || text.length > 300) continue;
-      if (/^select\.\.\.?$/i.test(text)) continue;
+      if (!text || text.length > 180) continue;
+      if (isSelectPlaceholderText(text)) continue;
+      if (/^no (options|results|matches)/i.test(text)) continue;
       const style = window.getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden") continue;
+      if (
+        menu !== root &&
+        node.querySelector?.('[role="option"], .select__option, .select2-results__option')
+      ) {
+        continue;
+      }
       out.push(node);
     }
     return out;
+  }
+
+  function firstHighlightedOption(menu) {
+    if (!menu) return null;
+    return (
+      menu.querySelector(
+        [
+          ".select__option--is-focused",
+          "[class*='option--is-focused']",
+          "[aria-selected='true']",
+          ".select2-results__option--highlighted",
+          "[class*='highlighted']",
+          "[class*='--is-selected']"
+        ].join(", ")
+      ) || null
+    );
   }
 
   function clickOptionNode(node) {
@@ -1079,7 +1163,7 @@
       el;
     const indicator =
       control.querySelector?.(
-        ".select__dropdown-indicator, [class*='select__dropdown-indicator'], button[aria-label*='flyout'], button[aria-label*='Toggle']"
+        ".select__dropdown-indicator, [class*='select__dropdown-indicator'], .select2-selection__arrow, button[aria-label*='flyout'], button[aria-label*='Toggle']"
       ) || null;
 
     const target = indicator || control;
@@ -1094,7 +1178,9 @@
     // Focus the real search input so filtering / keyboard works.
     const input =
       (el.tagName === "INPUT" ? el : null) ||
-      control.querySelector?.("input.select__input, input[role='combobox'], input") ||
+      control.querySelector?.(
+        "input.select__input, input.select2-search__field, input[role='combobox'], input[aria-autocomplete], input"
+      ) ||
       el;
     try {
       input.focus?.();
@@ -1104,19 +1190,109 @@
     return input;
   }
 
+  function pressKey(el, key, code = key) {
+    if (!el) return;
+    const keyCode = key === "Enter" ? 13 : key === "ArrowDown" ? 40 : key === "Escape" ? 27 : 0;
+    const opts = {
+      key,
+      code,
+      keyCode,
+      which: keyCode,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window
+    };
+    try {
+      el.dispatchEvent(new KeyboardEvent("keydown", opts));
+      el.dispatchEvent(new KeyboardEvent("keypress", opts));
+      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function typeIntoSelectFilter(input, text) {
+    if (!input || input.tagName !== "INPUT") return;
+    try {
+      input.focus({ preventScroll: true });
+    } catch {
+      try {
+        input.focus();
+      } catch {
+        /* ignore */
+      }
+    }
+    setNativeValue(input, "", { emitChange: false });
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, composed: true, inputType: "deleteContentBackward" })
+    );
+    const s = String(text || "");
+    let current = "";
+    for (const ch of s) {
+      current += ch;
+      try {
+        input.dispatchEvent(
+          new InputEvent("beforeinput", {
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+            data: ch,
+            inputType: "insertText"
+          })
+        );
+      } catch {
+        /* ignore */
+      }
+      setNativeValue(input, current, { emitChange: false });
+      input.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: ch,
+          inputType: "insertText"
+        })
+      );
+      pressKey(input, ch, ch);
+      await sleep(25);
+    }
+  }
+
+  function selectWidgetDisplayValue(el) {
+    const root =
+      getReactSelectRoot(el) ||
+      el.closest?.("[class*='select'], .select2, label, .field") ||
+      el.parentElement;
+    const shown = cleanLabelText(
+      root?.querySelector?.(
+        ".select__single-value, [class*='select__single-value'], .select2-selection__rendered, [class*='singleValue']"
+      )?.textContent || ""
+    );
+    if (shown && !isSelectPlaceholderText(shown)) return shown;
+    return String(el.value || "").trim();
+  }
+
+  function selectLooksCommitted(el, candidates) {
+    const shown = selectWidgetDisplayValue(el);
+    if (!shown || isSelectPlaceholderText(shown)) return false;
+    return optionMatchesAny(shown, candidates);
+  }
+
   function setReactSelectFilter(input, text) {
     if (!input || input.tagName !== "INPUT") return;
     setNativeValue(input, text);
-    // React-Select also watches InputEvent / keyup.
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" }));
-    input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: text.slice(-1) || "a" }));
-    input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: text.slice(-1) || "a" }));
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: text, inputType: "insertText" })
+    );
+    pressKey(input, String(text).slice(-1) || "a");
   }
 
   function clearReactSelectFilter(input) {
     if (!input || input.tagName !== "INPUT") return;
     setNativeValue(input, "");
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "", inputType: "deleteContentBackward" }));
+    input.dispatchEvent(
+      new InputEvent("input", { bubbles: true, data: "", inputType: "deleteContentBackward" })
+    );
   }
 
   async function waitForOptions(attempts = 8, delayMs = 80) {
@@ -1128,66 +1304,96 @@
     return [];
   }
 
+  function pickFilteredOption(options, candidates, typed) {
+    const match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+    if (match) return match;
+    const typedNorm = normalize(typed);
+    if (typedNorm) {
+      const prefix = options.find((n) => normalize(n.textContent).startsWith(typedNorm));
+      if (prefix) return prefix;
+    }
+    if (options.length === 1) return options[0];
+    return firstHighlightedOption(activeSelectMenu()) || (typedNorm ? options[0] : null);
+  }
+
+  async function confirmSelectChoice(input, el, candidates) {
+    if (selectLooksCommitted(el, candidates)) return true;
+    const menu = activeSelectMenu();
+    const highlighted = firstHighlightedOption(menu);
+    if (highlighted) {
+      clickOptionNode(highlighted);
+      await sleep(80);
+      if (selectLooksCommitted(el, candidates)) return true;
+    }
+    pressKey(input, "Enter", "Enter");
+    await sleep(80);
+    return selectLooksCommitted(el, candidates);
+  }
+
   async function fillCustomDropdown(el, value, key = null) {
     if (value == null || String(value).trim() === "") return false;
     const candidates = key ? expandValueCandidates(key, value) : [String(value).trim()];
-    const reactSelect = isReactSelectInput(el);
+    const reactSelect = isReactSelectInput(el) || isSelectPlaceholderWidget(el);
 
-    // Prefer already-open menu options.
+    const native = el.closest?.("label, .field, .form-field, [class*='question']")?.querySelector?.(
+      "select"
+    );
+    if (native && fillSelect(native, value, key) && selectLooksCommitted(el, candidates)) {
+      return true;
+    }
+
     let options = collectVisibleOptions(document);
     let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match) return clickOptionNode(match);
 
     const input = openReactSelect(el);
-    options = await waitForOptions(reactSelect ? 10 : 6, reactSelect ? 100 : 80);
+    options = await waitForOptions(reactSelect ? 12 : 6, reactSelect ? 90 : 70);
     match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match) {
       const ok = clickOptionNode(match);
-      if (reactSelect) clearReactSelectFilter(input);
-      return ok;
+      if (ok && reactSelect) clearReactSelectFilter(input);
+      if (ok) return true;
     }
 
-    // Filter the menu (Greenhouse React-Select), then pick — never leave typed text as the answer.
-    const filterText =
-      candidates.find((c) => String(c).trim().length >= 1 && !isYesNoValue(c)) ||
-      candidates.find((c) => /^(Yes|No)$/i.test(String(c).trim())) ||
-      candidates[0];
+    const filterText = isYesNoValue(candidates[0])
+      ? YES_VALUES.has(normalize(candidates[0]))
+        ? "Yes"
+        : "No"
+      : String(
+          candidates.find((c) => String(c).trim().length >= 1) || candidates[0] || ""
+        ).trim();
 
-    if (input && input.tagName === "INPUT") {
-      setReactSelectFilter(input, filterText);
-      options = await waitForOptions(reactSelect ? 10 : 6, 100);
-      match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+    if (input && input.tagName === "INPUT" && filterText) {
+      await typeIntoSelectFilter(input, filterText);
+      options = await waitForOptions(reactSelect ? 12 : 6, 80);
+      match = pickFilteredOption(options, candidates, filterText);
       if (match) {
-        const ok = clickOptionNode(match);
-        clearReactSelectFilter(input);
-        return ok;
+        clickOptionNode(match);
+        await sleep(80);
+        if (selectLooksCommitted(el, candidates) || optionMatchesAny(match.textContent, candidates)) {
+          clearReactSelectFilter(input);
+          return true;
+        }
       }
 
-      // Keyboard fallback: highlight first filtered option and confirm.
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown", code: "ArrowDown" })
-      );
-      await sleep(60);
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", { bubbles: true, key: "Enter", code: "Enter" })
-      );
-      await sleep(80);
-
-      // Did a value chip / single-value appear?
-      const root = getReactSelectRoot(el) || el.closest?.(".select__control")?.parentElement;
-      const selected = root?.querySelector?.(
-        ".select__single-value, .select__multi-value__label, [class*='select__single-value']"
-      );
-      if (selected && optionMatchesAny(selected.textContent, candidates)) {
+      if (await confirmSelectChoice(input, el, candidates)) {
         clearReactSelectFilter(input);
         return true;
       }
 
-      // Never leave free-text in a React-Select / combobox.
+      pressKey(input, "ArrowDown", "ArrowDown");
+      await sleep(50);
+      if (await confirmSelectChoice(input, el, candidates)) {
+        clearReactSelectFilter(input);
+        return true;
+      }
+
+      if (selectLooksCommitted(el, candidates)) return true;
       clearReactSelectFilter(input);
-      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" }));
+      pressKey(input, "Escape", "Escape");
     }
 
+    if (native && fillSelect(native, value, key)) return true;
     return false;
   }
 
@@ -1870,7 +2076,7 @@
       return true;
     }
     // Never send React-Select / Greenhouse dropdowns to AI text fill.
-    if (isReactSelectInput(el) || looksLikeCombobox(el)) return true;
+    if (isReactSelectInput(el) || looksLikeCombobox(el) || isSelectPlaceholderWidget(el)) return true;
     if (el.getAttribute("role") === "combobox") return true;
     if (el.getAttribute("aria-autocomplete") === "list") return true;
     if (el.classList?.contains("select__input")) return true;
@@ -2030,7 +2236,12 @@
       }
       if (/^(yes|no)([.,!]|$)/i.test(answer)) {
         const label = questionLabelForControl(el) || labelTextForControl(el);
-        const isChoice = el.type === "checkbox" || el.type === "radio" || el.tagName === "SELECT";
+        const isChoice =
+          el.type === "checkbox" ||
+          el.type === "radio" ||
+          el.tagName === "SELECT" ||
+          looksLikeCombobox(el) ||
+          isSelectPlaceholderWidget(el);
         const yesNoQ =
           /^(are you|do you|have you|will you|can you|did you|were you)\b/i.test(label) ||
           /\b(yes or no|y\/n)\b/i.test(label);
@@ -2193,7 +2404,7 @@
   function collectFillableControls() {
     const nodes = [
       ...document.querySelectorAll(
-        'input, textarea, select, [role="combobox"], [aria-haspopup="listbox"], .select__control, [class*="select__control"]'
+        'input, textarea, select, [role="combobox"], [aria-haspopup="listbox"], .select__control, [class*="select__control"], input[placeholder^="Select" i], [aria-placeholder^="Select" i], .select2-search__field'
       )
     ];
     return nodes.filter((el) => {
@@ -2980,6 +3191,22 @@
       }
     }
 
+    if (applyUrls.length < 5 && isJobgetherPage()) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        try {
+          const href = a.href || "";
+          if (
+            /smartrecruiters\.com|zohorecruit\.com|recruit\.zoho\.|oraclecloud\.com/i.test(href)
+          ) {
+            pushUrl(href);
+          }
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
     return applyUrls;
   }
 
@@ -3008,10 +3235,51 @@
     }
   }
 
+  function isJobgetherPage(url = location.href) {
+    try {
+      return /(^|\.)jobgether\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isSmartRecruitersPage(url = location.href) {
+    try {
+      return /(^|\.)smartrecruiters\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isZohoRecruitPage(url = location.href) {
+    try {
+      const host = new URL(String(url || location.href)).hostname.toLowerCase();
+      return /(^|\.)zohorecruit\.com$/.test(host) || /(^|\.)recruit\.zoho\./.test(host);
+    } catch {
+      return false;
+    }
+  }
+
+  function isOracleCloudPage(url = location.href) {
+    try {
+      return /(^|\.)oraclecloud\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isAtsGatewayPage(url = location.href) {
+    return isSmartRecruitersPage(url) || isZohoRecruitPage(url) || isOracleCloudPage(url);
+  }
+
   function applyPageSite(url = location.href) {
     if (isIndeedPage(url)) return "indeed";
     if (isWorkdayPage(url)) return "workday";
     if (isGreenhousePage(url)) return "greenhouse";
+    if (isJobgetherPage(url)) return "jobgether";
+    if (isSmartRecruitersPage(url)) return "smartrecruiters";
+    if (isZohoRecruitPage(url)) return "zohorecruit";
+    if (isOracleCloudPage(url)) return "oraclecloud";
     try {
       if (/(^|\.)dice\.com$/i.test(new URL(String(url || location.href)).hostname)) return "dice";
     } catch {
@@ -3033,6 +3301,12 @@
         );
       }
       if (site === "greenhouse") return /(^|\.)greenhouse\.io$/i.test(target.hostname);
+      if (site === "jobgether") return /(^|\.)jobgether\.com$/i.test(target.hostname);
+      if (site === "smartrecruiters") return /(^|\.)smartrecruiters\.com$/i.test(target.hostname);
+      if (site === "zohorecruit") {
+        return /(^|\.)zohorecruit\.com$/i.test(target.hostname) || /(^|\.)recruit\.zoho\./i.test(target.hostname);
+      }
+      if (site === "oraclecloud") return /(^|\.)oraclecloud\.com$/i.test(target.hostname);
       return target.origin === location.origin;
     } catch {
       return false;
@@ -3276,7 +3550,7 @@
 
     // Dice job cards / job-detail pages have newsletter and ad forms. Those are
     // not the application. Only the /job-applications wizard is.
-    const isApplicationForm = isDiceHost
+    let isApplicationForm = isDiceHost
       ? Boolean(isDiceApplyPage)
       : Boolean(
           hasFileInput ||
@@ -3287,6 +3561,14 @@
             isWorkdayApplyPage ||
             looksLikeHistoryForm()
         );
+    if (isJobgetherPage()) isApplicationForm = false;
+    if (
+      (isSmartRecruitersPage() || isZohoRecruitPage() || isOracleCloudPage()) &&
+      identityFields < 2 &&
+      !hasFileInput
+    ) {
+      isApplicationForm = false;
+    }
 
     return {
       ok: true,
@@ -3848,6 +4130,119 @@
     return "";
   }
 
+  const IM_INTERESTED_RE = /^\s*i(?:['’]| a)?m interested\s*$/i;
+  const APPLY_NOW_RE = /^\s*apply\s*now\s*$/i;
+  const JOBGETHER_APPLY_RE = /^\s*apply\s*$/i;
+  const JOBGETHER_AUTO_APPLY_RE = /^\s*auto\s*apply\s*$/i;
+
+  function visibleActionControls(root = document) {
+    return queryAllDeep(
+      "a, button, [role='button'], input[type='button'], input[type='submit']",
+      root
+    ).filter((el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el));
+  }
+
+  function jobgetherFollowUpModal() {
+    const nodes = queryAllDeep(
+      '[role="dialog"], dialog[open], [aria-modal="true"], [class*="Modal"], [class*="modal"], [class*="popup"], [class*="Popup"]'
+    );
+    for (const node of nodes) {
+      if (!isElVisible(node)) continue;
+      const text = String(node.innerText || node.textContent || "").slice(0, 2000);
+      if (
+        /did you submit your application/i.test(text) ||
+        /i applied,\s*contact hiring manager/i.test(text) ||
+        /i didn't actually apply|i did not actually apply/i.test(text) ||
+        /i['’]ll engage later/i.test(text)
+      ) {
+        return node;
+      }
+    }
+    return null;
+  }
+
+  function dismissJobgetherFollowUpModal() {
+    const modal = jobgetherFollowUpModal();
+    if (!modal) return false;
+    const controls = visibleActionControls(modal);
+    const closeBtn = controls.find((c) => {
+      const t = elActionText(c);
+      const aria = `${c.getAttribute?.("aria-label") || ""} ${c.getAttribute?.("title") || ""}`;
+      return /^[x×]$/i.test(t) || /^(close|dismiss)$/i.test(t) || /close|dismiss/i.test(aria);
+    });
+    const prefer = [
+      closeBtn,
+      controls.find((c) => /i['’]ll engage later|i will engage later/i.test(elActionText(c))),
+      controls.find((c) =>
+        /i didn't actually apply|i did not actually apply/i.test(elActionText(c))
+      )
+    ].filter(Boolean);
+    const el = prefer[0];
+    if (el) {
+      safeClick(el);
+      return true;
+    }
+    return false;
+  }
+
+  function findJobgetherApplyButton() {
+    if (!isJobgetherPage()) return null;
+    dismissJobgetherFollowUpModal();
+    const controls = visibleActionControls();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (JOBGETHER_AUTO_APPLY_RE.test(text)) continue;
+      if (!JOBGETHER_APPLY_RE.test(text) && !APPLY_NOW_RE.test(text)) continue;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      let score = JOBGETHER_APPLY_RE.test(text) ? 100 : 80;
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.top < 220 && rect.left > window.innerWidth * 0.45) score += 40;
+        if (rect.width >= 72 && rect.height >= 28) score += 20;
+      } catch {
+        /* ignore */
+      }
+      scored.push({ type: "entry", el, text, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
+  function findImInterestedButton() {
+    if (!isSmartRecruitersPage() && !isZohoRecruitPage()) return null;
+    const controls = visibleActionControls();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (!IM_INTERESTED_RE.test(text) && !/i['’]?m interested|i am interested/i.test(text)) continue;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      scored.push({ type: "entry", el, text: text || "I'm interested", score: 120 });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
+  function findOracleApplyNowButton() {
+    if (!isOracleCloudPage()) return null;
+    const controls = visibleActionControls();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("title") || ""} ${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
+      if (JOBGETHER_AUTO_APPLY_RE.test(text)) continue;
+      const isApplyNow = APPLY_NOW_RE.test(text) || APPLY_NOW_RE.test(hint);
+      const isApply = JOBGETHER_APPLY_RE.test(text);
+      if (!isApplyNow && !isApply) continue;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      let score = isApplyNow ? 130 : 70;
+      if (/apply/i.test(hint)) score += 20;
+      scored.push({ type: "entry", el, text: text || "Apply Now", score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
   /** Dice search/detail: the teal Apply button in the job detail panel (top-right). */
   function findDiceJobDetailApplyButton() {
     if (!/(^|\.)dice\.com$/i.test(location.hostname)) return null;
@@ -3895,6 +4290,13 @@
   }
 
   function findEasyApplyEntryButton() {
+    const jobgetherApply = findJobgetherApplyButton();
+    if (jobgetherApply) return jobgetherApply;
+    const interested = findImInterestedButton();
+    if (interested) return interested;
+    const oracleApply = findOracleApplyNowButton();
+    if (oracleApply) return oracleApply;
+
     const diceDetail = findDiceJobDetailApplyButton();
     if (diceDetail) return diceDetail;
 
@@ -3905,6 +4307,7 @@
     for (const el of controls) {
       const text = elActionText(el);
       if (!text || text.length > 48) continue;
+      if (JOBGETHER_AUTO_APPLY_RE.test(text)) continue;
       if (ENTRY_JUNK_RE.test(text) || EASY_BACK_RE.test(text)) continue;
       if (isInsideAdOrOverlay(el)) continue;
       const href = String(el.href || el.getAttribute?.("href") || el.getAttribute?.("data-href") || "");
@@ -4308,7 +4711,48 @@
     return { ok: false, clicked: false };
   }
 
+  async function clickLabeledEntry(target, { preferNewTab = false, alreadyOpenText = "" } = {}) {
+    if (!target?.el) {
+      if (alreadyOpenText && probeApplicationForm().isApplicationForm) {
+        return { ok: true, clicked: false, alreadyOpen: true, text: alreadyOpenText };
+      }
+      return { ok: false, clicked: false };
+    }
+    const res = await clickKeepingSameTab(target.el, { preferNewTab });
+    await sleep(res.clicked ? 1000 : 400);
+    return {
+      ok: Boolean(res.clicked || res.navigateUrl),
+      clicked: Boolean(res.clicked),
+      navigateUrl: res.navigateUrl || "",
+      openInNewTab: Boolean(res.openInNewTab || preferNewTab),
+      text: target.text || elActionText(target.el)
+    };
+  }
+
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
+    if (isJobgetherPage()) {
+      dismissJobgetherFollowUpModal();
+      await sleep(700);
+      dismissJobgetherFollowUpModal();
+      return clickLabeledEntry(findJobgetherApplyButton(), {
+        preferNewTab,
+        alreadyOpenText: "jobgether apply"
+      });
+    }
+    if (isSmartRecruitersPage() || isZohoRecruitPage()) {
+      const hit = findImInterestedButton();
+      if (hit) return clickLabeledEntry(hit, { preferNewTab: false, alreadyOpenText: "I'm interested" });
+      if (probeApplicationForm().isApplicationForm) {
+        return { ok: true, clicked: false, alreadyOpen: true, text: "application form" };
+      }
+    }
+    if (isOracleCloudPage()) {
+      const hit = findOracleApplyNowButton();
+      if (hit) return clickLabeledEntry(hit, { preferNewTab: false, alreadyOpenText: "Apply Now" });
+      if (probeApplicationForm().isApplicationForm || /\/apply\b/i.test(location.href)) {
+        return { ok: true, clicked: false, alreadyOpen: true, text: "oracle apply" };
+      }
+    }
     if (isGreenhousePage()) {
       return clickGreenhouseApplyEntry();
     }

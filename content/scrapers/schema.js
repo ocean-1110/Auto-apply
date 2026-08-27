@@ -4,31 +4,12 @@
 (function () {
   const Ocean = globalThis.OceanScrape;
   if (!Ocean?.helpers) return;
-  const { htmlToPlainText, canonicalPageUrl, normalizeEmploymentType } = Ocean.helpers;
-
-  function findJobPostingLdJson(root = document) {
-    const scripts = root.querySelectorAll('script[type="application/ld+json"]');
-    for (const s of scripts) {
-      let data;
-      try {
-        data = JSON.parse(s.textContent || "");
-      } catch {
-        continue;
-      }
-      const nodes = Array.isArray(data)
-        ? data
-        : Array.isArray(data?.["@graph"])
-          ? data["@graph"]
-          : [data];
-      for (const node of nodes) {
-        const type = node?.["@type"];
-        const isJob =
-          type === "JobPosting" || (Array.isArray(type) && type.includes("JobPosting"));
-        if (isJob) return node;
-      }
-    }
-    return null;
-  }
+  const {
+    htmlToPlainText,
+    canonicalPageUrl,
+    normalizeEmploymentType,
+    findJobPostingLdJson
+  } = Ocean.helpers;
 
   function extractSchemaLocation(node) {
     const loc = Array.isArray(node?.jobLocation) ? node.jobLocation[0] : node?.jobLocation;

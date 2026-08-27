@@ -47,6 +47,42 @@ export const ATS_ADAPTERS = [
     isEmployerAts: true,
     stepBudget: 18,
     emailOtp: true
+  },
+  {
+    id: "jobgether",
+    label: "Jobgether",
+    hostPatterns: [/(^|\.)jobgether\.com$/i],
+    autoSubmitAllowed: false,
+    stepBudget: 18
+  },
+  {
+    id: "smartrecruiters",
+    label: "SmartRecruiters",
+    hostPatterns: [/(^|\.)smartrecruiters\.com$/i],
+    autoSubmitAllowed: false,
+    isEmployerAts: true,
+    stepBudget: 16
+  },
+  {
+    id: "zohorecruit",
+    label: "Zoho Recruit",
+    hostPatterns: [
+      /(^|\.)zohorecruit\.com$/i,
+      /(^|\.)recruit\.zoho\.com$/i,
+      /(^|\.)recruit\.zoho\.eu$/i,
+      /(^|\.)recruit\.zoho\.in$/i
+    ],
+    autoSubmitAllowed: false,
+    isEmployerAts: true,
+    stepBudget: 16
+  },
+  {
+    id: "oraclecloud",
+    label: "Oracle Cloud",
+    hostPatterns: [/(^|\.)oraclecloud\.com$/i],
+    autoSubmitAllowed: false,
+    isEmployerAts: true,
+    stepBudget: 16
   }
 ];
 

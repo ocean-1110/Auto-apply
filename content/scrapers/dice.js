@@ -10,7 +10,8 @@
     canonicalPageUrl,
     normalizeEmploymentType,
     elementText,
-    findJobPostingLdJson
+    findJobPostingLdJson,
+    queryAllDeep
   } = Ocean.helpers;
 
 function diceIdFromUrl(url = location.href) {
@@ -32,6 +33,13 @@ function diceIdFromUrl(url = location.href) {
   } catch {
     return "";
   }
+}
+
+function cleanDiceTitle(title) {
+  const t = String(title || "").trim();
+  if (!t) return "";
+  if (/^(dice|find jobs|search jobs|jobs|home|job search)$/i.test(t)) return "";
+  return t.replace(/\s*\|\s*Dice.*$/i, "").trim();
 }
 
 function locationFromLd(ld) {
@@ -68,7 +76,11 @@ function salaryBoundsFromLd(ld) {
 }
 
 function diceDetailRoot(doc = document) {
+  const deep = typeof queryAllDeep === "function"
+    ? queryAllDeep('[class*="@container/job-detail"], [class*="job-detail"]', doc)
+    : [];
   return (
+    deep[0] ||
     doc.querySelector('[class*="@container/job-detail"]') ||
     doc.querySelector('[class*="job-detail"]') ||
     doc.querySelector("main") ||
@@ -146,8 +158,9 @@ function assembleDiceFromLd(ld, { jobId = "", dom = null } = {}) {
     String(ld.identifier?.value || "") ||
     diceIdFromUrl(String(ld.url || "")) ||
     "";
-  const jobTitle =
-    String(dom.jobTitle || "").trim() || String(ld.title || ld.name || "").trim();
+  const jobTitle = cleanDiceTitle(
+    String(dom.jobTitle || "").trim() || String(ld.title || ld.name || "").trim()
+  );
   const companyName = String(dom.companyName || "").trim() || String(ldCompany).trim();
 
   if (!jobTitle && !jdText) return null;
@@ -184,6 +197,7 @@ function scrapeDiceDom(doc = document) {
 
   const titleEl =
     root.querySelector('[data-cy="jobTitle"]') ||
+    (typeof queryAllDeep === "function" ? queryAllDeep("h1", root)[0] : null) ||
     root.querySelector("h1") ||
     root.querySelector('[class*="jobTitle"]') ||
     doc.querySelector("h1");
@@ -194,7 +208,15 @@ function scrapeDiceDom(doc = document) {
 
   // Modern Dice: job-detail-description-module__…__jobDescription
   // Legacy: #jobDescription / data-cy / job-description
+  const descCandidates =
+    typeof queryAllDeep === "function"
+      ? queryAllDeep(
+          '[class*="jobDescription"], [class*="job-detail-description"], #jobDescription, [data-cy="jobDescription"], [class*="job-description"]',
+          root
+        )
+      : [];
   const descEl =
+    descCandidates[0] ||
     root.querySelector('[class*="jobDescription"]') ||
     root.querySelector('[class*="job-detail-description"]') ||
     root.querySelector("#jobDescription") ||
@@ -265,7 +287,8 @@ function scrapeDiceDom(doc = document) {
 function scrapeDiceOnce(doc = document) {
   const jobId = diceIdFromDom(doc);
   const dom = scrapeDiceDom(doc);
-  const ld = findJobPostingLdJson(doc);
+  const ld =
+    typeof findJobPostingLdJson === "function" ? findJobPostingLdJson(doc) : null;
   return assembleDiceFromLd(ld, { jobId, dom });
 }
 
@@ -305,13 +328,14 @@ function mergeDiceScrapes(base, next) {
   };
 }
 
-async function scrapeDice() {
+async function scrapeDice(hints = {}) {
   let data = scrapeDiceOnce(document);
   if (data?.jobTitle && data?.companyName && data?.jdText) return data;
 
   // SERP side panel often has title/company in the DOM but no JSON-LD / incomplete
   // JD. Fetch the canonical /job-detail/{id} HTML (has JobPosting JSON-LD).
-  const jobId = data?.jobId || diceIdFromDom(document);
+  const jobId =
+    String(hints.jobId || "").trim() || data?.jobId || diceIdFromDom(document);
   if (jobId) {
     const detailDoc = await fetchDiceDetailDocument(jobId);
     if (detailDoc) {

@@ -187,6 +187,10 @@ function inferSourceFromUrl(url, explicit) {
   if (raw.includes("hiringcafe.com") || raw.includes("hiring.cafe")) return "hiringcafe";
   if (raw.includes("myworkdayjobs.com") || raw.includes("workdayjobs.com")) return "workday";
   if (raw.includes("indeed.com")) return "indeed";
+  if (raw.includes("jobgether.com")) return "jobgether";
+  if (raw.includes("smartrecruiters.com")) return "smartrecruiters";
+  if (raw.includes("zohorecruit.com") || raw.includes("recruit.zoho.")) return "zohorecruit";
+  if (raw.includes("oraclecloud.com")) return "oraclecloud";
   return "sheet";
 }
 
