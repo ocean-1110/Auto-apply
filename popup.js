@@ -16,7 +16,7 @@ import {
   readJobUploadDocsFromDirectory,
   sanitizeJobFolderName
 } from "./fs-output.js";
-import { isLinkedInSource, isDiceSource, isJobrightSource, parseImportedJobsCsvText } from "./csv-jobs.js";
+import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText } from "./csv-jobs.js";
 import {
   AUTO_CAPTURE_ENABLED_KEY,
   LAST_CAPTURE_STATUS_KEY,
@@ -108,6 +108,9 @@ const jobsWorkStateEl = document.getElementById("jobsWorkState");
 const jobsWorkDetailEl = document.getElementById("jobsWorkDetail");
 const filterAllJobsBtn = document.getElementById("filterAllJobs");
 const filterDiceJobsBtn = document.getElementById("filterDiceJobs");
+const filterGreenhouseJobsBtn = document.getElementById("filterGreenhouseJobs");
+const filterWorkdayJobsBtn = document.getElementById("filterWorkdayJobs");
+const filterIndeedJobsBtn = document.getElementById("filterIndeedJobs");
 const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
 const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
@@ -550,6 +553,9 @@ function displayJobSource(job) {
   const source = String(job?.source || "").trim();
   if (!source) return "Other";
   if (isDiceSource(source)) return "Dice";
+  if (isGreenhouseSource(source)) return "Greenhouse";
+  if (isWorkdaySource(source)) return "Workday";
+  if (isIndeedSource(source)) return "Indeed";
   if (isJobrightSource(source)) return "Jobright";
   if (isLinkedInSource(source)) return "LinkedIn";
   return source.charAt(0).toUpperCase() + source.slice(1);
@@ -608,10 +614,13 @@ async function refreshImportedJobsFromStorage() {
 }
 
 function setImportedJobsFilter(filter, { persist = true } = {}) {
-  const allowed = ["all", "dice", "jobright", "linkedin", "others"];
+  const allowed = ["all", "dice", "greenhouse", "workday", "indeed", "jobright", "linkedin", "others"];
   importedJobsFilter = allowed.includes(filter) ? filter : "all";
   filterAllJobsBtn?.classList.toggle("is-active", importedJobsFilter === "all");
   filterDiceJobsBtn?.classList.toggle("is-active", importedJobsFilter === "dice");
+  filterGreenhouseJobsBtn?.classList.toggle("is-active", importedJobsFilter === "greenhouse");
+  filterWorkdayJobsBtn?.classList.toggle("is-active", importedJobsFilter === "workday");
+  filterIndeedJobsBtn?.classList.toggle("is-active", importedJobsFilter === "indeed");
   filterJobrightJobsBtn?.classList.toggle("is-active", importedJobsFilter === "jobright");
   filterLinkedInJobsBtn?.classList.toggle("is-active", importedJobsFilter === "linkedin");
   filterOtherJobsBtn?.classList.toggle("is-active", importedJobsFilter === "others");
@@ -624,10 +633,20 @@ function setImportedJobsFilter(filter, { persist = true } = {}) {
 function importedJobMatchesFilter(job) {
   const source = String(job?.source || "").trim().toLowerCase();
   if (importedJobsFilter === "dice") return isDiceSource(source);
+  if (importedJobsFilter === "greenhouse") return isGreenhouseSource(source);
+  if (importedJobsFilter === "workday") return isWorkdaySource(source);
+  if (importedJobsFilter === "indeed") return isIndeedSource(source);
   if (importedJobsFilter === "jobright") return isJobrightSource(source);
   if (importedJobsFilter === "linkedin") return isLinkedInSource(source);
   if (importedJobsFilter === "others") {
-    return !isLinkedInSource(source) && !isDiceSource(source) && !isJobrightSource(source);
+    return (
+      !isLinkedInSource(source) &&
+      !isDiceSource(source) &&
+      !isJobrightSource(source) &&
+      !isGreenhouseSource(source) &&
+      !isWorkdaySource(source) &&
+      !isIndeedSource(source)
+    );
   }
   return true;
 }
@@ -2408,6 +2427,9 @@ modeManualBtn?.addEventListener("click", () => setSidebarMode("manual"));
 modeImportedBtn?.addEventListener("click", () => setSidebarMode("imported"));
 filterAllJobsBtn?.addEventListener("click", () => setImportedJobsFilter("all"));
 filterDiceJobsBtn?.addEventListener("click", () => setImportedJobsFilter("dice"));
+filterGreenhouseJobsBtn?.addEventListener("click", () => setImportedJobsFilter("greenhouse"));
+filterWorkdayJobsBtn?.addEventListener("click", () => setImportedJobsFilter("workday"));
+filterIndeedJobsBtn?.addEventListener("click", () => setImportedJobsFilter("indeed"));
 filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jobright"));
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));

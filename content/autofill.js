@@ -6,10 +6,39 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-26.dice-apply-not-profile.1";
+  const SCRIPT_BUILD = "2026-08-26.greenhouse-workday-indeed.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
+
+  /** Query light DOM plus open shadow roots (Workday / some Greenhouse widgets). */
+  function queryAllDeep(selector, root = document) {
+    const out = [];
+    const visit = (node) => {
+      if (!node) return;
+      try {
+        if (node.querySelectorAll) out.push(...node.querySelectorAll(selector));
+      } catch {
+        /* invalid selector in this root */
+      }
+      const tree = node.querySelectorAll ? node.querySelectorAll("*") : [];
+      for (const el of tree) {
+        if (el.shadowRoot) visit(el.shadowRoot);
+      }
+    };
+    visit(root);
+    return out;
+  }
+
+  function safeClick(el) {
+    if (!el) return false;
+    try {
+      el.click();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   // Learn mode: capture answers the user types/selects. Suppressed briefly while
   // the extension autofills so we never re-store our own programmatic values.
@@ -2775,12 +2804,20 @@
   ) {
     suppressLearn();
     const filled = [];
+    const wd = isWorkdayPage() ? detectWorkdayWizardState() : null;
+    const shouldFillHistory =
+      !wd || wd.isExperience || wd.isEducation || looksLikeHistoryForm();
 
-    // Top → bottom: attach docs first and wait for the host to finish ingesting
-    // them before filling fields or clicking Next (avoids Dice "Leave site?" prompts).
-    const uploadResult = await uploadApplicationFiles(uploadFiles);
+    // Top → bottom: attach docs first unless this is a Workday Review page
+    // with no file inputs (avoids hunting upload UI on confirmation steps).
+    const uploadResult =
+      wd?.isReview && !collectFileInputs().length
+        ? { uploadedCount: 0, uploaded: [], skipped: [], settled: true }
+        : await uploadApplicationFiles(uploadFiles);
 
-    const historyFilled = await fillHistorySections(history.workHistory, history.educationHistory);
+    const historyFilled = shouldFillHistory
+      ? await fillHistorySections(history.workHistory, history.educationHistory)
+      : [];
     for (const row of historyFilled) filled.push(row);
 
     const controls = collectFillableControls();
@@ -2805,6 +2842,22 @@
       password: String(credentials.password || "")
     };
     const credResult = fillLoginCredentials(creds);
+    if (isWorkdayPage() && credResult.filledCount > 0) {
+      const authSubmit = queryAllDeep("button, a, [role='button'], input[type='submit']").find(
+        (el) => {
+          if (!isElVisible(el) || !isElEnabled(el)) return false;
+          const t = elActionText(el);
+          return /^(create account|create an account|sign in|log in|register|continue)$/i.test(
+            t.trim()
+          );
+        }
+      );
+      if (authSubmit) {
+        scrollElIntoView(authSubmit);
+        safeClick(authSubmit);
+        await sleep(1600);
+      }
+    }
 
     // One more quiet check so Next is never pressed mid-upload.
     if (uploadResult.uploadedCount > 0 || uploadsStillBusy()) {
@@ -2825,7 +2878,8 @@
       uploadSkipped: uploadResult.skipped,
       uploadsSettled: uploadResult.settled !== false && !uploadsStillBusy(),
       unmatchedQuestions,
-      unmatchedChoiceQuestions
+      unmatchedChoiceQuestions,
+      workdayWizard: wd
     };
   }
 
@@ -2904,18 +2958,145 @@
       }
     }
 
+    if (applyUrls.length < 5 && isGreenhousePage()) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        try {
+          if (/job_app|\/apply\b|embed\/job/i.test(a.href || "")) pushUrl(a.href);
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
+    if (applyUrls.length < 5 && isWorkdayPage()) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        try {
+          if (/\/apply\b|jobPostingApply|application/i.test(a.href || "")) pushUrl(a.href);
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
     return applyUrls;
   }
 
+  function isIndeedPage(url = location.href) {
+    try {
+      return /(^|\.)indeed\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isWorkdayPage(url = location.href) {
+    try {
+      const host = new URL(String(url || location.href)).hostname.toLowerCase();
+      return /(^|\.)myworkdayjobs\.com$/.test(host) || /(^|\.)workdayjobs\.com$/.test(host);
+    } catch {
+      return false;
+    }
+  }
+
+  function isGreenhousePage(url = location.href) {
+    try {
+      return /(^|\.)greenhouse\.io$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function applyPageSite(url = location.href) {
+    if (isIndeedPage(url)) return "indeed";
+    if (isWorkdayPage(url)) return "workday";
+    if (isGreenhousePage(url)) return "greenhouse";
+    try {
+      if (/(^|\.)dice\.com$/i.test(new URL(String(url || location.href)).hostname)) return "dice";
+    } catch {
+      /* ignore */
+    }
+    return "generic";
+  }
+
+  function isSameSiteApplyUrl(url, site = "") {
+    try {
+      const target = new URL(String(url || ""), location.href);
+      if (!/^https?:$/i.test(target.protocol)) return false;
+      if (site === "indeed") return /(^|\.)indeed\.com$/i.test(target.hostname);
+      if (site === "dice") return /(^|\.)dice\.com$/i.test(target.hostname);
+      if (site === "workday") {
+        return (
+          /(^|\.)myworkdayjobs\.com$/i.test(target.hostname) ||
+          /(^|\.)workdayjobs\.com$/i.test(target.hostname)
+        );
+      }
+      if (site === "greenhouse") return /(^|\.)greenhouse\.io$/i.test(target.hostname);
+      return target.origin === location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * True only for an interactive CAPTCHA the user must solve — not the Google
+   * privacy badge or invisible reCAPTCHA tokens Greenhouse embeds by default.
+   */
+  function hasActiveCaptchaChallenge() {
+    for (const iframe of queryAllDeep(
+      'iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha.com"][src*="challenge"], iframe[src*="challenges.cloudflare.com"], iframe[title*="challenge" i]'
+    )) {
+      if (!isElVisible(iframe)) continue;
+      const w = iframe.offsetWidth || 0;
+      const h = iframe.offsetHeight || 0;
+      if (w >= 120 && h >= 80) return true;
+    }
+
+    for (const host of queryAllDeep(
+      ".g-recaptcha, #g-recaptcha, [data-sitekey], .h-captcha, .cf-turnstile"
+    )) {
+      if (!isElVisible(host)) continue;
+      if (host.classList?.contains("grecaptcha-badge")) continue;
+      if (host.closest?.(".grecaptcha-badge")) continue;
+      const w = host.offsetWidth || 0;
+      const h = host.offsetHeight || 0;
+      if (w >= 100 && h >= 40) return true;
+      const anchor = host.querySelector?.('iframe[src*="anchor"]');
+      if (anchor && isElVisible(anchor) && (anchor.offsetWidth || 0) >= 100) return true;
+    }
+
+    const bodyText = cleanLabelText(document.body?.innerText || "").slice(0, 4000);
+    if (
+      /\b(select all (?:images|squares)|i'?m not a robot|verify you are human|complete the captcha)\b/i.test(
+        bodyText
+      )
+    ) {
+      const frame = document.querySelector(
+        'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"]'
+      );
+      if (frame && isElVisible(frame) && (frame.offsetWidth || 0) >= 100) return true;
+    }
+
+    return false;
+  }
+
   function detectPageBlocker() {
+    const href = String(location.href || "");
+    // Workday create-account / sign-in is handled by credential autofill.
+    if (isWorkdayPage()) {
+      if (hasActiveCaptchaChallenge()) {
+        return "A CAPTCHA is on the page. Solve it, then retry.";
+      }
+      return "";
+    }
     if (document.querySelector('input[type="password"]')) {
       return "A sign-in form is on the page. Log in, then retry.";
     }
-    if (
-      document.querySelector(
-        '.g-recaptcha, #g-recaptcha, [data-sitekey], iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"]'
-      )
-    ) {
+    if (isIndeedPage() && /\/account\/login|\/auth|\/m\/basecamp/i.test(href)) {
+      return "A sign-in form is on the page. Log in, then retry.";
+    }
+    if (hasActiveCaptchaChallenge()) {
       return "A CAPTCHA is on the page. Solve it, then retry.";
     }
     return "";
@@ -3062,12 +3243,48 @@
 
     // Dice job cards / job-detail pages have newsletter and ad forms. Those are
     // not the application. Only the /job-applications wizard is.
+    const hasIndeedApplyUi =
+      isIndeedPage() &&
+      Boolean(
+        document.querySelector(
+          [
+            "#indeedApplyButton",
+            "[data-testid='indeedApplyButton']",
+            "[data-testid*='ApplyForm']",
+            "[class*='ia-ApplyForm']",
+            "[class*='ia-BasePage']",
+            "[data-indeed-apply-joburl]"
+          ].join(", ")
+        )
+      );
+
+    const isGreenhouseApplyPage =
+      isGreenhousePage() &&
+      (/job_app|\/apply/i.test(pathAndQuery) ||
+        hasFileInput ||
+        identityFields >= 2 ||
+        (hasApplyForm && fillableCount >= 2));
+
+    const isWorkdayApplyPage =
+      isWorkdayPage() &&
+      (/\/apply\//i.test(location.href) ||
+        Boolean(
+          document.querySelector(
+            '[data-automation-id*="formField"], [data-automation-id="applyManual"], [data-automation-id*="apply"]'
+          )
+        ));
+
+    // Dice job cards / job-detail pages have newsletter and ad forms. Those are
+    // not the application. Only the /job-applications wizard is.
     const isApplicationForm = isDiceHost
       ? Boolean(isDiceApplyPage)
       : Boolean(
           hasFileInput ||
             identityFields >= 2 ||
             (hasApplyForm && fillableCount >= 2) ||
+            (hasIndeedApplyUi && fillableCount >= 1) ||
+            isGreenhouseApplyPage ||
+            isWorkdayApplyPage ||
             looksLikeHistoryForm()
         );
 
@@ -3127,7 +3344,260 @@
     }
   }
 
+  const INDEED_APPLY_SUCCESS_RE =
+    /\b(application submitted|your application (?:has been )?(?:submitted|sent)|application (?:has been )?(?:sent|received)|you(?:'|’)ve applied|successfully applied)\b/i;
+  const WORKDAY_APPLY_SUCCESS_RE =
+    /\b(application\s+(?:has\s+been\s+)?(?:submitted|received|sent)|thank you for (?:applying|your application)|you(?:'|’)ve successfully applied|successfully submitted your application)\b/i;
+  const GREENHOUSE_APPLY_SUCCESS_RE =
+    /\b(you(?:'|’)re in the race|your application has been received|application has been received|thank you for applying|successfully submitted|application (?:was |has been )?submitted)\b/i;
+
+  function detectIndeedApplySuccess() {
+    if (!isIndeedPage()) return "";
+    const href = String(location.href || "");
+    const successUrl = /\/apply\/(?:complete|success|submitted)|applicationSubmitted/i.test(href);
+    const candidates = queryAllDeep(
+      [
+        '[data-testid*="success" i]',
+        '[data-testid*="confirmation" i]',
+        '[class*="application-success" i]',
+        '[class*="confirmation" i]',
+        '[role="status"]',
+        '[role="alert"]',
+        "h1",
+        "h2",
+        '[role="heading"]'
+      ].join(", ")
+    )
+      .map((el) => cleanLabelText(el.textContent || ""))
+      .filter((text) => text && text.length <= 500);
+    const hit = candidates.find((text) => INDEED_APPLY_SUCCESS_RE.test(text));
+    if (!successUrl && !hit) return "";
+    return (hit || "Application submitted").slice(0, 160);
+  }
+
+  function detectWorkdayApplySuccess() {
+    if (!isWorkdayPage()) return "";
+    const href = String(location.href || "");
+    const successUrl = /\/apply\/(?:complete|submitted|success)|applicationSubmitted|\/submitted/i.test(href);
+    const bodyText = cleanLabelText(document.body?.innerText || document.body?.textContent || "");
+    const headings = queryAllDeep("h1, h2, [role='heading']")
+      .map((el) => cleanLabelText(el.textContent))
+      .filter(Boolean);
+    const headingHit = headings.find((t) => WORKDAY_APPLY_SUCCESS_RE.test(t));
+    const bodyHit = bodyText ? bodyText.match(WORKDAY_APPLY_SUCCESS_RE) : null;
+    if (!successUrl && !headingHit && !bodyHit) return "";
+    return (headingHit || (bodyHit && bodyHit[0]) || "Application submitted").slice(0, 160);
+  }
+
+  function detectGreenhouseEmailVerification() {
+    if (!isGreenhousePage()) return { ok: false };
+    const bodyText = cleanLabelText(document.body?.innerText || document.body?.textContent || "");
+    const hasCopy =
+      /\b(security\s*code|verification\s*code|enter\s+(?:the\s+)?(?:\d+[-\s]?)?character\s+code|confirm you(?:'|’)re a human|copy\s+and\s+paste\s+this\s+code|resubmit your application)\b/i.test(
+        bodyText
+      );
+    const boxes = findGreenhouseSecurityCodeBoxes();
+    const codeInput = boxes[0] || findGreenhouseSecurityCodeInput();
+    if (!hasCopy && !codeInput && !boxes.length) return { ok: false };
+    if (!codeInput && !boxes.length && !/\bsecurity\s*code\b/i.test(bodyText)) return { ok: false };
+    return { ok: true, text: "Greenhouse security code verification" };
+  }
+
+  function findGreenhouseSecurityCodeBoxes() {
+    const inputs = queryAllDeep(
+      'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"])'
+    ).filter((el) => isElVisible(el) && !el.disabled);
+
+    const isOtpCharInput = (el) => {
+      const maxLen = Number(el.getAttribute("maxlength") || el.maxLength || 0);
+      const pattern = String(el.getAttribute("pattern") || "");
+      const auto = String(el.getAttribute("autocomplete") || "").toLowerCase();
+      const inputMode = String(el.getAttribute("inputmode") || "").toLowerCase();
+      const name = normalize(
+        [el.name || "", el.id || "", el.getAttribute("aria-label") || ""].join(" ")
+      );
+      if (/email|phone|password|search|first|last|name|linkedin/i.test(name)) return false;
+      if (auto.includes("one-time-code")) return true;
+      if (maxLen === 1) return true;
+      if (/^\.?[a-z0-9]$/i.test(pattern) || pattern.includes("{1}")) return true;
+      if (inputMode === "numeric" || inputMode === "text") {
+        if (maxLen > 0 && maxLen <= 2) return true;
+      }
+      return false;
+    };
+
+    const labeled = inputs.filter((el) => {
+      const blob = normalize(
+        [
+          questionLabelForControl(el),
+          labelTextForControl(el),
+          el.getAttribute?.("aria-label") || "",
+          el.closest?.("fieldset")?.querySelector?.("legend")?.textContent || ""
+        ].join(" ")
+      );
+      return /\b(security\s*code|verification\s*code|one[- ]time|otp)\b/.test(blob);
+    });
+    const labeledBoxes = labeled.filter(isOtpCharInput);
+    if (labeledBoxes.length >= 4) return labeledBoxes.slice(0, 12);
+
+    const singles = inputs.filter(isOtpCharInput);
+    if (singles.length >= 4) {
+      const byParent = new Map();
+      for (const el of singles) {
+        const parent = el.parentElement;
+        if (!parent) continue;
+        if (!byParent.has(parent)) byParent.set(parent, []);
+        byParent.get(parent).push(el);
+      }
+      let best = [];
+      for (const group of byParent.values()) {
+        if (group.length >= 4 && group.length > best.length) best = group;
+      }
+      if (best.length >= 4) return best.slice(0, 12);
+      const byGrand = new Map();
+      for (const el of singles) {
+        const grand = el.parentElement?.parentElement;
+        if (!grand) continue;
+        if (!byGrand.has(grand)) byGrand.set(grand, []);
+        byGrand.get(grand).push(el);
+      }
+      best = [];
+      for (const group of byGrand.values()) {
+        if (group.length >= 4 && group.length > best.length) best = group;
+      }
+      if (best.length >= 4) return best.slice(0, 12);
+      if (singles.length >= 6 && singles.length <= 10) return singles.slice(0, 12);
+    }
+    return [];
+  }
+
+  function findGreenhouseSecurityCodeInput() {
+    const boxes = findGreenhouseSecurityCodeBoxes();
+    if (boxes.length === 1) return boxes[0];
+
+    const inputs = queryAllDeep('input:not([type="hidden"]):not([type="file"]), textarea');
+    for (const el of inputs) {
+      if (!isElVisible(el) || el.disabled) continue;
+      if (boxes.includes(el)) continue;
+      const blob = normalize(
+        [
+          questionLabelForControl(el),
+          labelTextForControl(el),
+          el.getAttribute?.("aria-label") || "",
+          el.getAttribute?.("placeholder") || "",
+          el.name || "",
+          el.id || "",
+          el.getAttribute?.("autocomplete") || ""
+        ].join(" ")
+      );
+      if (/\b(security\s*code|verification\s*code|one[- ]time|otp|email\s*code)\b/.test(blob)) {
+        const maxLen = Number(el.getAttribute("maxlength") || el.maxLength || 0);
+        if (!maxLen || maxLen >= 4) return el;
+      }
+    }
+    const bodyText = cleanLabelText(document.body?.innerText || "");
+    if (!/\bsecurity\s*code\b/i.test(bodyText)) return null;
+    if (boxes.length >= 4) return null;
+    const candidates = inputs.filter(
+      (el) =>
+        isElVisible(el) &&
+        !el.disabled &&
+        /^(text|tel|search|)$/i.test(String(el.type || "text")) &&
+        !/email|phone|name|password/i.test(
+          normalize([el.name, el.id, el.getAttribute?.("autocomplete") || ""].join(" "))
+        )
+    );
+    const full = candidates.find((el) => {
+      const maxLen = Number(el.getAttribute("maxlength") || el.maxLength || 0);
+      return !maxLen || maxLen >= 4;
+    });
+    return full || null;
+  }
+
+  async function fillGreenhouseSecurityCode(code) {
+    const value = String(code || "")
+      .trim()
+      .replace(/\s+/g, "");
+    if (!value) return { ok: false, error: "Empty security code" };
+    suppressLearn(4000);
+
+    const boxes = findGreenhouseSecurityCodeBoxes();
+    if (boxes.length >= 4) {
+      const chars = value.slice(0, boxes.length).split("");
+      for (let i = 0; i < boxes.length; i += 1) {
+        const ch = chars[i] || "";
+        const el = boxes[i];
+        el.focus();
+        if (!setNativeValue(el, ch)) {
+          el.value = ch;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        el.dispatchEvent(
+          new KeyboardEvent("keyup", {
+            bubbles: true,
+            key: ch,
+            code: ch ? `Key${ch.toUpperCase()}` : "Backspace"
+          })
+        );
+        await sleep(40);
+      }
+      const joined = boxes.map((el) => String(el.value || "").slice(0, 1)).join("");
+      if (joined.toLowerCase() !== value.slice(0, boxes.length).toLowerCase()) {
+        const first = boxes[0];
+        first.focus();
+        try {
+          const dt = new DataTransfer();
+          dt.setData("text/plain", value);
+          first.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, clipboardData: dt }));
+          await sleep(120);
+        } catch {
+          /* ignore */
+        }
+      }
+      const after = boxes.map((el) => String(el.value || "").slice(0, 1)).join("");
+      if (!after || after.replace(/\s/g, "").length < Math.min(4, value.length)) {
+        return { ok: false, error: "Could not fill multi-box security code fields" };
+      }
+    } else {
+      const el = findGreenhouseSecurityCodeInput();
+      if (!el) return { ok: false, error: "Security code field not found" };
+      const filled = await fillControl(el, value, null);
+      if (!filled) return { ok: false, error: "Could not fill security code field" };
+    }
+
+    await sleep(200);
+    const action = findActionButton();
+    if (
+      action?.el &&
+      (action.type === "submit" || /submit|resubmit|verify|continue/i.test(action.text || ""))
+    ) {
+      scrollElIntoView(action.el);
+      await clickKeepingSameTab(action.el, { preferNewTab: false });
+      await sleep(900);
+      return { ok: true, filled: true, submitted: true, text: action.text || "Submit" };
+    }
+    return { ok: true, filled: true, submitted: false };
+  }
+
+  function detectGreenhouseApplySuccess() {
+    if (!isGreenhousePage()) return "";
+    const bodyText = cleanLabelText(document.body?.innerText || document.body?.textContent || "");
+    const headings = queryAllDeep("h1, h2, [role='heading']")
+      .map((el) => cleanLabelText(el.textContent))
+      .filter(Boolean);
+    const headingHit = headings.find((t) => GREENHOUSE_APPLY_SUCCESS_RE.test(t));
+    const bodyHit = bodyText ? bodyText.match(GREENHOUSE_APPLY_SUCCESS_RE) : null;
+    const myGh = /mygreenhouse|track your application/i.test(bodyText);
+    if (!headingHit && !bodyHit && !myGh) return "";
+    if (detectGreenhouseEmailVerification().ok) return "";
+    return (headingHit || (bodyHit && bodyHit[0]) || "Your application has been received").slice(0, 160);
+  }
+
   function detectApplicationSuccess() {
+    if (isGreenhousePage()) return detectGreenhouseApplySuccess();
+    if (isWorkdayPage()) return detectWorkdayApplySuccess();
+    if (isIndeedPage()) return detectIndeedApplySuccess();
     const href = String(location.href || "");
     const path = String(location.pathname || "");
     if (
@@ -3314,7 +3784,7 @@
       return document;
     }
     const sel =
-      '[role="dialog"], dialog[open], dialog, [aria-modal="true"], .modal, [class*="modal"], [class*="apply"], [id*="apply"]';
+      '[role="dialog"], dialog[open], dialog, [aria-modal="true"], .modal, [class*="modal"], [class*="apply"], [id*="apply"], [data-testid*="ApplyForm"], [class*="ia-ApplyForm"], [class*="ia-BasePage"]';
     let best = null;
     let bestCount = -1;
     for (const node of document.querySelectorAll(sel)) {
@@ -3468,7 +3938,7 @@
     const scopeEl = scope || getApplyScope();
     const allButtons = [
       ...scopeEl.querySelectorAll(
-        'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
+        'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"], [data-automation-id*="next"], [data-automation-id*="Next"], [data-automation-id*="submit"], [data-automation-id*="Submit"]'
       )
     ].filter((el) => isElVisible(el) && !isSiteChromeControl(el));
     const buttons = allButtons.filter((el) => isElEnabled(el));
@@ -3486,11 +3956,12 @@
       if (isDiceApplicationPath() && /\b(next job|previous job|next posting)\b/i.test(text)) {
         continue;
       }
-      const cls = classifyActionButton(text);
+      const autoCls = workdayAutomationAction(btn);
+      const cls = autoCls || classifyActionButton(text);
       if (cls && candidates[cls]) {
         candidates[cls].push({ type: cls, el: btn, text, score: actionButtonScore(btn, cls) });
       } else if (
-        (typeAttr === "submit" || /submit/i.test(hint)) &&
+        (typeAttr === "submit" || /submit/i.test(hint) || autoCls === "submit") &&
         !EASY_BACK_RE.test(text)
       ) {
         candidates.submit.push({
@@ -3534,6 +4005,12 @@
         };
         break;
       }
+    }
+
+    // Workday Review (including short My-Info → Review flows): prefer Submit.
+    const wd = isWorkdayPage() ? detectWorkdayWizardState() : null;
+    if (wd?.isReview) {
+      if (submit) return submit;
     }
 
     // Dice wizard chrome often still has a "Next" (job carousel). The last
@@ -3634,7 +4111,246 @@
     }
   }
 
+  function workdayAutomationAction(el) {
+    if (!(el instanceof Element)) return null;
+    const autoId = String(el.getAttribute?.("data-automation-id") || "");
+    if (!autoId) return null;
+    if (/submit/i.test(autoId)) return "submit";
+    if (/next|continue|saveAndContinue|bottom-navigation-next/i.test(autoId)) return "next";
+    return null;
+  }
+
+  /**
+   * Workday wizards vary by employer. Detect the progress/heading on screen.
+   */
+  function detectWorkdayWizardState() {
+    if (!isWorkdayPage()) return null;
+
+    const STEP_NAME_RE =
+      /\b(my information|personal information|contact information|my experience|work experience|experience|education|application questions|questions|voluntary disclosures?|self[- ]?identify|review|account information|create account|sign in)\b/i;
+
+    const normalizeStep = (raw) => {
+      const t = cleanLabelText(raw || "");
+      if (!t || t.length > 90) return "";
+      const m = t.match(STEP_NAME_RE);
+      if (!m) return "";
+      const key = m[1].toLowerCase();
+      if (/create account|sign in|account information/.test(key)) return "Account";
+      if (/my information|personal information|contact information/.test(key)) return "My Information";
+      if (/my experience|work experience|^experience$/.test(key)) return "My Experience";
+      if (/^education$/.test(key)) return "Education";
+      if (/application questions|^questions$/.test(key)) return "Application Questions";
+      if (/voluntary/.test(key)) return "Voluntary Disclosures";
+      if (/self/.test(key)) return "Self Identify";
+      if (/review/.test(key)) return "Review";
+      return m[1];
+    };
+
+    const steps = [];
+    const seen = new Set();
+    const pushStep = (label) => {
+      const n = normalizeStep(label);
+      if (!n || seen.has(n)) return;
+      seen.add(n);
+      steps.push(n);
+    };
+
+    for (const el of queryAllDeep(
+      [
+        '[data-automation-id*="progress"]',
+        '[data-automation-id*="Progress"]',
+        '[data-automation-id*="wizard"]',
+        '[data-automation-id*="step"]',
+        '[aria-current="step"]',
+        '[aria-current="page"]',
+        "nav li",
+        '[role="listitem"]',
+        '[role="navigation"] button',
+        '[role="navigation"] a'
+      ].join(", ")
+    )) {
+      if (!isElVisible(el) && el.getAttribute?.("aria-current") == null) continue;
+      pushStep(el.textContent || el.getAttribute?.("aria-label") || "");
+    }
+
+    const headingEl =
+      document.querySelector('[data-automation-id="pageHeaderTitleText"]') ||
+      document.querySelector('[data-automation-id*="pageHeader"]') ||
+      document.querySelector("h1, h2, [role='heading']");
+    const heading = cleanLabelText(headingEl?.textContent || "");
+    const headingStep = normalizeStep(heading);
+
+    let current = "";
+    const currentEl = queryAllDeep('[aria-current="step"], [aria-current="page"]').find((el) =>
+      STEP_NAME_RE.test(el.textContent || el.getAttribute?.("aria-label") || "")
+    );
+    if (currentEl) current = normalizeStep(currentEl.textContent || currentEl.getAttribute("aria-label"));
+    if (!current && headingStep) current = headingStep;
+    if (!current) {
+      const path = String(location.pathname || "");
+      if (/\/review/i.test(path)) current = "Review";
+      else if (/\/experience/i.test(path)) current = "My Experience";
+      else if (/\/education/i.test(path)) current = "Education";
+      else if (/\/questions?/i.test(path)) current = "Application Questions";
+      else if (/\/voluntary/i.test(path)) current = "Voluntary Disclosures";
+      else if (/\/self.?ident/i.test(path)) current = "Self Identify";
+      else if (/\/(myInfo|my.?information|personal)/i.test(path)) current = "My Information";
+    }
+    if (headingStep && !seen.has(headingStep)) pushStep(headingStep);
+    if (current && !seen.has(current)) pushStep(current);
+
+    const isReview =
+      current === "Review" || /review/i.test(heading) || /\/review(?:\/|$|\?)/i.test(location.pathname);
+    const isAuth =
+      current === "Account" ||
+      /create account|sign in|log in|register/i.test(heading) ||
+      (Boolean(
+        document.querySelector(
+          'input[type="password"], [data-automation-id*="password"], [name*="password" i]'
+        )
+      ) &&
+        /create account|sign in|log in|register|account/i.test(
+          document.body?.innerText?.slice(0, 2000) || ""
+        ));
+
+    return {
+      current: current || headingStep || "",
+      heading,
+      steps,
+      stepCount: steps.length || (current ? 1 : 0),
+      isReview,
+      isAuth,
+      isExperience: current === "My Experience" || /experience/i.test(current || ""),
+      isEducation: current === "Education",
+      isMyInfo: current === "My Information",
+      isSimpleFlow: steps.length > 0 && steps.length <= 4
+    };
+  }
+
+  async function clickGreenhouseApplyEntry() {
+    const controls = queryAllDeep(
+      "a, button, [role='button'], input[type='button'], input[type='submit']"
+    ).filter((el) => isElVisible(el) && isElEnabled(el));
+    const applyBtn = controls.find((el) => {
+      const t = elActionText(el).trim();
+      return /^(apply|apply now|apply for this job)$/i.test(t);
+    });
+    if (applyBtn) {
+      const res = await clickKeepingSameTab(applyBtn, { preferNewTab: false });
+      await sleep(1200);
+      return {
+        ok: Boolean(res.clicked || res.navigateUrl),
+        clicked: Boolean(res.clicked),
+        navigateUrl: res.navigateUrl || "",
+        openInNewTab: Boolean(res.openInNewTab),
+        text: elActionText(applyBtn) || "Apply"
+      };
+    }
+    if (probeApplicationForm().isApplicationForm || /job_app|\/apply/i.test(location.href)) {
+      return { ok: true, clicked: false, alreadyOpen: true, text: "greenhouse apply" };
+    }
+    return { ok: false, clicked: false };
+  }
+
+  async function clickWorkdayApplyEntry() {
+    const modalBtns = queryAllDeep("button, a, [role='button'], [data-automation-id]").filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    const autofillResume = modalBtns.find((el) =>
+      /autofill with resume|apply with resume|upload (a )?resume/i.test(elActionText(el))
+    );
+    if (autofillResume) {
+      scrollElIntoView(autofillResume);
+      safeClick(autofillResume);
+      await sleep(1400);
+      return { ok: true, clicked: true, text: elActionText(autofillResume) || "Autofill with Resume" };
+    }
+
+    const authCta = modalBtns.find((el) =>
+      /^(create account|create an account|sign in|log in|register)$/i.test(elActionText(el).trim())
+    );
+    if (authCta) {
+      scrollElIntoView(authCta);
+      safeClick(authCta);
+      await sleep(1200);
+      return { ok: true, clicked: true, text: elActionText(authCta) };
+    }
+
+    const applyBtn = modalBtns.find((el) => {
+      const t = elActionText(el);
+      const autoId = String(el.getAttribute?.("data-automation-id") || "");
+      return (
+        /^(apply|apply now)$/i.test(t.trim()) || /jobPostingApplyButton|applyButton/i.test(autoId)
+      );
+    });
+    if (applyBtn) {
+      scrollElIntoView(applyBtn);
+      safeClick(applyBtn);
+      await sleep(1400);
+      const after = queryAllDeep("button, a, [role='button']").filter(
+        (el) => isElVisible(el) && isElEnabled(el)
+      );
+      const resumeOpt = after.find((el) =>
+        /autofill with resume|apply with resume/i.test(elActionText(el))
+      );
+      if (resumeOpt) {
+        scrollElIntoView(resumeOpt);
+        safeClick(resumeOpt);
+        await sleep(1400);
+        return { ok: true, clicked: true, text: elActionText(resumeOpt) || "Autofill with Resume" };
+      }
+      return { ok: true, clicked: true, text: elActionText(applyBtn) || "Apply" };
+    }
+
+    if (/\/apply\//i.test(location.href) || probeApplicationForm().isApplicationForm) {
+      return { ok: true, clicked: false, alreadyOpen: true, text: "workday apply" };
+    }
+    return { ok: false, clicked: false };
+  }
+
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
+    if (isGreenhousePage()) {
+      return clickGreenhouseApplyEntry();
+    }
+    if (isWorkdayPage()) {
+      return clickWorkdayApplyEntry();
+    }
+    if (isIndeedPage()) {
+      const controls = queryAllDeep("button, a, [role='button']").filter(
+        (el) => isElVisible(el) && isElEnabled(el)
+      );
+      const indeedTarget = controls.find((el) => {
+        const blob = [
+          el.id,
+          el.getAttribute?.("data-testid"),
+          el.getAttribute?.("aria-label"),
+          elActionText(el)
+        ].join(" ");
+        return /indeedApplyButton|apply now|easily apply|continue to apply|apply on indeed/i.test(
+          blob
+        );
+      });
+      if (indeedTarget) {
+        const href = indeedTarget.href || indeedTarget.getAttribute?.("formaction") || "";
+        if (href && !isSameSiteApplyUrl(href, "indeed")) {
+          return {
+            ok: false,
+            clicked: false,
+            externalRedirect: true,
+            externalUrl: new URL(href, location.href).toString()
+          };
+        }
+        const res = await clickKeepingSameTab(indeedTarget, { preferNewTab: false });
+        await sleep(1200);
+        return {
+          ok: Boolean(res.clicked || res.navigateUrl),
+          clicked: Boolean(res.clicked),
+          navigateUrl: res.navigateUrl || "",
+          openInNewTab: Boolean(res.openInNewTab),
+          text: elActionText(indeedTarget) || "Apply now"
+        };
+      }
+    }
     const target = findEasyApplyEntryButton();
     if (!target?.el) return { ok: false, clicked: false, navigateUrl: "", openInNewTab: false };
     const res = await clickKeepingSameTab(target.el, { preferNewTab });
@@ -3654,7 +4370,8 @@
       scope.querySelector?.('h1, h2, h3, [role="heading"], legend')?.textContent || ""
     );
     const fields = scope.querySelectorAll?.("input, textarea, select").length || 0;
-    return `${location.href}|${heading}|${fields}`;
+    const wd = isWorkdayPage() ? detectWorkdayWizardState()?.current || "" : "";
+    return `${location.href}|${wd}|${heading}|${fields}`;
   }
 
   function formNeedsFill() {
@@ -3691,6 +4408,8 @@
 
   function getApplyActionSnapshot() {
     const probe = probeApplicationForm();
+    const emailVerification = detectGreenhouseEmailVerification();
+    const workdayWizard = isWorkdayPage() ? detectWorkdayWizardState() : null;
     // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
     if (!probe.isApplicationForm) {
       const alreadyApplied = probe.alreadyApplied || detectDiceAlreadyApplied();
@@ -3700,6 +4419,10 @@
         href: location.href,
         signature: stepSignature(),
         isApplicationForm: false,
+        site: applyPageSite(),
+        workdayWizard,
+        emailVerification: Boolean(emailVerification.ok),
+        emailVerificationText: emailVerification.text || "",
         blockedReason: probe.blockedReason || "",
         jobUnavailable: probe.jobUnavailable || "",
         alreadyApplied: alreadyApplied || "",
@@ -3726,6 +4449,11 @@
       href: location.href,
       signature: stepSignature(),
       isApplicationForm: Boolean(probe.isApplicationForm),
+      site: applyPageSite(),
+      workdayWizard,
+      emailVerification: Boolean(emailVerification.ok),
+      emailVerificationText: emailVerification.text || "",
+      fillableCount: Number(probe.fillableCount || 0),
       blockedReason: probe.blockedReason || "",
       jobUnavailable: probe.jobUnavailable || "",
       alreadyApplied: "",
@@ -3744,13 +4472,15 @@
       const entryRes = await clickEasyApplyEntry({ preferNewTab });
       await sleep(400);
       return {
-        ok: Boolean(entryRes?.clicked || entryRes?.navigateUrl),
+        ok: Boolean(entryRes?.clicked || entryRes?.navigateUrl || entryRes?.alreadyOpen),
         clicked: Boolean(entryRes?.clicked),
         navigateUrl: entryRes?.navigateUrl || "",
         openInNewTab: Boolean(entryRes?.openInNewTab),
         isSubmit: false,
+        externalRedirect: Boolean(entryRes?.externalRedirect),
+        externalUrl: entryRes?.externalUrl || "",
         action:
-          entryRes?.clicked || entryRes?.navigateUrl
+          entryRes?.clicked || entryRes?.navigateUrl || entryRes?.alreadyOpen
             ? { type: "entry", text: entryRes.text || "" }
             : null,
         before,
@@ -3834,6 +4564,22 @@
     }
     if (!action) {
       return { ok: false, clicked: false, openInNewTab: false, before, after: before };
+    }
+    const actionHref =
+      action.el?.href ||
+      action.el?.getAttribute?.("formaction") ||
+      action.el?.closest?.("form")?.getAttribute?.("action") ||
+      "";
+    if (isIndeedPage() && actionHref && !isSameSiteApplyUrl(actionHref, "indeed")) {
+      return {
+        ok: false,
+        clicked: false,
+        externalRedirect: true,
+        externalUrl: new URL(actionHref, location.href).toString(),
+        action: describeAction(action),
+        before,
+        after: before
+      };
     }
     const clickRes = await clickKeepingSameTab(action.el, {
       preferNewTab: preferNewTab && action.type === "entry"
@@ -4980,6 +5726,12 @@
       } catch (err) {
         sendResponse({ ok: false, error: String(err?.message || err) });
       }
+      return true;
+    }
+    if (message?.type === "fill_greenhouse_security_code") {
+      fillGreenhouseSecurityCode(message.code || "")
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
       return true;
     }
     if (message?.type === "click_apply_action") {

@@ -56,6 +56,12 @@ import {
 } from "./application-brief.js";
 import { appendApplicationEvent } from "./application-log.js";
 import {
+  applySiteFromUrl,
+  applySiteLabel,
+  isUrlOnApplySite,
+  stepBudgetForSite
+} from "./ats/adapters.js";
+import {
   ensureCostSession,
   logLlmCall,
   logFillHits,
@@ -667,7 +673,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-26.dice-skip-applied.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-26.greenhouse-workday-indeed.1";
 const AUTOFILL_READY_SUBMIT_URL_KEY = "autofill_ready_submit_url";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
@@ -728,10 +734,7 @@ async function findTabByUrl(url) {
 
 /** Identify an easy-apply-capable site from a URL. */
 function detectSiteFromUrl(url) {
-  const host = hostnameFromUrl(url);
-  if (host.includes("dice.com")) return "dice";
-  if (host.includes("jobright.ai")) return "jobright";
-  return "generic";
+  return applySiteFromUrl(url);
 }
 
 async function ensureAutofillScript(tabId) {
@@ -1597,6 +1600,13 @@ function isAllowedApplyNavUrl(url) {
     if (host === "dice.com" || host.endsWith(".dice.com")) {
       return /\/job-applications\b|\/job-detail\b|\/wizard\b|easy-apply/i.test(path);
     }
+    if (/(^|\.)greenhouse\.io$/i.test(host)) return true;
+    if (/(^|\.)myworkdayjobs\.com$/i.test(host) || /(^|\.)workdayjobs\.com$/i.test(host)) {
+      return true;
+    }
+    if (/(^|\.)indeed\.com$/i.test(host)) {
+      return /\/(viewjob|apply|indeedapply|job)\b|jk=/i.test(path);
+    }
     return /\/(apply|application|job-applications)\b/i.test(path);
   } catch {
     return false;
@@ -1609,6 +1619,19 @@ function applicationSuccessFromUrl(url) {
   try {
     const u = new URL(href);
     const path = u.pathname || "";
+    const host = (u.hostname || "").toLowerCase();
+    if (/(^|\.)greenhouse\.io$/i.test(host) && /confirmation|thanks|submitted|success/i.test(path)) {
+      return "Application submitted (confirmation page).";
+    }
+    if (
+      (/(^|\.)myworkdayjobs\.com$/i.test(host) || /(^|\.)workdayjobs\.com$/i.test(host)) &&
+      /\/apply\/(?:complete|submitted|success)|applicationSubmitted|\/submitted/i.test(path)
+    ) {
+      return "Application submitted (confirmation page).";
+    }
+    if (/(^|\.)indeed\.com$/i.test(host) && /\/apply\/(?:complete|success|submitted)|applicationSubmitted/i.test(path)) {
+      return "Application submitted (confirmation page).";
+    }
     if (
       /\/wizard\/success(?:\/|$)/i.test(path) ||
       /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(path) ||
@@ -1724,6 +1747,26 @@ function pickBestApplyAction(frameResults = []) {
     frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess ||
     applicationSuccessFromUrl(best?.href || frameResults[0]?.href || "") ||
     "";
+  const emailVerification = frameResults.some((f) => f?.emailVerification);
+  const emailVerificationText =
+    frameResults.find((f) => f?.emailVerificationText)?.emailVerificationText || "";
+  let workdayWizard = null;
+  for (const f of frameResults) {
+    if (f?.workdayWizard && !workdayWizard) workdayWizard = f.workdayWizard;
+    if (
+      f?.workdayWizard?.isReview &&
+      f.action?.type === "submit" &&
+      best?.action?.type !== "submit"
+    ) {
+      best = {
+        frameId: f.frameId,
+        action: f.action,
+        signature: f.signature || "",
+        href: f.href || "",
+        isApplicationForm: Boolean(f.isApplicationForm)
+      };
+    }
+  }
   const applyUrls = [];
   for (const f of frameResults) {
     for (const u of f?.applyUrls || []) {
@@ -1737,6 +1780,10 @@ function pickBestApplyAction(frameResults = []) {
     jobUnavailable,
     alreadyApplied,
     applicationSuccess,
+    emailVerification,
+    emailVerificationText,
+    workdayWizard,
+    fillableCount: Math.max(0, ...frameResults.map((f) => Number(f?.fillableCount || 0))),
     applyUrls,
     needsFill: frameResults.some((f) => f?.needsFill),
     uploadsBusy: frameResults.some((f) => f?.uploadsBusy),
@@ -1756,6 +1803,139 @@ async function getApplyActionFromTab(tabId) {
     picked.href = live?.url || picked.href;
   }
   return picked;
+}
+
+function extractGreenhouseSecurityCodeFromText(text) {
+  const cleaned = String(text || "");
+  if (!/security\s*code/i.test(cleaned) && !/greenhouse/i.test(cleaned)) return "";
+  const tokens = cleaned.match(/\b[A-Za-z0-9]{6,12}\b/g) || [];
+  for (const token of tokens) {
+    if (
+      /[A-Za-z]/.test(token) &&
+      /[0-9]/.test(token) &&
+      !/greenhouse|outlook|microsoft|security|verify/i.test(token)
+    ) {
+      return token;
+    }
+  }
+  return "";
+}
+
+/**
+ * Fallback: read Greenhouse OTP from an already-open Outlook web tab.
+ */
+async function scrapeOutlookGreenhouseSecurityCode({ afterEpochMs = 0, timeoutMs = 60_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const outlookRe = /(^|\.)outlook\.(live|office|office365)\.com$/i;
+
+  const findOutlookTabs = async () => {
+    const tabs = await chrome.tabs.query({});
+    return tabs.filter((t) => {
+      try {
+        return outlookRe.test(new URL(t.url || "").hostname);
+      } catch {
+        return false;
+      }
+    });
+  };
+
+  const extractInTab = async (tabId) => {
+    try {
+      const [{ result } = {}] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const text = String(document.body?.innerText || document.body?.textContent || "");
+          if (!/security\s*code/i.test(text) && !/greenhouse/i.test(text)) {
+            return { ok: false, reason: "no_greenhouse_mail_visible" };
+          }
+          return { ok: true, text: text.slice(0, 20000) };
+        }
+      });
+      if (!result?.ok) return { ok: false, code: "" };
+      const code = extractGreenhouseSecurityCodeFromText(result.text || "");
+      return code ? { ok: true, code } : { ok: false, code: "" };
+    } catch {
+      return { ok: false, code: "" };
+    }
+  };
+
+  while (Date.now() < deadline) {
+    const tabs = await findOutlookTabs();
+    for (const tab of tabs) {
+      if (tab.id == null) continue;
+      const hit = await extractInTab(tab.id);
+      if (hit.ok && hit.code) return hit;
+    }
+    await sleepMs(3500);
+  }
+  return {
+    ok: false,
+    code: "",
+    error: "No Greenhouse security code found in an open Outlook tab."
+  };
+}
+
+async function completeGreenhouseEmailVerification(tabId, { afterEpochMs } = {}) {
+  await setStatus("Auto Apply: Greenhouse — waiting for security code email (Outlook)...");
+  const since = afterEpochMs || Date.now() - 60_000;
+  const mail = await scrapeOutlookGreenhouseSecurityCode({
+    afterEpochMs: since,
+    timeoutMs: 60_000
+  }).catch((err) => ({
+    ok: false,
+    code: "",
+    error: String(err?.message || err)
+  }));
+
+  if (!mail?.ok || !mail.code) {
+    return {
+      ok: false,
+      detail:
+        mail?.error ||
+        "Greenhouse asked for an email security code. Open the Outlook web inbox (outlook.live.com) signed in, then retry Auto Apply."
+    };
+  }
+  await setStatus(`Auto Apply: Greenhouse — entering security code ${mail.code}...`);
+  await ensureAutofillScript(tabId);
+  const fillRes = await sendMessageToTab(
+    tabId,
+    { type: "fill_greenhouse_security_code", code: mail.code },
+    { attempts: 2 }
+  ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+  if (!fillRes?.ok) {
+    return {
+      ok: false,
+      detail: fillRes?.error || "Could not fill the Greenhouse security code field."
+    };
+  }
+  await sleepMs(600);
+  if (!fillRes?.submitted) {
+    const clickRes = await sendMessageToTab(
+      tabId,
+      { type: "click_apply_action", preferredType: "submit" },
+      { attempts: 2 }
+    ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    if (!(clickRes?.clicked || clickRes?.isSubmit)) {
+      return {
+        ok: false,
+        detail: clickRes?.error || "Security code filled but Submit could not be clicked."
+      };
+    }
+  }
+  const confirmed = await waitForApplicationSuccess(tabId, 25000);
+  if (confirmed.success) {
+    return { ok: true, detail: confirmed.detail || "Your application has been received" };
+  }
+  if (confirmed.emailVerification) {
+    return {
+      ok: false,
+      detail: "Security code was entered but Greenhouse still asks for verification."
+    };
+  }
+  return {
+    ok: false,
+    detail: "Security code submitted but Greenhouse success screen was not detected."
+  };
 }
 
 async function waitForApplicationSuccess(tabId, timeoutMs = 25000) {
@@ -1790,6 +1970,15 @@ async function waitForApplicationSuccess(tabId, timeoutMs = 25000) {
       const probe = await getApplyActionFromTab(tabId);
       const detail = String(probe?.applicationSuccess || "").trim();
       if (detail) return { success: true, tabGone: false, detail, tabId };
+      if (probe?.emailVerification) {
+        return {
+          success: false,
+          tabGone: false,
+          emailVerification: true,
+          detail: probe.emailVerificationText || "Greenhouse security code verification",
+          tabId
+        };
+      }
     } catch {
       try {
         const [{ result } = {}] = await chrome.scripting.executeScript({
@@ -1848,6 +2037,34 @@ async function finishSubmittedApplication(
 ) {
   await waitForPageReady(tabId).catch(() => {});
   const waited = await waitForApplicationSuccess(tabId, 25000);
+  if (waited.emailVerification) {
+    await setStatus("Auto Apply: Greenhouse — security code required...");
+    const otp = await completeGreenhouseEmailVerification(tabId, {
+      afterEpochMs: Date.now() - 15_000
+    });
+    if (otp.ok) {
+      if (closeOnSuccess) {
+        await setStatus("Application submitted — closing application tabs...");
+        await closeApplyFlowTabs({
+          currentTabId: tabId,
+          originTabId: originTabId != null ? originTabId : tabId,
+          delayMs: 1000
+        });
+      }
+      return {
+        status: "submitted",
+        detail: otp.detail,
+        tabClosed: Boolean(closeOnSuccess),
+        tabId: closeOnSuccess ? null : tabId
+      };
+    }
+    return {
+      status: "needs_review",
+      detail: otp.detail,
+      tabClosed: false,
+      tabId
+    };
+  }
   const successTabId = waited.tabId || tabId;
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
@@ -1959,6 +2176,11 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         return { advanced: true, tabId: fresh.id, reason: "adopted_new_tab" };
       }
       if (isDiceProfileUrl(newUrl)) {
+        await chrome.tabs.remove(fresh.id).catch(() => {});
+        knownTabIds.add(fresh.id);
+        continue;
+      }
+      if (isUrlOnApplySite(prevUrl, "indeed") && !isUrlOnApplySite(newUrl, "indeed")) {
         await chrome.tabs.remove(fresh.id).catch(() => {});
         knownTabIds.add(fresh.id);
         continue;
@@ -2293,6 +2515,31 @@ async function runApplyImportedJobCore(
     };
   }
 
+  if (ea.status === "skipped") {
+    await setImportedJobStatus(importedJobId, {
+      status: "needs_review",
+      statusDetail: `${prefix}Auto Apply (${site}): skipped. ${ea.detail || ""}`.trim(),
+      profileId
+    });
+    await appendApplicationEvent({
+      profileId,
+      importedJobId,
+      jobTitle: jobMeta.jobTitle || "",
+      companyName: jobMeta.companyName || "",
+      jdLink: jobMeta.jdLink || url || "",
+      status: "needs_review",
+      source: site,
+      detail: ea.detail || "skipped"
+    });
+    await setStatus(`${prefix}Skipped: ${ea.detail || "external apply"}.`);
+    return {
+      ok: true,
+      status: "skipped",
+      detail: ea.detail || "skipped",
+      site
+    };
+  }
+
   if (ea.status === "submitted") {
     const sheetNote = await finalizeImportedJobAsApplied(importedJobId, {
       profileId,
@@ -2370,8 +2617,13 @@ async function startMultiStepApplyOnTab(
 
   let currentTabId = tab.id;
   const originTabId = tab.id;
-  const site = detectSiteFromUrl(tab.url);
-  const useNewTab = preferNewTab || site === "dice";
+  const initialSite = detectSiteFromUrl(tab.url);
+  let liveSite = initialSite;
+  const site = initialSite;
+  const siteLabel = applySiteLabel(initialSite);
+  const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
+  let stepBudget = stepBudgetInit;
+  const useNewTab = preferNewTab || initialSite === "dice";
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
   const summary = {
@@ -2392,9 +2644,21 @@ async function startMultiStepApplyOnTab(
   };
 
   let noAdvance = 0;
+  let workdayStepHint = "";
+  let greenhouseSubmitAt = 0;
 
-  for (let step = 0; step < maxSteps; step += 1) {
-    await setStatus(`Auto Apply: step ${step + 1}/${maxSteps} — checking page...`);
+  for (let step = 0; step < stepBudget; step += 1) {
+    const liveNow = await chrome.tabs.get(currentTabId).catch(() => null);
+    liveSite = detectSiteFromUrl(liveNow?.url || summary.tabUrl);
+    if (initialSite === "indeed" && liveNow?.url && !isUrlOnApplySite(liveNow.url, "indeed")) {
+      summary.status = "skipped";
+      summary.detail =
+        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+      summary.tabId = currentTabId;
+      return summary;
+    }
+    const stepLabel = workdayStepHint ? `${siteLabel} · ${workdayStepHint}` : siteLabel;
+    await setStatus(`Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — checking page...`);
     await ensureAutofillScript(currentTabId);
 
     let probe = await getApplyActionFromTab(currentTabId).catch(() => ({
@@ -2437,6 +2701,35 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
+    if (probe.workdayWizard) {
+      workdayStepHint = probe.workdayWizard.current || workdayStepHint;
+      const detected = Number(probe.workdayWizard.stepCount || 0);
+      if (detected > 0) {
+        const adaptive = Math.min(22, Math.max(detected + 5, 8));
+        if (adaptive < stepBudget) stepBudget = adaptive;
+      }
+    }
+
+    if (probe.emailVerification && liveSite === "greenhouse") {
+      const otp = await completeGreenhouseEmailVerification(currentTabId, {
+        afterEpochMs: greenhouseSubmitAt || Date.now() - 15_000
+      });
+      if (otp.ok) {
+        if (closeOnSuccess) {
+          await setStatus("Application submitted — closing application tabs...");
+          await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+        }
+        summary.status = "submitted";
+        summary.detail = otp.detail;
+        summary.tabId = closeOnSuccess ? null : currentTabId;
+        return summary;
+      }
+      summary.status = "needs_review";
+      summary.detail = otp.detail;
+      summary.tabId = currentTabId;
+      return summary;
+    }
+
     // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel / profile).
     if (!probe.anyForm) {
       const live = await chrome.tabs.get(currentTabId).catch(() => null);
@@ -2453,6 +2746,13 @@ async function startMultiStepApplyOnTab(
           { type: "click_apply_action", preferredType: "entry", preferNewTab: useNewTab },
           { attempts: 2, frameId: probe.best.frameId }
         );
+        if (clickRes?.externalRedirect) {
+          summary.status = "skipped";
+          summary.detail =
+            "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+          summary.tabId = currentTabId;
+          return summary;
+        }
         if (clickRes?.navigateUrl && isDiceProfileUrl(clickRes.navigateUrl)) {
           summary.status = "needs_review";
           summary.detail =
@@ -2542,8 +2842,8 @@ async function startMultiStepApplyOnTab(
 
     await setStatus(
       loc.summary
-        ? `Auto Apply: step ${step + 1}/${maxSteps} — uploading ${loc.summary}...`
-        : `Auto Apply: step ${step + 1}/${maxSteps} — filling form...`
+        ? `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — uploading ${loc.summary}...`
+        : `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — filling form...`
     );
     const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
     if (fillRes?.skipped && step === 0) {
@@ -2634,17 +2934,22 @@ async function startMultiStepApplyOnTab(
     }
 
     // Dice last page: Submit may appear a beat after fill. Keep polling briefly
-    // instead of stopping with "ready for review".
+    // instead of stopping with "ready for review". Workday Review prefers Submit.
     if (
       (!probe.best || probe.best.action?.type !== "submit") &&
-      site === "dice" &&
+      (site === "dice" || liveSite === "workday") &&
       probe.anyForm
     ) {
-      await setStatus("Auto Apply: waiting for Submit on the last page...");
+      await setStatus(
+        liveSite === "workday"
+          ? "Auto Apply: waiting for Submit on the Workday Review step..."
+          : "Auto Apply: waiting for Submit on the last page..."
+      );
       for (let i = 0; i < 8; i += 1) {
-        await sleepMs(400);
+        await sleepMs(liveSite === "workday" ? 450 + 100 * i : 400);
         probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
         if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
+        if (liveSite === "workday" && probe.best && !probe.workdayWizard?.isReview) break;
       }
     }
 
@@ -2657,12 +2962,20 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.best.action.type === "submit") {
+      greenhouseSubmitAt = Date.now();
       const clickLabel = probe.best.action.text || "Submit";
       const clickRes = await clickSubmitOnTab(currentTabId, {
         frameId: probe.best.frameId,
         clickLabel,
-        settleMs: site === "dice" ? 1000 : 400
+        settleMs: site === "dice" ? 1000 : liveSite === "workday" ? 800 : 400
       });
+      if (clickRes?.externalRedirect) {
+        summary.status = "skipped";
+        summary.detail =
+          "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+        summary.tabId = currentTabId;
+        return summary;
+      }
       if (clickRes?.navigateUrl) {
         await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
       }
@@ -2711,6 +3024,14 @@ async function startMultiStepApplyOnTab(
       }
     }
 
+    if (clickRes?.externalRedirect) {
+      summary.status = "skipped";
+      summary.detail =
+        "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+      summary.tabId = currentTabId;
+      return summary;
+    }
+
     if (clickRes?.isSubmit) {
       const finished = await finishSubmittedApplication(currentTabId, {
         closeOnSuccess,
@@ -2746,6 +3067,13 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
+    if (initialSite === "indeed" && summary.tabUrl && !isUrlOnApplySite(summary.tabUrl, "indeed")) {
+      summary.status = "skipped";
+      summary.detail =
+        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+      return summary;
+    }
+
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
     if (afterAdvance?.applicationSuccess) {
       if (closeOnSuccess) {
@@ -2755,6 +3083,32 @@ async function startMultiStepApplyOnTab(
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;
       summary.tabId = closeOnSuccess ? null : currentTabId;
+      return summary;
+    }
+
+    if (afterAdvance?.emailVerification && detectSiteFromUrl(summary.tabUrl) === "greenhouse") {
+      const otp = await completeGreenhouseEmailVerification(currentTabId, {
+        afterEpochMs: greenhouseSubmitAt || Date.now() - 15_000
+      });
+      if (otp.ok) {
+        if (closeOnSuccess) {
+          await setStatus("Application submitted — closing application tabs...");
+          await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+        }
+        summary.status = "submitted";
+        summary.detail = otp.detail;
+        summary.tabId = closeOnSuccess ? null : currentTabId;
+        return summary;
+      }
+      summary.status = "needs_review";
+      summary.detail = otp.detail;
+      return summary;
+    }
+
+    if (initialSite === "indeed" && summary.tabUrl && !isUrlOnApplySite(summary.tabUrl, "indeed")) {
+      summary.status = "skipped";
+      summary.detail =
+        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
       return summary;
     }
 

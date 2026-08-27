@@ -183,6 +183,9 @@ function inferSourceFromUrl(url, explicit) {
   if (raw.includes("jobright.ai")) return "jobright";
   if (raw.includes("dice.com")) return "dice";
   if (raw.includes("linkedin.com")) return "linkedin";
+  if (raw.includes("greenhouse.io")) return "greenhouse";
+  if (raw.includes("myworkdayjobs.com") || raw.includes("workdayjobs.com")) return "workday";
+  if (raw.includes("indeed.com")) return "indeed";
   return "sheet";
 }
 
@@ -196,6 +199,18 @@ export function isDiceSource(source) {
 
 export function isJobrightSource(source) {
   return String(source || "").trim().toLowerCase() === "jobright";
+}
+
+export function isGreenhouseSource(source) {
+  return String(source || "").trim().toLowerCase() === "greenhouse";
+}
+
+export function isWorkdaySource(source) {
+  return String(source || "").trim().toLowerCase() === "workday";
+}
+
+export function isIndeedSource(source) {
+  return String(source || "").trim().toLowerCase() === "indeed";
 }
 
 function buildJdText({ description, keySkills, prependKeySkills }) {
