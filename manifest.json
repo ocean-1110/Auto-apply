@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Ocean",
   "description": "Ocean — Auto Application App. Generate tailored resumes and cover letters, then autofill job applications.",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "debugger", "notifications", "alarms", "sidePanel"],
   "host_permissions": [
     "https://api.openai.com/*",
@@ -29,6 +29,10 @@
         "https://*.dice.com/*",
         "https://jobright.ai/*",
         "https://*.jobright.ai/*",
+        "https://hiringcafe.com/*",
+        "https://*.hiringcafe.com/*",
+        "https://hiring.cafe/*",
+        "https://*.hiring.cafe/*",
         "https://*.myworkdayjobs.com/*",
         "https://*.wd1.myworkdayjobs.com/*",
         "https://*.wd5.myworkdayjobs.com/*",
@@ -39,7 +43,16 @@
         "https://*.bamboohr.com/*",
         "https://*.ashbyhq.com/*"
       ],
-      "js": ["content/autofill.js"],
+      "js": [
+        "content/scrapers/shared.js",
+        "content/scrapers/schema.js",
+        "content/scrapers/jobright.js",
+        "content/scrapers/dice.js",
+        "content/scrapers/greenhouse.js",
+        "content/scrapers/hiringcafe.js",
+        "content/scrapers/runner.js",
+        "content/autofill.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }

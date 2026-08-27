@@ -184,6 +184,7 @@ function inferSourceFromUrl(url, explicit) {
   if (raw.includes("dice.com")) return "dice";
   if (raw.includes("linkedin.com")) return "linkedin";
   if (raw.includes("greenhouse.io")) return "greenhouse";
+  if (raw.includes("hiringcafe.com") || raw.includes("hiring.cafe")) return "hiringcafe";
   if (raw.includes("myworkdayjobs.com") || raw.includes("workdayjobs.com")) return "workday";
   if (raw.includes("indeed.com")) return "indeed";
   return "sheet";

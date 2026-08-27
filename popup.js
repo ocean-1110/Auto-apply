@@ -64,6 +64,8 @@ const aiQaSectionEl = document.getElementById("aiQaSection");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const pasteJdBtn = document.getElementById("pasteJd");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
+const scrapeSiteSelectEl = document.getElementById("scrapeSiteSelect");
+const SCRAPE_SITE_KEY = "selected_scrape_site";
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const previewModeToggleEl = document.getElementById("previewModeToggle");
 const sidebarModeToggleEl = document.getElementById("sidebarModeToggle");
@@ -1637,7 +1639,8 @@ async function loadSettings() {
     "generate_resume_only",
     "preview_mode_enabled",
     "ui_panel_mode",
-    "last_ats_report"
+    "last_ats_report",
+    "selected_scrape_site"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -1663,6 +1666,8 @@ async function loadSettings() {
     // Default unchecked (false) — only check when user previously enabled it.
     resumeOnlyToggleEl.checked = data.generate_resume_only === true;
   }
+  fillScrapeSiteSelect(data.selected_scrape_site || "auto");
+  refreshScrapeSiteHint().catch(() => {});
   updateGenerateButtonLabel();
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
   refreshQaBank().catch(() => {});
@@ -1751,12 +1756,47 @@ async function startGenerationAndWait() {
   return { ok: true, status: statusText };
 }
 
+function scrapeSiteCatalog() {
+  return (
+    globalThis.OceanScrapeCatalog?.SCRAPE_SITES || [{ id: "auto", label: "Auto-detect from this page" }]
+  );
+}
+
+function fillScrapeSiteSelect(selectedId = "auto") {
+  if (!scrapeSiteSelectEl) return;
+  const sites = scrapeSiteCatalog();
+  scrapeSiteSelectEl.innerHTML = "";
+  for (const site of sites) {
+    const opt = document.createElement("option");
+    opt.value = site.id;
+    opt.textContent = site.label;
+    scrapeSiteSelectEl.appendChild(opt);
+  }
+  const valid = sites.some((s) => s.id === selectedId);
+  scrapeSiteSelectEl.value = valid ? selectedId : "auto";
+}
+
+async function refreshScrapeSiteHint() {
+  const autoOpt = scrapeSiteSelectEl?.querySelector('option[value="auto"]');
+  if (!autoOpt) return;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const detected = globalThis.OceanScrapeCatalog?.detectScrapeSite(tab?.url || "") || "auto";
+    const label = scrapeSiteCatalog().find((s) => s.id === detected)?.label;
+    autoOpt.textContent =
+      detected !== "auto" && label ? `Auto-detect (${label})` : "Auto-detect from this page";
+  } catch {
+    autoOpt.textContent = "Auto-detect from this page";
+  }
+}
+
 async function scrapeCurrentJobPage() {
   setStatus("Scraping the open job page...", "running");
   setBusy(true);
   if (scrapePageBtn) scrapePageBtn.disabled = true;
   try {
-    const res = await chrome.runtime.sendMessage({ type: "scrape_current_page" });
+    const siteId = scrapeSiteSelectEl?.value || "auto";
+    const res = await chrome.runtime.sendMessage({ type: "scrape_current_page", siteId });
     if (!res?.ok) {
       throw new Error(res?.error || "Could not scrape this page.");
     }
@@ -2370,6 +2410,10 @@ selectOutputDirBtn.addEventListener("click", () => {
 pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
 scrapePageBtn?.addEventListener("click", () => {
   scrapeCurrentJobPage().catch((err) => setStatus(String(err.message || err)));
+});
+scrapeSiteSelectEl?.addEventListener("change", () => {
+  const siteId = scrapeSiteSelectEl.value || "auto";
+  chrome.storage.local.set({ [SCRAPE_SITE_KEY]: siteId }).catch(() => {});
 });
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);

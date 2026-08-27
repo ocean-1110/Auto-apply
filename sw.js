@@ -59,7 +59,8 @@ import {
   applySiteFromUrl,
   applySiteLabel,
   isUrlOnApplySite,
-  stepBudgetForSite
+  stepBudgetForSite,
+  isAutoSubmitAllowedSite
 } from "./ats/adapters.js";
 import {
   ensureCostSession,
@@ -673,7 +674,17 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-26.greenhouse-workday-indeed.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-27.hiringcafe-scrape.1";
+const AUTOFILL_CONTENT_FILES = [
+  "content/scrapers/shared.js",
+  "content/scrapers/schema.js",
+  "content/scrapers/jobright.js",
+  "content/scrapers/dice.js",
+  "content/scrapers/greenhouse.js",
+  "content/scrapers/hiringcafe.js",
+  "content/scrapers/runner.js",
+  "content/autofill.js"
+];
 const AUTOFILL_READY_SUBMIT_URL_KEY = "autofill_ready_submit_url";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
@@ -743,7 +754,7 @@ async function ensureAutofillScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ["content/autofill.js"]
+      files: AUTOFILL_CONTENT_FILES
     });
     return;
   } catch {
@@ -757,7 +768,7 @@ async function ensureAutofillScript(tabId) {
   }
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["content/autofill.js"]
+    files: AUTOFILL_CONTENT_FILES
   });
 }
 
@@ -1159,6 +1170,15 @@ async function isReadyToSubmit(url) {
   return normalizeUrlForMatch(saved) === normalizeUrlForMatch(url);
 }
 
+async function pauseAtSubmitForReview(tabId, summary, clickLabel = "Submit") {
+  const live = await chrome.tabs.get(tabId).catch(() => null);
+  await markReadyToSubmit(live?.url || summary.tabUrl || "");
+  summary.status = "ready_for_review";
+  summary.detail = `Filled the form. Review the fields, then click ${clickLabel} in Ocean to send. The application tab was left open.`;
+  summary.tabId = tabId;
+  return summary;
+}
+
 /**
  * Autofill the currently open application page using the selected profile's answers.
  * Also injects last generated resume / cover letter PDFs into matching file inputs.
@@ -1435,12 +1455,18 @@ async function runAutofillStep(
       { type: "click_apply_action", preferredType: "submit" },
       { attempts: 2, frameId: liveProbe?.best?.frameId }
     ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
+    if (!(clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit)) {
+      return {
+        ok: false,
+        error: clickRes?.error || "Could not click Submit. The application tab was left open."
+      };
+    }
     if (clickRes?.navigateUrl) {
       await navigateTabToUrl(tabId, clickRes.navigateUrl);
     }
     await clearReadyToSubmit();
     const finished = await finishSubmittedApplication(tabId, {
-      closeOnSuccess: false,
+      closeOnSuccess: true,
       clickLabel: liveProbe?.best?.action?.text || "Submit"
     });
     return {
@@ -1657,7 +1683,7 @@ function isDiceProfileUrl(url) {
   }
 }
 
-/** Close every Dice tab sitting on /wizard/success (or equivalent). */
+/** Close Dice tabs sitting on /wizard/success (or equivalent). */
 async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
   if (delayMs > 0) await sleepMs(delayMs);
   const tabs = await chrome.tabs.query({});
@@ -1665,6 +1691,7 @@ async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
   for (const t of tabs) {
     if (t.id == null) continue;
     const href = t.url || t.pendingUrl || "";
+    if (!/(^|\.)dice\.com$/i.test(hostnameFromUrl(href))) continue;
     if (!applicationSuccessFromUrl(href)) continue;
     await closeTabQuietly(t.id);
     closed += 1;
@@ -2029,7 +2056,9 @@ async function closeApplyFlowTabs({
 }
 
 /**
- * After Submit is clicked, wait for the ATS confirmation page, then optionally close it.
+ * After Submit is clicked, wait for the ATS confirmation page, then close
+ * only if confirmation is visible (or the tab closed itself). Never close on
+ * a timeout — that was dropping applications before the user could finish.
  */
 async function finishSubmittedApplication(
   tabId,
@@ -2084,12 +2113,8 @@ async function finishSubmittedApplication(
     };
   }
   if (waited.tabGone) {
-    if (closeOnSuccess) {
-      await closeApplyFlowTabs({
-        currentTabId: null,
-        originTabId,
-        delayMs: 0
-      });
+    if (closeOnSuccess && originTabId != null && originTabId !== tabId) {
+      await closeTabQuietly(originTabId);
     }
     return {
       status: "submitted",
@@ -2098,14 +2123,12 @@ async function finishSubmittedApplication(
       tabId: null
     };
   }
-  // Even if DOM probe missed it, close any success URL tabs we can see.
   if (closeOnSuccess) {
     const closed = await closeAllDiceSuccessTabs({ delayMs: 1000 });
-    if (originTabId != null) await closeTabQuietly(originTabId);
-    if (closed > 0 || originTabId != null) {
+    if (closed > 0) {
       return {
         status: "submitted",
-        detail: `Clicked ${clickLabel}. Closed Dice application tabs.`,
+        detail: `Clicked ${clickLabel}. Closed Dice confirmation tabs.`,
         tabClosed: true,
         tabId: null
       };
@@ -2113,7 +2136,7 @@ async function finishSubmittedApplication(
   }
   return {
     status: "needs_review",
-    detail: `Clicked ${clickLabel}, but the confirmation page did not appear. Review and confirm.`,
+    detail: `Clicked ${clickLabel}, but the confirmation page did not appear. The tab was left open so you can finish.`,
     tabClosed: false,
     tabId
   };
@@ -2595,8 +2618,9 @@ async function runApplyImportedJobCore(
 
 /**
  * Universal multi-step Auto Apply: fill → Next if no Submit →
- * wait for next page/tab → refill. On the last page, clicks Submit,
- * waits for the confirmation URL/page, then optionally closes the tab.
+ * wait for next page/tab → refill. Dice clicks Submit and closes after
+ * confirmation. Other ATS stop on the Submit page so you can review, then
+ * click Submit in Ocean — the tab is never closed on a timeout.
  */
 async function startMultiStepApplyOnTab(
   profileId,
@@ -2624,6 +2648,7 @@ async function startMultiStepApplyOnTab(
   const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
   let stepBudget = stepBudgetInit;
   const useNewTab = preferNewTab || initialSite === "dice";
+  const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
   const summary = {
@@ -2646,6 +2671,7 @@ async function startMultiStepApplyOnTab(
   let noAdvance = 0;
   let workdayStepHint = "";
   let greenhouseSubmitAt = 0;
+  let didClickSubmit = false;
 
   for (let step = 0; step < stepBudget; step += 1) {
     const liveNow = await chrome.tabs.get(currentTabId).catch(() => null);
@@ -2672,25 +2698,25 @@ async function startMultiStepApplyOnTab(
       href: ""
     }));
 
-    if (probe.applicationSuccess) {
-      if (closeOnSuccess) {
+    if (probe.applicationSuccess && (didClickSubmit || site === "dice")) {
+      if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = closeOnSuccess ? null : currentTabId;
+      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
       return summary;
     }
 
     if (probe.alreadyApplied) {
-      if (closeOnSuccess) {
+      if (closeOnSuccess && site === "dice") {
         await closeTabQuietly(currentTabId);
         if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
       }
       summary.status = "already_applied";
       summary.detail = probe.alreadyApplied;
-      summary.tabId = closeOnSuccess ? null : currentTabId;
+      summary.tabId = closeOnSuccess && site === "dice" ? null : currentTabId;
       return summary;
     }
 
@@ -2715,14 +2741,17 @@ async function startMultiStepApplyOnTab(
         afterEpochMs: greenhouseSubmitAt || Date.now() - 15_000
       });
       if (otp.ok) {
-        if (closeOnSuccess) {
-          await setStatus("Application submitted — closing application tabs...");
-          await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+        if (didClickSubmit) {
+          if (closeOnSuccess) {
+            await setStatus("Application submitted — closing application tabs...");
+            await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+          }
+          summary.status = "submitted";
+          summary.detail = otp.detail;
+          summary.tabId = closeOnSuccess ? null : currentTabId;
+          return summary;
         }
-        summary.status = "submitted";
-        summary.detail = otp.detail;
-        summary.tabId = closeOnSuccess ? null : currentTabId;
-        return summary;
+        continue;
       }
       summary.status = "needs_review";
       summary.detail = otp.detail;
@@ -2877,7 +2906,8 @@ async function startMultiStepApplyOnTab(
 
     // Do not click Next while the step still has empty fields or an in-flight upload
     // (Dice shows "Leave site?" and can bounce to profile/settings).
-    // Skip this when Submit is already on the page — final step should auto-submit.
+    // Skip this when Submit is already on the page — Dice will auto-submit;
+    // other ATS pause so you can review and click Submit in Ocean.
     if (
       (probe.uploadsBusy || probe.needsFill) &&
       probe.best?.action?.type !== "submit"
@@ -2915,14 +2945,14 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    if (probe.applicationSuccess) {
-      if (closeOnSuccess) {
+    if (probe.applicationSuccess && (didClickSubmit || site === "dice")) {
+      if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = closeOnSuccess ? null : currentTabId;
+      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
       return summary;
     }
 
@@ -2962,8 +2992,12 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.best.action.type === "submit") {
-      greenhouseSubmitAt = Date.now();
       const clickLabel = probe.best.action.text || "Submit";
+      if (!autoClickSubmit) {
+        return pauseAtSubmitForReview(currentTabId, summary, clickLabel);
+      }
+      didClickSubmit = true;
+      greenhouseSubmitAt = Date.now();
       const clickRes = await clickSubmitOnTab(currentTabId, {
         frameId: probe.best.frameId,
         clickLabel,
@@ -2973,6 +3007,16 @@ async function startMultiStepApplyOnTab(
         summary.status = "skipped";
         summary.detail =
           "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+        summary.tabId = currentTabId;
+        return summary;
+      }
+      if (!(clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit)) {
+        await markReadyToSubmit(
+          (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || ""
+        );
+        summary.status = "needs_review";
+        summary.detail =
+          "Could not click Submit. The application tab was left open so you can finish.";
         summary.tabId = currentTabId;
         return summary;
       }
@@ -3033,8 +3077,10 @@ async function startMultiStepApplyOnTab(
     }
 
     if (clickRes?.isSubmit) {
+      didClickSubmit = true;
+      greenhouseSubmitAt = Date.now();
       const finished = await finishSubmittedApplication(currentTabId, {
-        closeOnSuccess,
+        closeOnSuccess: autoClickSubmit && closeOnSuccess,
         clickLabel: probe.best.action.text || "Submit",
         originTabId
       });
@@ -3075,14 +3121,14 @@ async function startMultiStepApplyOnTab(
     }
 
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
-    if (afterAdvance?.applicationSuccess) {
-      if (closeOnSuccess) {
+    if (afterAdvance?.applicationSuccess && (didClickSubmit || site === "dice")) {
+      if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;
-      summary.tabId = closeOnSuccess ? null : currentTabId;
+      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
       return summary;
     }
 
@@ -3091,14 +3137,17 @@ async function startMultiStepApplyOnTab(
         afterEpochMs: greenhouseSubmitAt || Date.now() - 15_000
       });
       if (otp.ok) {
-        if (closeOnSuccess) {
-          await setStatus("Application submitted — closing application tabs...");
-          await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+        if (didClickSubmit) {
+          if (closeOnSuccess) {
+            await setStatus("Application submitted — closing application tabs...");
+            await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+          }
+          summary.status = "submitted";
+          summary.detail = otp.detail;
+          summary.tabId = closeOnSuccess ? null : currentTabId;
+          return summary;
         }
-        summary.status = "submitted";
-        summary.detail = otp.detail;
-        summary.tabId = closeOnSuccess ? null : currentTabId;
-        return summary;
+        continue;
       }
       summary.status = "needs_review";
       summary.detail = otp.detail;
@@ -4536,7 +4585,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await ensureAutofillScript(tab.id);
         const res = await sendMessageToTab(
           tab.id,
-          { type: "scrape_job_page" },
+          { type: "ocean_scrape_page", siteId: message.siteId || "auto" },
           { attempts: 3 }
         );
 

@@ -183,6 +183,15 @@
             ></textarea>
           </label>
 
+          <label class="field">
+            <span>Job site</span>
+            <select id="scrapeSiteSelect" title="Which extractor to use when scraping the open tab"></select>
+          </label>
+          <p class="hint">
+            Auto-detect uses the current tab. Pick a site to force that extractor
+            (HiringCafe: open the job details sidebar first).
+          </p>
+
           <div class="row row-2">
             <button type="button" id="scrapePageBtn" title="Alt+Shift+S — Scrape open job, generate, then Autofill">
               Scrape open job page
@@ -234,7 +243,7 @@
               <button
                 type="button"
                 id="autofillBtn"
-                title="Alt+Shift+E — Fill this step first. On a one-page form the button becomes Submit so you can send it."
+                title="Alt+Shift+E — Fill this step. On Greenhouse/Workday/Indeed the button becomes Submit so you can review, then send."
               >
                 Autofill
                 <kbd class="shortcut-hint">Alt+Shift+E</kbd>
@@ -348,6 +357,7 @@
       <iframe id="subpageFrame" class="subpage-frame" title="Ocean page"></iframe>
     </div>
 
+    <script src="content/scrapers/catalog.js"></script>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

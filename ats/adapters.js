@@ -28,14 +28,14 @@ export const ATS_ADAPTERS = [
     id: "indeed",
     label: "Indeed",
     hostPatterns: [/(^|\.)indeed\.com$/i],
-    autoSubmitAllowed: true,
+    autoSubmitAllowed: false,
     stepBudget: 12
   },
   {
     id: "workday",
     label: "Workday",
     hostPatterns: [/(^|\.)myworkdayjobs\.com$/i, /(^|\.)workdayjobs\.com$/i],
-    autoSubmitAllowed: true,
+    autoSubmitAllowed: false,
     isEmployerAts: true,
     stepBudget: 16
   },
@@ -43,8 +43,7 @@ export const ATS_ADAPTERS = [
     id: "greenhouse",
     label: "Greenhouse",
     hostPatterns: [/(^|\.)greenhouse\.io$/i],
-    autoSubmitAllowed: true,
-    alwaysAutoSubmit: true,
+    autoSubmitAllowed: false,
     isEmployerAts: true,
     stepBudget: 18,
     emailOtp: true
@@ -104,6 +103,8 @@ export function isAutoSubmitAllowedSite(site) {
 
 /**
  * Resolve whether this apply run should click Submit.
+ * Dice auto-clicks Submit. Other ATS stop on the Submit page so you can
+ * review the filled fields, then click Submit in the Ocean panel.
  * @param {string} site
  * @param {boolean} autoSubmitCaller
  */
