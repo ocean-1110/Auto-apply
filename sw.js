@@ -667,7 +667,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-26.dice-apply-not-profile.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-26.dice-skip-applied.1";
 const AUTOFILL_READY_SUBMIT_URL_KEY = "autofill_ready_submit_url";
 
 /** Signal open panels that the Q&A bank changed so they can re-render. */
@@ -1718,6 +1718,8 @@ function pickBestApplyAction(frameResults = []) {
     frameResults.find((f) => f?.blockedReason)?.blockedReason || "";
   const jobUnavailable =
     frameResults.find((f) => f?.jobUnavailable)?.jobUnavailable || "";
+  const alreadyApplied =
+    frameResults.find((f) => f?.alreadyApplied)?.alreadyApplied || "";
   const applicationSuccess =
     frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess ||
     applicationSuccessFromUrl(best?.href || frameResults[0]?.href || "") ||
@@ -1733,6 +1735,7 @@ function pickBestApplyAction(frameResults = []) {
     anyForm,
     blockedReason,
     jobUnavailable,
+    alreadyApplied,
     applicationSuccess,
     applyUrls,
     needsFill: frameResults.some((f) => f?.needsFill),
@@ -2079,6 +2082,271 @@ async function finalizeImportedJobAsApplied(importedJobId, {
 }
 
 /**
+ * Open a job URL, ensure resume PDFs, run Auto Apply, and mark status.
+ * Used by single Apply and Batch Apply.
+ */
+async function runApplyImportedJobCore(
+  importedJobId,
+  profileId,
+  jobMeta = {},
+  { allowGenerate = true, progressLabel = "" } = {}
+) {
+  const prefix = progressLabel ? `${progressLabel}: ` : "";
+  await setStatus(`${prefix}Opening job URL...`);
+  await setImportedJobStatus(importedJobId, {
+    status: "opening",
+    statusDetail: `${prefix}Opening job URL...`,
+    markAttempt: true,
+    profileId
+  });
+
+  const url = String(jobMeta.jdLink || "").trim();
+  if (!url) {
+    throw new Error("Missing job URL (jdLink).");
+  }
+
+  let tabId;
+  const existingTab = await findTabByUrl(url);
+  if (existingTab?.id != null) {
+    tabId = existingTab.id;
+    await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+    if (existingTab.windowId != null) {
+      await chrome.windows.update(existingTab.windowId, { focused: true }).catch(() => {});
+    }
+    await waitForPageReady(tabId);
+  } else {
+    const tab = await chrome.tabs.create({ url, active: true });
+    tabId = tab?.id;
+    if (!tabId) throw new Error("Failed to open browser tab.");
+    await waitForPageReady(tabId);
+  }
+
+  try {
+    await ensureAutofillScript(tabId);
+    const availProbe = await sendMessageToTab(
+      tabId,
+      { type: "probe_application_form" },
+      { attempts: 2 }
+    );
+    if (availProbe?.jobUnavailable) {
+      await removeImportedJobFromStorage(importedJobId);
+      await setStatus(`${prefix}Job closed — removed from list: ${availProbe.jobUnavailable}`);
+      return { ok: true, status: "unavailable", detail: availProbe.jobUnavailable, site: "" };
+    }
+    if (availProbe?.alreadyApplied) {
+      const site = detectSiteFromUrl(url);
+      await finalizeImportedJobAsApplied(importedJobId, {
+        profileId,
+        jobMeta,
+        site,
+        detail: availProbe.alreadyApplied
+      });
+      await closeTabQuietly(tabId);
+      await setStatus(`${prefix}Already applied — skipped.`);
+      return {
+        ok: true,
+        status: "already_applied",
+        detail: availProbe.alreadyApplied,
+        site
+      };
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  await chrome.storage.local.set({
+    selected_profile_id: profileId,
+    selected_template_id: jobMeta.templateId || DEFAULT_TEMPLATE_ID,
+    last_job_title: jobMeta.jobTitle || "",
+    last_company_name: jobMeta.companyName || "",
+    last_jd_link: jobMeta.jdLink || "",
+    last_jd_text: jobMeta.jdText || "",
+    spreadsheet_url: jobMeta.spreadsheetUrl || "",
+    sheets_sheet_name: jobMeta.sheetName || "",
+    sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
+  });
+
+  const liveJob = (await getImportedJobsById())[importedJobId];
+  let uploadDocs = await ensureUploadDocsForImportedJob(importedJobId, liveJob);
+
+  if (uploadDocs?.resume?.base64 || uploadDocs?.coverLetter?.base64) {
+    const resumeName = uploadDocs.resume?.fileName || "resume";
+    const coverName = uploadDocs.coverLetter?.fileName
+      ? ` + ${uploadDocs.coverLetter.fileName}`
+      : "";
+    await setStatus(`${prefix}Using saved files: ${resumeName}${coverName}`);
+    await setImportedJobStatus(importedJobId, {
+      status: "opening_form",
+      statusDetail: `${prefix}Resume ready — opening application form...`
+    });
+  } else if (extractFolderNameFromSaveMeta(liveJob?.resumeFolder || "")) {
+    throw new Error(
+      "A resume was generated for this job, but the saved PDFs could not be loaded from the output folder. Click in the extension panel to unlock the folder, then Apply again."
+    );
+  } else if (!allowGenerate) {
+    throw new Error("No resume ready for this job. Run Batch resume build first, then Batch Apply.");
+  } else {
+    const resumeOnlyStored =
+      (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
+    const trackStored =
+      (await chrome.storage.local.get("track_application_status")).track_application_status === true;
+    const genMeta = {
+      ...jobMeta,
+      resumeOnly: resumeOnlyStored,
+      trackApplicationStatus: jobMeta.trackApplicationStatus === true || trackStored,
+      importedJobId,
+      previewMode: false
+    };
+    await setImportedJobStatus(importedJobId, {
+      status: "generating",
+      statusDetail: resumeOnlyStored
+        ? `${prefix}Generating resume only...`
+        : `${prefix}Generating resume & cover letter...`
+    });
+    await setStatus(`${prefix}Generating resume...`);
+    const saved = await runGenerationPipeline({ profileId, jobMeta: genMeta });
+    uploadDocs = saved?.docs || (await getGeneratedDocsForJob(importedJobId));
+    await setImportedJobStatus(importedJobId, {
+      status: "opening_form",
+      statusDetail: `${prefix}Waiting for the job page, then Auto Apply...`,
+      patch: {
+        hasGeneratedResume: true,
+        resumeFolder: saved?.folderName || "",
+        resumeFileName: saved?.resumeFileName || "",
+        coverLetterFileName: saved?.coverLetterFileName || ""
+      }
+    });
+  }
+
+  const liveTab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!liveTab?.id) {
+    throw new Error("The job tab was closed before Auto Apply could start.");
+  }
+  tabId = liveTab.id;
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+  await waitForPageReady(tabId);
+  const site = detectSiteFromUrl(liveTab.url || url);
+
+  try {
+    await ensureAutofillScript(tabId);
+    const probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
+    if (probe?.jobUnavailable) {
+      await removeImportedJobFromStorage(importedJobId);
+      await setStatus(`${prefix}Job closed — removed from list: ${probe.jobUnavailable}`);
+      return { ok: true, status: "unavailable", detail: probe.jobUnavailable, site };
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  uploadDocs =
+    (await ensureUploadDocsForImportedJob(
+      importedJobId,
+      (await getImportedJobsById())[importedJobId]
+    )) || uploadDocs;
+  if (!uploadDocs?.resume?.base64 && !uploadDocs?.coverLetter?.base64) {
+    throw new Error(
+      "No resume/cover letter PDFs are ready for this job. Generate a resume first, then Apply."
+    );
+  }
+
+  const loc = await formatUploadDocsLocation(uploadDocs);
+  await setImportedJobStatus(importedJobId, {
+    status: "filling",
+    statusDetail: loc.summary
+      ? `${prefix}Uploading ${loc.summary} and filling the form (${site})...`
+      : `${prefix}Running Auto Apply (${site})...`
+  });
+  await setStatus(
+    loc.summary
+      ? `${prefix}Uploading from ${loc.summary} onto ${site}...`
+      : `${prefix}Running Auto Apply (${site})...`
+  );
+
+  const ea = await startMultiStepApplyOnTab(profileId, tabId, {
+    maxSteps: 14,
+    uploadDocs,
+    closeOnSuccess: true,
+    preferNewTab: site === "dice"
+  });
+  if (!ea.ok && ea.error) throw new Error(ea.error);
+
+  if (ea.status === "unavailable") {
+    await removeImportedJobFromStorage(importedJobId);
+    await setStatus(`${prefix}Job closed — removed from list: ${ea.detail || "unavailable"}`);
+    return { ok: true, status: "unavailable", detail: ea.detail || "unavailable", site };
+  }
+
+  if (ea.status === "already_applied") {
+    await finalizeImportedJobAsApplied(importedJobId, {
+      profileId,
+      jobMeta,
+      site,
+      detail: ea.detail || "Already applied on Dice."
+    });
+    await setStatus(`${prefix}Already applied — skipped.`);
+    return {
+      ok: true,
+      status: "already_applied",
+      detail: ea.detail || "Already applied on Dice.",
+      site
+    };
+  }
+
+  if (ea.status === "submitted") {
+    const sheetNote = await finalizeImportedJobAsApplied(importedJobId, {
+      profileId,
+      jobMeta,
+      site,
+      detail:
+        `Auto Apply (${site}): submitted. ` +
+        `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}. ` +
+        `${ea.detail || ""}`.trim()
+    });
+    await setStatus(
+      `${prefix}Applied — tabs closed.${sheetNote} ${await getCostSummaryText()}`.trim()
+    );
+    return {
+      ok: true,
+      status: "submitted",
+      detail: ea.detail || "submitted",
+      site,
+      sheetNote,
+      steps: ea.steps || 0
+    };
+  }
+
+  const nextStatus = ea.status === "needs_review" ? "needs_review" : "ready_for_review";
+  await setImportedJobStatus(importedJobId, {
+    status: nextStatus,
+    statusDetail:
+      `${prefix}Auto Apply (${site}): ${ea.status || "done"}. ` +
+      `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
+      `bank ${ea.bankHits || 0}, AI ${ea.aiFilled || 0}, choices ${ea.choiceFilled || 0}. ` +
+      `${ea.detail || ""} ${(await getCostSummaryText())}`.trim(),
+    profileId
+  });
+  await appendApplicationEvent({
+    profileId,
+    importedJobId,
+    jobTitle: jobMeta.jobTitle || "",
+    companyName: jobMeta.companyName || "",
+    jdLink: jobMeta.jdLink || url || "",
+    status: nextStatus,
+    source: site,
+    detail: ea.detail || ""
+  });
+  await setStatus(`${prefix}Auto Apply: ${ea.status || "done"}. ${await getCostSummaryText()}`);
+  return {
+    ok: true,
+    status: nextStatus,
+    detail: ea.detail || ea.status || "done",
+    site,
+    steps: ea.steps || 0
+  };
+}
+
+/**
  * Universal multi-step Auto Apply: fill → Next if no Submit →
  * wait for next page/tab → refill. On the last page, clicks Submit,
  * waits for the confirmation URL/page, then optionally closes the tab.
@@ -2147,6 +2415,17 @@ async function startMultiStepApplyOnTab(
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
+      summary.tabId = closeOnSuccess ? null : currentTabId;
+      return summary;
+    }
+
+    if (probe.alreadyApplied) {
+      if (closeOnSuccess) {
+        await closeTabQuietly(currentTabId);
+        if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
+      }
+      summary.status = "already_applied";
+      summary.detail = probe.alreadyApplied;
       summary.tabId = closeOnSuccess ? null : currentTabId;
       return summary;
     }
@@ -4164,235 +4443,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     clearGenerationCancel();
     startKeepAlive();
     chrome.storage.local.set({ generation_running: true });
-
     safeSendResponse(sendResponse, { ok: true, started: true });
 
     (async () => {
       try {
-        await setStatus(`Imported job: opening URL...`);
-        await setImportedJobStatus(importedJobId, {
-          status: "opening",
-          statusDetail: "Opening job URL...",
-          markAttempt: true,
-          profileId
+        await runApplyImportedJobCore(importedJobId, profileId, jobMeta, {
+          allowGenerate: true
         });
-
-        const url = String(jobMeta.jdLink || "").trim();
-        if (!url) {
-          throw new Error("Missing job URL (jdLink).");
-        }
-
-        // Reuse a tab already showing this job (e.g. opened via "See job")
-        // instead of opening the page again.
-        let tabId;
-        const existingTab = await findTabByUrl(url);
-        if (existingTab?.id != null) {
-          tabId = existingTab.id;
-          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-          if (existingTab.windowId != null) {
-            await chrome.windows
-              .update(existingTab.windowId, { focused: true })
-              .catch(() => {});
-          }
-          await waitForPageReady(tabId);
-        } else {
-          const tab = await chrome.tabs.create({ url, active: true });
-          tabId = tab?.id;
-          if (!tabId) throw new Error("Failed to open browser tab.");
-          await waitForPageReady(tabId);
-        }
-
-        // Stop early if the posting is gone (expired / filled / removed / 404) so
-        // we don't waste an OpenAI call — and remove it from the list.
-        try {
-          await ensureAutofillScript(tabId);
-          const availProbe = await sendMessageToTab(
-            tabId,
-            { type: "probe_application_form" },
-            { attempts: 2 }
-          );
-          if (availProbe?.jobUnavailable) {
-            await removeImportedJobFromStorage(importedJobId);
-            await setStatus(
-              `Job closed — removed from list: ${availProbe.jobUnavailable}`
-            );
-            return;
-          }
-        } catch {
-          /* availability probe is best-effort; continue on failure */
-        }
-
-        // Persist job fields so AI Q&A has the correct context.
-        await chrome.storage.local.set({
-          selected_profile_id: profileId,
-          selected_template_id: jobMeta.templateId || DEFAULT_TEMPLATE_ID,
-          last_job_title: jobMeta.jobTitle || "",
-          last_company_name: jobMeta.companyName || "",
-          last_jd_link: jobMeta.jdLink || "",
-          last_jd_text: jobMeta.jdText || "",
-          spreadsheet_url: jobMeta.spreadsheetUrl || "",
-          sheets_sheet_name: jobMeta.sheetName || "",
-          sheets_web_app_url: jobMeta.sheetsWebAppUrl || ""
-        });
-
-        const liveJob = (await getImportedJobsById())[importedJobId];
-        let uploadDocs = await ensureUploadDocsForImportedJob(importedJobId, liveJob);
-
-        if (uploadDocs?.resume?.base64 || uploadDocs?.coverLetter?.base64) {
-          const resumeName = uploadDocs.resume?.fileName || "resume";
-          const coverName = uploadDocs.coverLetter?.fileName
-            ? ` + ${uploadDocs.coverLetter.fileName}`
-            : "";
-          await setStatus(`Using saved files for this job: ${resumeName}${coverName}`);
-          await setImportedJobStatus(importedJobId, {
-            status: "opening_form",
-            statusDetail: "Resume ready — opening application form..."
-          });
-        } else if (extractFolderNameFromSaveMeta(liveJob?.resumeFolder || "")) {
-          throw new Error(
-            "A resume was generated for this job, but the saved PDFs could not be loaded from the output folder. Click in the extension panel to unlock the folder, then Apply again."
-          );
-        } else {
-          const resumeOnlyStored =
-            (await chrome.storage.local.get("generate_resume_only")).generate_resume_only === true;
-          const trackStored =
-            (await chrome.storage.local.get("track_application_status")).track_application_status ===
-            true;
-          const genMeta = {
-            ...jobMeta,
-            resumeOnly: resumeOnlyStored,
-            trackApplicationStatus:
-              jobMeta.trackApplicationStatus === true || trackStored,
-            importedJobId,
-            previewMode: false
-          };
-          await setImportedJobStatus(importedJobId, {
-            status: "generating",
-            statusDetail: resumeOnlyStored
-              ? "Generating resume only..."
-              : "Generating resume & cover letter..."
-          });
-          await setStatus(`Generating resume for imported job...`);
-          const saved = await runGenerationPipeline({ profileId, jobMeta: genMeta });
-          uploadDocs = saved?.docs || (await getGeneratedDocsForJob(importedJobId));
-          await setImportedJobStatus(importedJobId, {
-            status: "opening_form",
-            statusDetail: "Waiting for the job page, then Auto Apply...",
-            patch: {
-              hasGeneratedResume: true,
-              resumeFolder: saved?.folderName || "",
-              resumeFileName: saved?.resumeFileName || "",
-              coverLetterFileName: saved?.coverLetterFileName || ""
-            }
-          });
-        }
-
-        const liveTab = await chrome.tabs.get(tabId).catch(() => null);
-        if (!liveTab?.id) {
-          throw new Error("The job tab was closed before Auto Apply could start.");
-        }
-        tabId = liveTab.id;
-        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-        await waitForPageReady(tabId);
-        const site = detectSiteFromUrl(liveTab.url || url);
-
-        try {
-          await ensureAutofillScript(tabId);
-          const probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
-          if (probe?.jobUnavailable) {
-            await removeImportedJobFromStorage(importedJobId);
-            await setStatus(`Job closed — removed from list: ${probe.jobUnavailable}`);
-            return;
-          }
-        } catch {
-          /* availability probe is best-effort; Auto Apply handles the rest */
-        }
-
-        // Re-activate right before fill so this job's PDFs win over any later batch job.
-        uploadDocs =
-          (await ensureUploadDocsForImportedJob(
-            importedJobId,
-            (await getImportedJobsById())[importedJobId]
-          )) || uploadDocs;
-        if (!uploadDocs?.resume?.base64 && !uploadDocs?.coverLetter?.base64) {
-          throw new Error(
-            "No resume/cover letter PDFs are ready for this job. Generate a resume first, then Apply."
-          );
-        }
-
-        const loc = await formatUploadDocsLocation(uploadDocs);
-        await setImportedJobStatus(importedJobId, {
-          status: "filling",
-          statusDetail: loc.summary
-            ? `Uploading ${loc.summary} and filling the form (${site})...`
-            : `Running Auto Apply (${site})...`
-        });
-        await setStatus(
-          loc.summary
-            ? `Uploading from ${loc.summary} onto ${site}...`
-            : `Running Auto Apply (${site}) with ${uploadDocs.resume?.fileName || "resume"}${
-                uploadDocs.coverLetter?.fileName ? ` + ${uploadDocs.coverLetter.fileName}` : ""
-              }...`
-        );
-
-        const ea = await startMultiStepApplyOnTab(profileId, tabId, {
-          maxSteps: 14,
-          uploadDocs,
-          closeOnSuccess: true,
-          preferNewTab: site === "dice"
-        });
-        if (!ea.ok && ea.error) throw new Error(ea.error);
-
-        if (ea.status === "unavailable") {
-          await removeImportedJobFromStorage(importedJobId);
-          await setStatus(`Job closed — removed from list: ${ea.detail || "unavailable"}`);
-          return;
-        }
-
-        if (ea.status === "submitted") {
-          const sheetNote = await finalizeImportedJobAsApplied(importedJobId, {
-            profileId,
-            jobMeta,
-            site,
-            detail:
-              `Auto Apply (${site}): submitted. ` +
-              `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}. ` +
-              `${ea.detail || ""}`.trim()
-          });
-          await setStatus(
-            `Applied — tab closed.${sheetNote} ${await getCostSummaryText()}`.trim()
-          );
-          return;
-        }
-
-        const nextStatus =
-          ea.status === "needs_review" ? "needs_review" : "ready_for_review";
-        await setImportedJobStatus(importedJobId, {
-          status: nextStatus,
-          statusDetail:
-            `Auto Apply (${site}): ${ea.status || "done"}. ` +
-            `Steps ${ea.steps || 0}, filled ${ea.filled || 0}, uploaded ${ea.uploaded || 0}, ` +
-            `bank ${ea.bankHits || 0}, AI ${ea.aiFilled || 0}, choices ${ea.choiceFilled || 0}. ` +
-            `${ea.detail || ""} ${(await getCostSummaryText())}`.trim(),
-          profileId
-        });
-        await appendApplicationEvent({
-          profileId,
-          importedJobId,
-          jobTitle: jobMeta.jobTitle || "",
-          companyName: jobMeta.companyName || "",
-          jdLink: jobMeta.jdLink || url || "",
-          status: nextStatus,
-          source: site,
-          detail: ea.detail || ""
-        });
-        await setStatus(
-          `Imported job Autofill: ${ea.status || "done"}. ${await getCostSummaryText()}`
-        );
       } catch (err) {
         const error = String(err?.message || err);
         if (isCancelError(err)) {
-          await setStatus("Generation cancelled by user.");
+          await setStatus("Cancelled by user.");
           await setImportedJobStatus(importedJobId, {
             status: "failed",
             statusDetail: "Cancelled by user.",
@@ -4414,6 +4475,177 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             status: "failed",
             detail: error
           });
+        }
+      } finally {
+        await chrome.storage.local.set({ generation_running: false });
+        isRunning = false;
+        finishGenerationCancelState();
+        stopKeepAlive();
+      }
+    })();
+
+    return false;
+  }
+
+  if (message?.type === "batch_apply_jobs") {
+    const profileId = message.profileId;
+    const jobIds = Array.isArray(message.jobIds)
+      ? message.jobIds.map((id) => String(id || "").trim()).filter(Boolean)
+      : [];
+    const shared = message.jobMeta || {};
+    const pauseMs = Math.max(0, Number(message.pauseMs) || 3000);
+
+    if (!profileId) {
+      safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
+      return false;
+    }
+    if (!jobIds.length) {
+      safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
+      return false;
+    }
+    if (isRunning) {
+      safeSendResponse(sendResponse, { ok: false, error: "Another job is already in progress." });
+      return false;
+    }
+
+    isRunning = true;
+    clearGenerationCancel();
+    startKeepAlive();
+    chrome.storage.local.set({ generation_running: true });
+    safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
+
+    (async () => {
+      let appliedCount = 0;
+      let failCount = 0;
+      let skippedCount = 0;
+      let reviewCount = 0;
+      let cancelled = false;
+      try {
+        const trackStored =
+          (await chrome.storage.local.get("track_application_status")).track_application_status ===
+          true;
+
+        for (let i = 0; i < jobIds.length; i += 1) {
+          let importedJobId = "";
+          try {
+            assertNotCancelled();
+            importedJobId = jobIds[i];
+            const byId = await getImportedJobsById();
+            const job = byId[importedJobId];
+            if (!job) {
+              failCount += 1;
+              continue;
+            }
+
+            const status = String(job.status || "");
+            if (status === "completed" || status === "unavailable") {
+              skippedCount += 1;
+              continue;
+            }
+
+            const jobUrl = String(job.jdLink || job.url || "").trim();
+            if (!jobUrl) {
+              failCount += 1;
+              await setImportedJobStatus(importedJobId, {
+                status: "failed",
+                statusDetail: "Missing job URL — cannot apply.",
+                profileId
+              });
+              continue;
+            }
+
+            const progressLabel = `Batch apply ${i + 1}/${jobIds.length}`;
+            await setStatus(
+              `${progressLabel}: ${job.jobTitle || importedJobId} @ ${job.companyName || ""}`
+            );
+
+            const jobMeta = {
+              jobTitle: job.jobTitle || "",
+              companyName: job.companyName || "",
+              jdLink: jobUrl,
+              jdText: String(job.jdText || "").trim(),
+              templateId: shared.templateId || DEFAULT_TEMPLATE_ID,
+              spreadsheetUrl: shared.spreadsheetUrl || "",
+              sheetName: shared.sheetName || "",
+              sheetsWebAppUrl: shared.sheetsWebAppUrl || "",
+              workArrangement: job.workArrangement || "",
+              employmentType: job.employmentType || "",
+              salaryMin: job.salaryMin || "",
+              salaryMax: job.salaryMax || "",
+              datePosted: job.datePosted || "",
+              trackApplicationStatus:
+                shared.trackApplicationStatus === true || trackStored,
+              importedJobId
+            };
+
+            const result = await runApplyImportedJobCore(importedJobId, profileId, jobMeta, {
+              allowGenerate: true,
+              progressLabel
+            });
+
+            if (result.status === "submitted") appliedCount += 1;
+            else if (result.status === "already_applied") skippedCount += 1;
+            else if (result.status === "unavailable") skippedCount += 1;
+            else if (result.status === "needs_review" || result.status === "ready_for_review") {
+              reviewCount += 1;
+            } else {
+              failCount += 1;
+            }
+          } catch (err) {
+            if (isCancelError(err)) {
+              cancelled = true;
+              if (importedJobId) {
+                await setImportedJobStatus(importedJobId, {
+                  status: "failed",
+                  statusDetail: "Cancelled by user.",
+                  profileId
+                });
+              }
+              await setStatus("Batch apply cancelled by user.");
+              break;
+            }
+            failCount += 1;
+            const error = String(err?.message || err);
+            if (importedJobId) {
+              await setImportedJobStatus(importedJobId, {
+                status: "failed",
+                statusDetail: error,
+                profileId
+              });
+              await appendApplicationEvent({
+                profileId,
+                importedJobId,
+                jobTitle: "",
+                companyName: "",
+                jdLink: "",
+                status: "failed",
+                detail: error
+              }).catch(() => {});
+            }
+            await setStatus(
+              `Batch apply ${i + 1}/${jobIds.length} failed: ${error}. Continuing...`
+            );
+          }
+
+          if (cancelled) break;
+          if (i < jobIds.length - 1) {
+            await setStatus(
+              `Batch apply: waiting ${Math.round(pauseMs / 1000)}s before next job...`
+            );
+            await sleepMs(pauseMs);
+          }
+        }
+
+        if (!cancelled) {
+          await setStatus(
+            `Batch apply done. Applied ${appliedCount}, needs review ${reviewCount}, skipped ${skippedCount}, failed ${failCount}. ${await getCostSummaryText()}`
+          );
+        }
+      } catch (err) {
+        if (isCancelError(err)) {
+          await setStatus("Batch apply cancelled by user.");
+        } else {
+          await setStatus(`Batch apply failed: ${String(err?.message || err)}`);
         }
       } finally {
         await chrome.storage.local.set({ generation_running: false });
@@ -4624,7 +4856,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 resumeFolder: saved?.folderName || "",
                 resumeFileName: saved?.resumeFileName || "",
                 coverLetterFileName: saved?.coverLetterFileName || "",
-                atsScore: Number(saved?.atsScore) || undefined
+                atsScore: Number(saved?.atsScore) || undefined,
+                atsReport: saved?.atsReport
+                  ? {
+                      score: Number(saved.atsReport.finalScore ?? saved.atsReport.score) || 0,
+                      finalScore: Number(saved.atsReport.finalScore ?? saved.atsReport.score) || 0,
+                      rawScore: Number(saved.atsReport.rawScore) || undefined,
+                      keywordCoverage: saved.atsReport.keywordCoverage,
+                      skillsCoverage: saved.atsReport.skillsCoverage,
+                      rationale: String(saved.atsReport.rationale || "").slice(0, 280),
+                      source: saved.atsReport.source || "gpt"
+                    }
+                  : Number(saved?.atsScore)
+                    ? {
+                        score: Number(saved.atsScore),
+                        finalScore: Number(saved.atsScore),
+                        source: "stored"
+                      }
+                    : undefined
               }
             });
           } catch (err) {

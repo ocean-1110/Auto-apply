@@ -3081,6 +3081,7 @@
       hasFileInput,
       blockedReason: detectPageBlocker(),
       jobUnavailable: detectJobUnavailable(),
+      alreadyApplied: detectDiceAlreadyApplied(),
       applyUrls: collectApplyUrlCandidates()
     };
   }
@@ -3149,6 +3150,7 @@
   const EASY_APPLY_TEXT_RE =
     /^\s*(easy\s*apply|1-?click apply|one-?click apply|quick apply)\s*$/i;
   const APPLY_ONLY_TEXT_RE = /^\s*(apply(\s+now)?|apply with dice)\s*$/i;
+  const ALREADY_APPLIED_TEXT_RE = /^\s*applied\s*$/i;
   const EASY_ENTRY_RE =
     /\b(easy apply|1-?click apply|one-?click apply|quick apply|apply with|apply now|apply)\b/i;
 
@@ -3344,6 +3346,38 @@
     );
   }
 
+  /** Dice job detail: the teal button already says "Applied". */
+  function detectDiceAlreadyApplied() {
+    if (!/(^|\.)dice\.com$/i.test(location.hostname)) return "";
+    if (isDiceApplicationPath()) return "";
+
+    const controls = [
+      ...document.querySelectorAll("button, a, [role='button'], span, div")
+    ];
+    for (const el of controls) {
+      if (!isElVisible(el)) continue;
+      if (isSiteChromeControl(el) || isInsideAdOrOverlay(el)) continue;
+      const text = elActionText(el);
+      if (!ALREADY_APPLIED_TEXT_RE.test(text)) continue;
+
+      // Prefer the job-detail pane CTA; still accept a clear Applied control.
+      const inDetail = Boolean(
+        el.closest(
+          '[data-testid*="job-detail" i], [class*="job-detail"], [class*="JobDetail"], [class*="search-detail"], [class*="details-pane"], [class*="job-view"]'
+        )
+      );
+      try {
+        const rect = el.getBoundingClientRect();
+        if (inDetail || rect.left > window.innerWidth * 0.3) {
+          return "Already applied on Dice (button shows Applied).";
+        }
+      } catch {
+        if (inDetail) return "Already applied on Dice (button shows Applied).";
+      }
+    }
+    return "";
+  }
+
   /** Dice search/detail: the teal Apply button in the job detail panel (top-right). */
   function findDiceJobDetailApplyButton() {
     if (!/(^|\.)dice\.com$/i.test(location.hostname)) return null;
@@ -3355,6 +3389,7 @@
     const scored = [];
     for (const el of controls) {
       const text = elActionText(el);
+      if (ALREADY_APPLIED_TEXT_RE.test(text)) continue;
       if (!APPLY_ONLY_TEXT_RE.test(text) && !EASY_APPLY_TEXT_RE.test(text)) continue;
       if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(el)) continue;
       const href = String(el.href || el.getAttribute?.("href") || "");
@@ -3658,7 +3693,8 @@
     const probe = probeApplicationForm();
     // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
     if (!probe.isApplicationForm) {
-      const entry = findEasyApplyEntryButton();
+      const alreadyApplied = probe.alreadyApplied || detectDiceAlreadyApplied();
+      const entry = alreadyApplied ? null : findEasyApplyEntryButton();
       return {
         ok: true,
         href: location.href,
@@ -3666,6 +3702,7 @@
         isApplicationForm: false,
         blockedReason: probe.blockedReason || "",
         jobUnavailable: probe.jobUnavailable || "",
+        alreadyApplied: alreadyApplied || "",
         applicationSuccess: detectApplicationSuccess(),
         action: entry ? { type: "entry", text: entry.text } : null,
         needsFill: false,
@@ -3691,6 +3728,7 @@
       isApplicationForm: Boolean(probe.isApplicationForm),
       blockedReason: probe.blockedReason || "",
       jobUnavailable: probe.jobUnavailable || "",
+      alreadyApplied: "",
       applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
       needsFill,

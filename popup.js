@@ -116,6 +116,7 @@ const batchSelectionNoteEl = document.getElementById("batchSelectionNote");
 const batchRemoveBtn = document.getElementById("batchRemoveBtn");
 const checkAvailabilityBtn = document.getElementById("checkAvailabilityBtn");
 const batchGenerateBtn = document.getElementById("batchGenerateBtn");
+const batchApplyBtn = document.getElementById("batchApplyBtn");
 const confirmModalEl = document.getElementById("confirmModal");
 const confirmModalTitleEl = document.getElementById("confirmModalTitle");
 const confirmModalMessageEl = document.getElementById("confirmModalMessage");
@@ -302,14 +303,21 @@ function updateGenerationProgress({ running, statusText, clearIdleStatus = false
 
   const text = String(statusText || "").trim();
   if (stopGenerateBtn) stopGenerateBtn.hidden = !running;
-  updateJobsWorkStatus({ running, statusText: text });
+  // Single progress surface: genProgress (with Stop). Keep the jobs-list banner in sync
+  // only when genProgress is unavailable; otherwise they duplicate the same line.
+  updateJobsWorkStatus({ running: false });
 
   if (running) {
     genProgressEl.hidden = false;
     genProgressEl.classList.remove("is-done", "is-error");
     if (genProgressStateEl) genProgressStateEl.textContent = "In progress";
     if (genProgressDetailEl) genProgressDetailEl.textContent = text || "Working...";
-    setStatus(text || "Generating...", "running");
+    // Do not also mirror into #status — that duplicated the same message.
+    if (statusEl) {
+      statusEl.hidden = true;
+      statusEl.textContent = "";
+      statusEl.classList.remove("is-running", "is-done", "is-error");
+    }
     return;
   }
 
@@ -468,14 +476,26 @@ async function refreshSaveBannerForCurrentJob() {
     const label = await pathLabelForImportedJob(job);
     if (label) {
       showSaveBanner(label);
-      renderAtsForCurrentJob(null);
-      return;
+    } else if (job.hasGeneratedResume || resumeFolderNameForJob(job) || Number(job.atsScore) > 0) {
+      const folder = resumeFolderNameForJob(job);
+      showSaveBanner(folder ? `Saved: ${folder}` : "Resume ready for this job");
+    } else {
+      hideSaveBanner();
     }
-    hideSaveBanner();
+    renderAtsForCurrentJob(null);
+    const score = jobFinalAtsScore(job);
+    if (score != null) {
+      const report =
+        job.atsReport && typeof job.atsReport === "object"
+          ? job.atsReport
+          : { score, finalScore: score, source: "stored" };
+      chrome.storage.local.set({ last_ats_report: report }).catch(() => {});
+    }
     return;
   }
   const meta = await getLastSaveMeta();
   if (meta?.pathLabel) showSaveBanner(meta.pathLabel);
+  else hideSaveBanner();
 }
 
 function wireAccordion(el, storageKey) {
@@ -682,9 +702,19 @@ function batchableImportedJobIds() {
   });
 }
 
+function jobReadyForBatchApply(job) {
+  if (!job) return false;
+  const status = String(job.status || "");
+  if (status === "completed" || status === "unavailable") return false;
+  if (["opening", "generating", "opening_form", "filling"].includes(status)) return false;
+  // Need a job URL; resume will be generated during batch apply if missing.
+  return Boolean(String(job.jdLink || job.url || "").trim());
+}
+
 function updateBatchBar() {
   const visible = batchableImportedJobIds();
   const selectedVisible = visible.filter((id) => importedJobsChecked.has(id));
+  const applyReady = selectedVisible.filter((id) => jobReadyForBatchApply(importedJobsById[id]));
   if (batchSelectionNoteEl) {
     batchSelectionNoteEl.textContent = `${selectedVisible.length} selected`;
   }
@@ -695,6 +725,9 @@ function updateBatchBar() {
   }
   if (batchGenerateBtn) {
     batchGenerateBtn.disabled = selectedVisible.length === 0;
+  }
+  if (batchApplyBtn) {
+    batchApplyBtn.disabled = applyReady.length === 0;
   }
   if (batchRemoveBtn) {
     batchRemoveBtn.disabled = selectedVisible.length === 0;
@@ -988,6 +1021,7 @@ function renderImportedJobs() {
       if (jdTextEl) jdTextEl.value = job.jdText || "";
       persistJobFields().catch(() => {});
       refreshSaveBannerForCurrentJob().catch(() => {});
+      renderAtsForCurrentJob(null);
     };
 
     summary.addEventListener("click", (e) => {
@@ -1149,6 +1183,49 @@ async function batchGenerateSelectedJobs() {
     updateGenerationProgress({
       running: false,
       statusText: `Batch resume build failed to start: ${String(res?.error || "unknown error")}`
+    });
+    setBusy(false);
+  }
+}
+
+async function batchApplySelectedJobs() {
+  const jobIds = visibleImportedJobIds().filter(
+    (id) => importedJobsChecked.has(id) && jobReadyForBatchApply(importedJobsById[id])
+  );
+  if (!jobIds.length) {
+    setStatus(
+      "Check one or more jobs with a job URL, then click Batch Apply.",
+      "error"
+    );
+    return;
+  }
+
+  const collected = await collectBatchGenerateSettings();
+  if (!collected) return;
+
+  const diceCount = jobIds.filter((id) => isDiceSource(importedJobsById[id]?.source)).length;
+  generationStartPending = true;
+  updateGenerationProgress({
+    running: true,
+    statusText: `Starting batch apply for ${jobIds.length} job(s)${
+      diceCount ? ` (${diceCount} Dice)` : ""
+    }...`
+  });
+  setBusy(true);
+
+  const res = await chrome.runtime.sendMessage({
+    type: "batch_apply_jobs",
+    profileId: collected.profileId,
+    jobIds,
+    jobMeta: collected.jobMeta,
+    pauseMs: 3000
+  });
+  if (!res?.ok) {
+    generationStartPending = false;
+    wasGenerationRunning = false;
+    updateGenerationProgress({
+      running: false,
+      statusText: `Batch apply failed to start: ${String(res?.error || "unknown error")}`
     });
     setBusy(false);
   }
@@ -1540,7 +1617,8 @@ async function loadSettings() {
     "scraped_job_meta",
     "generate_resume_only",
     "preview_mode_enabled",
-    "ui_panel_mode"
+    "ui_panel_mode",
+    "last_ats_report"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -1575,6 +1653,7 @@ async function loadSettings() {
   await refreshOutputDirLabel();
   setStatus(data.generation_status || "");
   setBusy(Boolean(data.generation_running));
+  await refreshImportedJobsFromStorage().catch(() => {});
   await refreshSaveBannerFromStorage();
 
   if (data.pending_fs_write) {
@@ -1866,6 +1945,7 @@ function setBusy(busy) {
   if (autofillBtn) autofillBtn.disabled = busy;
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
   if (batchGenerateBtn && busy) batchGenerateBtn.disabled = true;
+  if (batchApplyBtn && busy) batchApplyBtn.disabled = true;
   if (batchRemoveBtn && busy) batchRemoveBtn.disabled = true;
   if (checkAvailabilityBtn && busy) checkAvailabilityBtn.disabled = true;
   if (!busy) updateBatchBar();
@@ -2343,6 +2423,9 @@ selectAllJobsEl?.addEventListener("change", () => {
 });
 batchGenerateBtn?.addEventListener("click", () => {
   batchGenerateSelectedJobs().catch((err) => setStatus(String(err.message || err), "error"));
+});
+batchApplyBtn?.addEventListener("click", () => {
+  batchApplySelectedJobs().catch((err) => setStatus(String(err.message || err), "error"));
 });
 checkAvailabilityBtn?.addEventListener("click", () => {
   checkSelectedJobsAvailability().catch((err) => setStatus(String(err.message || err), "error"));
