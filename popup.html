@@ -83,6 +83,7 @@
           </div>
 
           <div class="jobs-list" id="importedJobsList" aria-label="Imported jobs list"></div>
+          <div id="sidebarActionRail" class="sidebar-action-rail" hidden></div>
         </aside>
 
         <div class="content">
@@ -184,19 +185,6 @@
             <button type="button" id="pasteJd" class="secondary">Paste JD</button>
           </div>
 
-          <label class="inline-check" title="Skip cover letter generation to save tokens">
-            <input type="checkbox" id="resumeOnlyToggle" />
-            <span>generate only resume</span>
-          </label>
-
-          <label
-            class="inline-check"
-            title="Review the resume in Preview before saving PDFs. You can edit with a prompt, then click Save."
-          >
-            <input type="checkbox" id="previewModeToggle" />
-            <span>preview mode (confirm before save)</span>
-          </label>
-
           <div class="row-split">
             <label class="field grow">
               <span>Output folder</span>
@@ -218,19 +206,34 @@
             <strong>Edit profile</strong>.
           </p>
 
-          <div class="row row-2">
-            <button type="button" id="generateResume" title="Alt+Shift+G">
-              Generate resume &amp; cover letter
-              <kbd class="shortcut-hint">Alt+Shift+G</kbd>
-            </button>
-            <button
-              type="button"
-              id="autofillBtn"
-              title="Alt+Shift+E — Fill this step first. On a one-page form the button becomes Submit so you can send it."
-            >
-              Autofill
-              <kbd class="shortcut-hint">Alt+Shift+E</kbd>
-            </button>
+          <div id="primaryActions" class="primary-actions">
+            <div class="gen-options-row">
+              <label class="inline-check" title="Skip cover letter generation to save tokens">
+                <input type="checkbox" id="resumeOnlyToggle" />
+                <span>generate only resume</span>
+              </label>
+              <label
+                class="inline-check"
+                title="Review the resume in Preview before saving PDFs. You can edit with a prompt, then click Save."
+              >
+                <input type="checkbox" id="previewModeToggle" />
+                <span>preview mode (confirm before save)</span>
+              </label>
+            </div>
+            <div class="row row-2 primary-action-btns">
+              <button type="button" id="generateResume" title="Alt+Shift+G">
+                Generate resume &amp; cover letter
+                <kbd class="shortcut-hint">Alt+Shift+G</kbd>
+              </button>
+              <button
+                type="button"
+                id="autofillBtn"
+                title="Alt+Shift+E — Fill this step first. On a one-page form the button becomes Submit so you can send it."
+              >
+                Autofill
+                <kbd class="shortcut-hint">Alt+Shift+E</kbd>
+              </button>
+            </div>
           </div>
           <p class="hint">
             Open panel: <kbd>Alt+J</kbd>. Rebind shortcuts at

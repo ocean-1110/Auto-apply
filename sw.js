@@ -1821,19 +1821,39 @@ async function closeTabQuietly(tabId) {
   await chrome.tabs.remove(tabId).catch(() => {});
 }
 
+/** After a successful apply: close success tabs, the wizard tab, and the original job tab. */
+async function closeApplyFlowTabs({
+  currentTabId = null,
+  originTabId = null,
+  delayMs = 1000
+} = {}) {
+  await closeAllDiceSuccessTabs({ delayMs });
+  const ids = new Set();
+  if (currentTabId != null) ids.add(currentTabId);
+  if (originTabId != null) ids.add(originTabId);
+  for (const id of ids) {
+    await closeTabQuietly(id);
+  }
+}
+
 /**
  * After Submit is clicked, wait for the ATS confirmation page, then optionally close it.
  */
-async function finishSubmittedApplication(tabId, { closeOnSuccess = false, clickLabel = "Submit" } = {}) {
+async function finishSubmittedApplication(
+  tabId,
+  { closeOnSuccess = false, clickLabel = "Submit", originTabId = null } = {}
+) {
   await waitForPageReady(tabId).catch(() => {});
   const waited = await waitForApplicationSuccess(tabId, 25000);
   const successTabId = waited.tabId || tabId;
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
-      await setStatus("Application submitted — closing success tab...");
-      // Always sweep every Dice success URL tab (same tab or a redirect target).
-      await closeAllDiceSuccessTabs({ delayMs: 1000 });
-      await closeTabQuietly(successTabId);
+      await setStatus("Application submitted — closing application tabs...");
+      await closeApplyFlowTabs({
+        currentTabId: successTabId,
+        originTabId: originTabId != null ? originTabId : tabId,
+        delayMs: 1000
+      });
       if (successTabId !== tabId) await closeTabQuietly(tabId);
     }
     return {
@@ -1844,7 +1864,13 @@ async function finishSubmittedApplication(tabId, { closeOnSuccess = false, click
     };
   }
   if (waited.tabGone) {
-    if (closeOnSuccess) await closeAllDiceSuccessTabs({ delayMs: 0 });
+    if (closeOnSuccess) {
+      await closeApplyFlowTabs({
+        currentTabId: null,
+        originTabId,
+        delayMs: 0
+      });
+    }
     return {
       status: "submitted",
       detail: `Clicked ${clickLabel}. The application tab closed after submit.`,
@@ -1855,10 +1881,11 @@ async function finishSubmittedApplication(tabId, { closeOnSuccess = false, click
   // Even if DOM probe missed it, close any success URL tabs we can see.
   if (closeOnSuccess) {
     const closed = await closeAllDiceSuccessTabs({ delayMs: 1000 });
-    if (closed > 0) {
+    if (originTabId != null) await closeTabQuietly(originTabId);
+    if (closed > 0 || originTabId != null) {
       return {
         status: "submitted",
-        detail: `Clicked ${clickLabel}. Closed Dice success tab.`,
+        detail: `Clicked ${clickLabel}. Closed Dice application tabs.`,
         tabClosed: true,
         tabId: null
       };
@@ -2074,6 +2101,7 @@ async function startMultiStepApplyOnTab(
   await waitForPageReady(tab.id);
 
   let currentTabId = tab.id;
+  const originTabId = tab.id;
   const site = detectSiteFromUrl(tab.url);
   const useNewTab = preferNewTab || site === "dice";
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
@@ -2091,7 +2119,8 @@ async function startMultiStepApplyOnTab(
     status: "",
     detail: "",
     tabId: currentTabId,
-    tabUrl: tab.url || ""
+    tabUrl: tab.url || "",
+    originTabId
   };
 
   let noAdvance = 0;
@@ -2113,9 +2142,8 @@ async function startMultiStepApplyOnTab(
 
     if (probe.applicationSuccess) {
       if (closeOnSuccess) {
-        await setStatus("Application submitted — closing success tab...");
-        await closeAllDiceSuccessTabs({ delayMs: 1000 });
-        await closeTabQuietly(currentTabId);
+        await setStatus("Application submitted — closing application tabs...");
+        await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
@@ -2310,9 +2338,8 @@ async function startMultiStepApplyOnTab(
 
     if (probe.applicationSuccess) {
       if (closeOnSuccess) {
-        await setStatus("Application submitted — closing success tab...");
-        await closeAllDiceSuccessTabs({ delayMs: 1000 });
-        await closeTabQuietly(currentTabId);
+        await setStatus("Application submitted — closing application tabs...");
+        await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
@@ -2362,7 +2389,8 @@ async function startMultiStepApplyOnTab(
       }
       const finished = await finishSubmittedApplication(currentTabId, {
         closeOnSuccess,
-        clickLabel
+        clickLabel,
+        originTabId
       });
       summary.status = finished.status;
       summary.detail = finished.detail;
@@ -2407,7 +2435,8 @@ async function startMultiStepApplyOnTab(
     if (clickRes?.isSubmit) {
       const finished = await finishSubmittedApplication(currentTabId, {
         closeOnSuccess,
-        clickLabel: probe.best.action.text || "Submit"
+        clickLabel: probe.best.action.text || "Submit",
+        originTabId
       });
       summary.status = finished.status;
       summary.detail = finished.detail;
@@ -2441,9 +2470,8 @@ async function startMultiStepApplyOnTab(
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
     if (afterAdvance?.applicationSuccess) {
       if (closeOnSuccess) {
-        await setStatus("Application submitted — closing success tab...");
-        await closeAllDiceSuccessTabs({ delayMs: 1000 });
-        await closeTabQuietly(currentTabId);
+        await setStatus("Application submitted — closing application tabs...");
+        await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;

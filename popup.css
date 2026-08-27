@@ -124,7 +124,70 @@ body.ui-sidebar .sidebar {
 }
 
 body.ui-sidebar .jobs-list {
-  max-height: min(420px, 46vh);
+  max-height: min(360px, 40vh);
+}
+
+body.ui-sidebar .sidebar-action-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+}
+
+body.ui-sidebar .primary-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+/* Buttons first under the job list; option toggles on the row below */
+body.ui-sidebar .primary-action-btns {
+  order: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+body.ui-sidebar .primary-action-btns > * {
+  min-width: 0;
+  width: 100%;
+}
+
+body.ui-sidebar .primary-action-btns button {
+  min-height: 44px;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 10px 12px;
+}
+
+body.ui-sidebar .gen-options-row {
+  order: 2;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+
+body.ui-sidebar .gen-options-row .inline-check {
+  margin: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  font-size: 13px;
+  font-weight: 600;
+  gap: 10px;
+  align-items: center;
+}
+
+body.ui-sidebar .gen-options-row .inline-check input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
 }
 
 body.ui-sidebar .content {
@@ -916,6 +979,22 @@ h1 {
 .inline-check input {
   width: auto !important;
   margin: 0;
+}
+
+.primary-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
+.gen-options-row {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-action-rail[hidden] {
+  display: none !important;
 }
 
 kbd,

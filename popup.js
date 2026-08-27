@@ -33,6 +33,12 @@ document.body.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
 document.documentElement.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
 if (UI_MODE === "sidebar") {
   document.body.classList.add("ocean-in-panel");
+  const rail = document.getElementById("sidebarActionRail");
+  const actions = document.getElementById("primaryActions");
+  if (rail && actions) {
+    rail.hidden = false;
+    rail.appendChild(actions);
+  }
 }
 
 const statusEl = document.getElementById("status");
