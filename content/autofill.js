@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-28.dismiss-modals.1";
+  const SCRIPT_BUILD = "2026-08-28.cookie-skip-no-apply.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -4147,7 +4147,59 @@
   const DISMISS_MODAL_CTA_RE =
     /no thanks,?\s*exit|no thanks|no,? exit|not now|maybe later|skip(?: for now)?|dismiss|i['’]ll engage later|i will engage later|i didn't actually apply|i did not actually apply|reject all|decline|continue without|close/i;
   const KEEP_MODAL_OPEN_CTA_RE =
-    /ok,? let['’]?s do it|let['’]?s do it now|contact hiring|i applied|accept all|agree|subscribe|sign up|upgrade|boost|unlock|continue to apply with/i;
+    /ok,? let['’]?s do it|let['’]?s do it now|contact hiring|i applied|subscribe|sign up|upgrade|boost|unlock|continue to apply with/i;
+  const COOKIE_COPY_RE =
+    /we use cookies|this (site|website) uses cookies|cookie (policy|preferences|consent|notice|banner)|accept cookies|allow cookies|manage cookies|cookie settings|gdpr/i;
+  const COOKIE_ACCEPT_TEXT_RE =
+    /^\s*(accept all( cookies)?|allow all( cookies)?|allow cookies|i agree|agree( and close)?|accept( and close)?|accept cookies|got it|ok(ay)?(,?\s*got it)?|allow)\s*$/i;
+  const COOKIE_CLOSE_TEXT_RE =
+    /reject all|decline all|necessary only|essential only|reject|deny|continue without/i;
+  const COOKIE_BANNER_SEL = [
+    "#onetrust-banner-sdk",
+    "#onetrust-consent-sdk",
+    "#CybotCookiebotDialog",
+    "#usercentrics-root",
+    "#didomi-host",
+    "#qc-cmp2-container",
+    ".qc-cmp2-container",
+    ".fc-consent-root",
+    "#truste-consent-track",
+    "#osano-cm-window",
+    ".osano-cm-window",
+    "#cc-main",
+    ".cc-window",
+    ".cc-banner",
+    "#cookie-banner",
+    "#cookieBanner",
+    "#cookie-notice",
+    "#cookieNotice",
+    "[id*='cookie-banner']",
+    "[class*='cookie-banner']",
+    "[id*='cookieConsent']",
+    "[class*='CookieConsent']",
+    "[id*='cookie-consent']",
+    "[class*='cookie-consent']",
+    "[id*='consent-banner']",
+    "[class*='consent-banner']",
+    "[aria-label*='cookie']"
+  ].join(", ");
+  const COOKIE_ACCEPT_SEL = [
+    "#onetrust-accept-btn-handler",
+    "#accept-recommended-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "#CybotCookiebotDialogBodyButtonAccept",
+    "#CybotCookiebotDialogBodyLevelButtonAccept",
+    "[data-testid='accept-cookies']",
+    "[data-testid='cookie-accept']",
+    "[data-action='accept-all']",
+    "button[aria-label*='accept all']",
+    "button[aria-label*='allow all']",
+    "button[aria-label*='accept cookies']",
+    "button[id*='accept-all']",
+    "button[id*='acceptAll']",
+    "button[class*='accept-all']",
+    "button[class*='acceptAll']"
+  ].join(", ");
 
   function modalRootSelector() {
     return '[role="dialog"], dialog[open], [aria-modal="true"], [class*="Modal"], [class*="modal"], [class*="popup"], [class*="Popup"], [class*="overlay"], [class*="Overlay"]';
@@ -4221,7 +4273,74 @@
     return out;
   }
 
+  function visibleBannerClickables(root) {
+    return queryAllDeep(
+      "a, button, [role='button'], input[type='button'], input[type='submit']",
+      root
+    ).filter((el) => isElVisible(el) && isElEnabled(el));
+  }
+
+  function findKnownCookieAcceptButton(root = document) {
+    try {
+      return queryAllDeep(COOKIE_ACCEPT_SEL, root).find((el) => isElVisible(el) && isElEnabled(el)) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function pickCookieAction(root) {
+    const known = findKnownCookieAcceptButton(root);
+    if (known) return known;
+    const clickable = visibleBannerClickables(root);
+    const accept = clickable.find((el) => {
+      const t = elActionText(el);
+      const hint = `${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
+      return COOKIE_ACCEPT_TEXT_RE.test(t) || /accept.?all|allow.?all|accept.?cookie/i.test(hint);
+    });
+    if (accept) return accept;
+    const close = clickable.find((el) => isCloseControl(el));
+    if (close) return close;
+    return clickable.find((el) => COOKIE_CLOSE_TEXT_RE.test(elActionText(el))) || null;
+  }
+
+  function findCookieBannerRoots() {
+    const seen = new Set();
+    const out = [];
+    try {
+      for (const node of queryAllDeep(COOKIE_BANNER_SEL)) {
+        if (seen.has(node) || !isElVisible(node)) continue;
+        seen.add(node);
+        out.push(node);
+      }
+    } catch {
+      /* selector mismatch on this document */
+    }
+    for (const node of queryAllDeep(modalRootSelector())) {
+      if (seen.has(node) || !isElVisible(node) || isLikelyApplicationModal(node)) continue;
+      if (!COOKIE_COPY_RE.test(modalCopy(node).slice(0, 1800))) continue;
+      seen.add(node);
+      out.push(node);
+    }
+    return out;
+  }
+
+  function dismissCookieConsentOnce() {
+    const loose = findKnownCookieAcceptButton(document);
+    if (loose) {
+      safeClick(loose);
+      return true;
+    }
+    for (const banner of findCookieBannerRoots()) {
+      const el = pickCookieAction(banner);
+      if (!el) continue;
+      safeClick(el);
+      return true;
+    }
+    return false;
+  }
+
   function dismissBlockingModalsOnce() {
+    if (dismissCookieConsentOnce()) return true;
     let dismissed = false;
     for (const modal of findInterruptModals()) {
       const el = findModalDismissControl(modal);
@@ -4344,6 +4463,7 @@
   }
 
   function findEasyApplyEntryButton() {
+    dismissBlockingModalsOnce();
     const jobgetherApply = findJobgetherApplyButton();
     if (jobgetherApply) return jobgetherApply;
     const interested = findImInterestedButton();
@@ -5502,6 +5622,12 @@
       } catch (err) {
         sendResponse({ ok: false, error: String(err?.message || err) });
       }
+      return true;
+    }
+    if (message?.type === "dismiss_page_overlays") {
+      dismissBlockingModals({ rounds: Math.min(6, Math.max(1, Number(message.rounds) || 3)) })
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
       return true;
     }
     if (message?.type === "fill_greenhouse_security_code") {

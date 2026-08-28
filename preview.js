@@ -7,6 +7,7 @@ const els = {
   templateSelect: document.getElementById("templateSelect"),
   refreshBtn: document.getElementById("refreshBtn"),
   saveBtn: document.getElementById("saveBtn"),
+  applyBtn: document.getElementById("applyBtn"),
   closeBtn: document.getElementById("closeBtn"),
   tabResume: document.getElementById("tabResume"),
   tabCover: document.getElementById("tabCover"),
@@ -33,6 +34,12 @@ let generating = false;
 let previewMode = false;
 let pendingSave = false;
 let busy = false;
+let applyContext = {
+  jobId: "",
+  profileId: "",
+  status: "",
+  jobMeta: {}
+};
 
 function setBtnLabel(btn, text) {
   const label = btn?.querySelector(".btn-label");
@@ -109,6 +116,28 @@ function updateChrome() {
       ? "Render PDFs and save to the output folder"
       : "Save PDFs again to the output folder";
   }
+  if (els.applyBtn) {
+    const hasJob = Boolean(applyContext.jobId);
+    els.applyBtn.hidden = !(hasResume && hasJob);
+    const status = String(applyContext.status || "");
+    const inProgress = ["opening", "generating", "opening_form", "filling"].includes(status);
+    if (status === "completed") {
+      setBtnLabel(els.applyBtn, "Done");
+      els.applyBtn.disabled = true;
+      els.applyBtn.title = "Already applied";
+    } else if (inProgress || generating || busy) {
+      setBtnLabel(els.applyBtn, "Working");
+      els.applyBtn.disabled = true;
+      els.applyBtn.title = "Application in progress";
+    } else {
+      const retry = ["failed", "needs_review", "ready_for_review", "check_failed"].includes(status);
+      setBtnLabel(els.applyBtn, retry ? "Retry" : "Apply");
+      els.applyBtn.disabled = !applyContext.profileId;
+      els.applyBtn.title = retry
+        ? "Retry apply (same as the job card)"
+        : "Apply to this job (same as Apply on the job card)";
+    }
+  }
   if (els.regenerateBtn) els.regenerateBtn.disabled = busy || generating || !hasResume;
   if (els.revisePrompt) els.revisePrompt.disabled = busy || generating;
   renderAtsPreview();
@@ -164,10 +193,15 @@ async function load() {
     "selected_template_id",
     "last_job_title",
     "last_company_name",
+    "last_jd_link",
+    "last_jd_text",
     "generation_running",
     "preview_mode_enabled",
     "preview_pending_save",
-    "preview_pending_meta"
+    "preview_pending_meta",
+    "imported_jobs_selected_id",
+    "imported_jobs_by_id",
+    "selected_profile_id"
   ]);
   generating = Boolean(stored.generation_running);
   previewMode = stored.preview_mode_enabled === true;
@@ -181,13 +215,40 @@ async function load() {
     stored.last_ats_report && typeof stored.last_ats_report === "object"
       ? stored.last_ats_report
       : null;
-  const pendingMeta =
+  const pending =
     stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
       ? stored.preview_pending_meta
       : {};
+  const jobs = stored.imported_jobs_by_id && typeof stored.imported_jobs_by_id === "object"
+    ? stored.imported_jobs_by_id
+    : {};
+  const jobId = String(pending.importedJobId || stored.imported_jobs_selected_id || "").trim();
+  const job = jobId ? jobs[jobId] : null;
+  applyContext = {
+    jobId,
+    profileId: String(pending.profileId || stored.selected_profile_id || "").trim(),
+    status: String(job?.status || ""),
+    jobMeta: {
+      jobTitle: pending.jobTitle || job?.jobTitle || stored.last_job_title || "",
+      companyName: pending.companyName || job?.companyName || stored.last_company_name || "",
+      jdLink: pending.jdLink || job?.jdLink || stored.last_jd_link || "",
+      jdText: String(pending.jdText || job?.jdText || stored.last_jd_text || "").trim(),
+      templateId: pending.templateId || stored.selected_template_id || "",
+      spreadsheetUrl: pending.spreadsheetUrl || "",
+      sheetName: pending.sheetName || "",
+      sheetsWebAppUrl: pending.sheetsWebAppUrl || "",
+      workArrangement: pending.workArrangement || job?.workArrangement || "",
+      employmentType: pending.employmentType || job?.employmentType || "",
+      salaryMin: pending.salaryMin || job?.salaryMin || "",
+      salaryMax: pending.salaryMax || job?.salaryMax || "",
+      datePosted: pending.datePosted || job?.datePosted || "",
+      trackApplicationStatus: pending.trackApplicationStatus === true,
+      importedJobId: jobId
+    }
+  };
   jobMeta = {
-    jobTitle: pendingMeta.jobTitle || stored.last_job_title || "",
-    companyName: pendingMeta.companyName || stored.last_company_name || ""
+    jobTitle: applyContext.jobMeta.jobTitle,
+    companyName: applyContext.jobMeta.companyName
   };
   const hintParts = [jobMeta.jobTitle, jobMeta.companyName].filter(Boolean);
   const modeNote = previewMode ? "Preview mode on — edit with a prompt, then Save PDFs." : "";
@@ -264,6 +325,35 @@ async function saveDocuments() {
   }
 }
 
+async function applyFromPreview() {
+  if (!applyContext.jobId) {
+    setReviseStatus("This preview is not tied to a job in the list.", { error: true });
+    return;
+  }
+  if (!applyContext.profileId) {
+    setReviseStatus("Select a profile in the extension panel first.", { error: true });
+    return;
+  }
+  busy = true;
+  updateChrome();
+  setReviseStatus("Starting apply — same as the job card Apply button…");
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: "apply_imported_job",
+      importedJobId: applyContext.jobId,
+      profileId: applyContext.profileId,
+      jobMeta: applyContext.jobMeta
+    });
+    if (!res?.ok) throw new Error(res?.error || "Apply failed to start.");
+    setReviseStatus("Apply started. Watch the job card / status for progress.");
+  } catch (err) {
+    setReviseStatus(String(err?.message || err), { error: true });
+  } finally {
+    busy = false;
+    updateChrome();
+  }
+}
+
 els.tabResume.addEventListener("click", () => {
   view = "resume";
   render();
@@ -282,6 +372,9 @@ els.refreshBtn.addEventListener("click", () => {
 els.saveBtn?.addEventListener("click", () => {
   saveDocuments().catch(() => {});
 });
+els.applyBtn?.addEventListener("click", () => {
+  applyFromPreview().catch(() => {});
+});
 els.regenerateBtn?.addEventListener("click", () => {
   regenerateFromPrompt().catch(() => {});
 });
@@ -299,7 +392,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
     changes.generation_running ||
     changes.preview_mode_enabled ||
     changes.preview_pending_save ||
-    changes.preview_pending_meta
+    changes.preview_pending_meta ||
+    changes.imported_jobs_by_id ||
+    changes.imported_jobs_selected_id ||
+    changes.selected_profile_id
   ) {
     load().catch(() => {});
   }

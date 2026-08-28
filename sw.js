@@ -674,7 +674,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-28.dismiss-modals.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-28.cookie-skip-no-apply.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1785,9 +1785,13 @@ async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
 }
 
 /** Wait for load + a short SPA settle so the job/apply page is actually visible. */
-async function waitForPageReady(tabId, timeoutMs = 30000) {
-  await awaitTabComplete(tabId, timeoutMs);
-  const deadline = Date.now() + 8000;
+async function waitForPageReady(tabId, timeoutMs = 15000) {
+  try {
+    await awaitTabComplete(tabId, timeoutMs);
+  } catch {
+    /* Hung or SPA page: continue with whatever is already painted. */
+  }
+  const deadline = Date.now() + Math.min(2500, Math.max(800, timeoutMs));
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) return;
@@ -1798,17 +1802,66 @@ async function waitForPageReady(tabId, timeoutMs = 30000) {
           func: () => Boolean(document.body && String(document.body.innerText || "").trim().length > 20)
         });
         if (result) {
-          await sleepMs(500);
+          await sleepMs(400);
           return;
         }
       } catch {
-        await sleepMs(400);
+        await sleepMs(300);
         return;
       }
     }
-    await sleepMs(300);
+    await sleepMs(250);
   }
-  await sleepMs(400);
+  await sleepMs(300);
+}
+
+async function dismissPageOverlays(tabId, { rounds = 2 } = {}) {
+  try {
+    await ensureAutofillScript(tabId);
+    await sendMessageToTab(
+      tabId,
+      { type: "dismiss_page_overlays", rounds },
+      { attempts: 1 }
+    );
+  } catch {
+    /* script may not be injectable yet */
+  }
+}
+
+function probeHasApplyEntry(probe) {
+  if (!probe) return false;
+  if (probe.anyForm) return true;
+  if (probe.best?.action?.type === "entry") return true;
+  return (probe.applyUrls || []).some((u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u));
+}
+
+async function waitBrieflyForApplyEntry(tabId, timeoutMs = 6000) {
+  const start = Date.now();
+  let probe = null;
+  while (Date.now() - start < timeoutMs) {
+    await dismissPageOverlays(tabId, { rounds: 1 });
+    await sleepMs(250);
+    probe = await getApplyActionFromTab(tabId).catch(() => probe);
+    if (
+      probe?.alreadyApplied ||
+      probe?.jobUnavailable ||
+      probe?.applicationSuccess ||
+      probeHasApplyEntry(probe)
+    ) {
+      return probe;
+    }
+    await sleepMs(350);
+  }
+  return (
+    probe || {
+      best: null,
+      anyForm: false,
+      applyUrls: [],
+      alreadyApplied: "",
+      jobUnavailable: "",
+      applicationSuccess: ""
+    }
+  );
 }
 
 async function navigateTabToUrl(tabId, url) {
@@ -2443,13 +2496,15 @@ async function runApplyImportedJobCore(
     if (existingTab.windowId != null) {
       await chrome.windows.update(existingTab.windowId, { focused: true }).catch(() => {});
     }
-    await waitForPageReady(tabId);
+    await waitForPageReady(tabId, 12000);
   } else {
     const tab = await chrome.tabs.create({ url, active: true });
     tabId = tab?.id;
     if (!tabId) throw new Error("Failed to open browser tab.");
-    await waitForPageReady(tabId);
+    await waitForPageReady(tabId, 12000);
   }
+
+  await dismissPageOverlays(tabId);
 
   try {
     await ensureAutofillScript(tabId);
@@ -2554,7 +2609,8 @@ async function runApplyImportedJobCore(
   }
   tabId = liveTab.id;
   await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-  await waitForPageReady(tabId);
+  await waitForPageReady(tabId, 8000);
+  await dismissPageOverlays(tabId);
   const site = detectSiteFromUrl(liveTab.url || url);
 
   try {
@@ -2722,7 +2778,8 @@ async function startMultiStepApplyOnTab(
     return { ok: false, error: "The current tab is not a web page. Open the job page, then run Auto Apply." };
   }
 
-  await waitForPageReady(tab.id);
+  await waitForPageReady(tab.id, 12000);
+  await dismissPageOverlays(tab.id);
 
   let currentTabId = tab.id;
   const originTabId = tab.id;
@@ -2757,6 +2814,7 @@ async function startMultiStepApplyOnTab(
   let workdayStepHint = "";
   let greenhouseSubmitAt = 0;
   let didClickSubmit = false;
+  let lookedForEntry = false;
 
   for (let step = 0; step < stepBudget; step += 1) {
     const liveNow = await chrome.tabs.get(currentTabId).catch(() => null);
@@ -2771,6 +2829,7 @@ async function startMultiStepApplyOnTab(
     const stepLabel = workdayStepHint ? `${siteLabel} · ${workdayStepHint}` : siteLabel;
     await setStatus(`Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — checking page...`);
     await ensureAutofillScript(currentTabId);
+    await dismissPageOverlays(currentTabId);
 
     let probe = await getApplyActionFromTab(currentTabId).catch(() => ({
       best: null,
@@ -2846,12 +2905,46 @@ async function startMultiStepApplyOnTab(
 
     // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel / profile).
     if (!probe.anyForm) {
-      const live = await chrome.tabs.get(currentTabId).catch(() => null);
-      const prevUrl = live?.url || "";
-      const prevSig = probe.signature || "";
       const allowedApplyUrl = (probe.applyUrls || []).find(
         (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
       );
+      if (
+        probe.best?.action?.type !== "entry" &&
+        !allowedApplyUrl &&
+        !probe.alreadyApplied &&
+        !probe.jobUnavailable
+      ) {
+        if (!lookedForEntry) {
+          await setStatus(`Auto Apply (${stepLabel}): waiting briefly for Apply...`);
+          probe = await waitBrieflyForApplyEntry(currentTabId, 6000);
+          lookedForEntry = true;
+        }
+        if (probe.alreadyApplied || probe.jobUnavailable || probe.anyForm) {
+          continue;
+        }
+        const retryUrl = (probe.applyUrls || []).find(
+          (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
+        );
+        if (probe.best?.action?.type !== "entry" && !retryUrl) {
+          if (closeOnSuccess) {
+            await closeTabQuietly(currentTabId);
+            if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
+          }
+          summary.status = "skipped";
+          summary.detail =
+            probe.blockedReason ||
+            "No Apply / Easy Apply button on this page — continuing.";
+          summary.tabId = closeOnSuccess ? null : currentTabId;
+          return summary;
+        }
+      }
+
+      const live = await chrome.tabs.get(currentTabId).catch(() => null);
+      const prevUrl = live?.url || "";
+      const prevSig = probe.signature || "";
+      const applyUrl =
+        (probe.applyUrls || []).find((u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)) ||
+        allowedApplyUrl;
 
       if (probe.best?.action?.type === "entry") {
         await setStatus(`Auto Apply: clicking ${probe.best.action.text || "Apply"}...`);
@@ -2881,43 +2974,51 @@ async function startMultiStepApplyOnTab(
               summary.tabId = currentTabId;
               summary.tabUrl = clickRes.navigateUrl;
               summary.steps = step + 1;
+              lookedForEntry = false;
               continue;
             }
           }
           await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
         }
-      } else if (allowedApplyUrl) {
+      } else if (applyUrl) {
         await setStatus(
           useNewTab
             ? "Auto Apply: opening the application page in a new tab..."
             : "Auto Apply: opening the application page..."
         );
         if (useNewTab) {
-          const newId = await openApplyUrlInNewTab(allowedApplyUrl, currentTabId);
+          const newId = await openApplyUrlInNewTab(applyUrl, currentTabId);
           if (newId) {
             currentTabId = newId;
             summary.tabId = currentTabId;
-            summary.tabUrl = allowedApplyUrl;
+            summary.tabUrl = applyUrl;
             summary.steps = step + 1;
+            lookedForEntry = false;
             continue;
           }
         }
-        await navigateTabToUrl(currentTabId, allowedApplyUrl);
+        await navigateTabToUrl(currentTabId, applyUrl);
+        lookedForEntry = false;
       } else {
-        summary.status = "needs_review";
+        if (closeOnSuccess) {
+          await closeTabQuietly(currentTabId);
+          if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
+        }
+        summary.status = "skipped";
         summary.detail =
           probe.blockedReason ||
-          "No Apply / Easy Apply button found in the job detail panel.";
-        summary.tabId = currentTabId;
+          "No Apply / Easy Apply button on this page — continuing.";
+        summary.tabId = closeOnSuccess ? null : currentTabId;
         return summary;
       }
 
-      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000, {
+      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 10000, {
         preferNewTab: useNewTab
       });
       currentTabId = advanced.tabId;
       summary.tabId = currentTabId;
       summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+      lookedForEntry = !advanced.advanced;
 
       // Mis-click on the avatar lands on /profile — stop instead of continuing there.
       if (isDiceProfileUrl(summary.tabUrl)) {
@@ -3631,72 +3732,34 @@ a, a:visited {
   return `<!doctype html><html><head><style>${css}</style></head><body>${html}</body></html>`;
 }
 
-function debuggerAttach(debuggee) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.attach(debuggee, "1.3", () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve();
+async function ensurePdfOffscreen() {
+  try {
+    await chrome.offscreen.createDocument({
+      url: "pdf-render.html",
+      reasons: ["DOM_SCRAPING"],
+      justification: "Render resume HTML to PDF in the background without the debugger infobar."
     });
-  });
-}
-
-function debuggerDetach(debuggee) {
-  return new Promise((resolve) => {
-    chrome.debugger.detach(debuggee, () => resolve());
-  });
-}
-
-function debuggerCommand(debuggee, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand(debuggee, method, params, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(result);
-    });
-  });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (!/already exists|only one offscreen/i.test(msg)) throw err;
+  }
 }
 
 async function htmlToPdfBase64(html) {
-  const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
-  const tab = await chrome.tabs.create({ url, active: false });
-  if (!tab.id) throw new Error("Failed to create render tab.");
-  const tabId = tab.id;
-
-  try {
-    await awaitTabComplete(tabId);
-    // Give layout/fonts a brief moment after "complete".
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    const debuggee = { tabId };
-    await debuggerAttach(debuggee);
+  await ensurePdfOffscreen();
+  const payload = { type: "ocean_html_to_pdf", html: String(html || "") };
+  let lastErr = "PDF generation failed.";
+  for (let i = 0; i < 6; i += 1) {
     try {
-      await debuggerCommand(debuggee, "Page.enable");
-      const result = await debuggerCommand(debuggee, "Page.printToPDF", {
-        printBackground: true,
-        paperWidth: 8.27,
-        paperHeight: 11.69,
-        marginTop: 0.4,
-        marginBottom: 0.4,
-        marginLeft: 0.35,
-        marginRight: 0.35,
-        preferCSSPageSize: true
-      });
-      if (!result?.data) throw new Error("PDF generation failed.");
-      return result.data;
-    } finally {
-      await debuggerDetach(debuggee);
+      const res = await chrome.runtime.sendMessage(payload);
+      if (res?.ok && res.data) return res.data;
+      lastErr = res?.error || lastErr;
+    } catch (err) {
+      lastErr = String(err?.message || err);
     }
-  } finally {
-    try {
-      await chrome.tabs.remove(tabId);
-    } catch {
-      // tab may already be closed
-    }
+    await sleepMs(250);
   }
+  throw new Error(lastErr);
 }
 
 // MV3 service workers have no URL.createObjectURL / Blob URL support,
@@ -5073,8 +5136,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             });
 
             if (result.status === "submitted") appliedCount += 1;
-            else if (result.status === "already_applied") skippedCount += 1;
-            else if (result.status === "unavailable") skippedCount += 1;
+            else if (
+              result.status === "already_applied" ||
+              result.status === "unavailable" ||
+              result.status === "skipped"
+            ) {
+              skippedCount += 1;
+            }
             else if (result.status === "needs_review" || result.status === "ready_for_review") {
               reviewCount += 1;
             } else {

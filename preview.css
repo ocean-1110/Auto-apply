@@ -5,6 +5,7 @@
   --ink: #243447;
   --muted: #6b7c8f;
   --accent: #2f80ed;
+  --accent-hot: #ff5a5f;
   --sky: #1b6fd6;
   --mint: #1f8a5b;
   --amber: #c47a12;
@@ -288,6 +289,21 @@ textarea:focus {
 .icon-btn-accent:hover:not(:disabled) {
   color: #fff;
   filter: brightness(1.06);
+}
+
+.icon-btn-hot {
+  background: var(--accent-hot);
+  color: #fff;
+  box-shadow: 6px 6px 14px #b7c5d6, -4px -4px 10px #ffffff;
+}
+
+.icon-btn-hot:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.06);
+}
+
+.icon-btn-hot:disabled {
+  opacity: 0.55;
 }
 
 .icon-btn:disabled {
