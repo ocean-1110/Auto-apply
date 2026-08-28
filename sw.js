@@ -674,7 +674,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-27.greenhouse-select.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-08-28.dismiss-modals.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",

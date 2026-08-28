@@ -41,7 +41,13 @@ const els = {
   importBtn: document.getElementById("importBtn"),
   importInput: document.getElementById("importInput"),
   clearBtn: document.getElementById("clearBtn"),
-  closeBtn: document.getElementById("closeBtn")
+  closeBtn: document.getElementById("closeBtn"),
+  pageSizeSelect: document.getElementById("pageSizeSelect"),
+  pager: document.getElementById("pager"),
+  pagerPages: document.getElementById("pagerPages"),
+  pagePrev: document.getElementById("pagePrev"),
+  pageNext: document.getElementById("pageNext"),
+  pendingCount: document.getElementById("pendingCount")
 };
 
 /** @type {{ id: string, label: string }[]} */
@@ -52,10 +58,18 @@ let allRows = [];
 let pendingRows = [];
 let editingId = null;
 let pendingDraftId = null;
+let currentPage = 1;
+let pageSize = 12;
+
+function setBtnLabel(btn, text) {
+  const label = btn?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+  else if (btn) btn.textContent = text;
+}
 
 function setStatus(message, isError = false) {
   els.status.textContent = message;
-  els.status.style.color = isError ? "#fca5a5" : "#93c5fd";
+  els.status.style.color = isError ? "var(--rose)" : "var(--sky)";
 }
 
 function urlProfileId() {
@@ -130,7 +144,7 @@ function resetForm() {
   editingId = null;
   pendingDraftId = null;
   els.formTitle.textContent = "Add Q&A";
-  els.saveBtn.textContent = "Save Q&A";
+  setBtnLabel(els.saveBtn, "Save");
   els.cancelEditBtn.hidden = true;
   els.formQuestion.value = "";
   els.formAnswer.value = "";
@@ -165,7 +179,7 @@ function startFromPending(draft) {
   pendingDraftId = draft.id;
   editingId = null;
   els.formTitle.textContent = "Register form field";
-  els.saveBtn.textContent = "Save to Q&A bank";
+  setBtnLabel(els.saveBtn, "Save");
   els.cancelEditBtn.hidden = false;
   els.formQuestion.value = draft.question || "";
   els.formAnswer.value = "";
@@ -190,6 +204,7 @@ function renderPending() {
     return;
   }
   els.pendingCard.hidden = false;
+  if (els.pendingCount) els.pendingCount.textContent = String(pendingRows.length);
   els.pendingList.innerHTML = "";
   const frag = document.createDocumentFragment();
   for (const row of pendingRows) {
@@ -233,15 +248,19 @@ function renderPending() {
 
     const add = document.createElement("button");
     add.type = "button";
-    add.className = "compact primary";
-    add.textContent = "Register";
+    add.className = "icon-btn icon-btn-accent";
+    add.title = "Register this field in the bank";
+    add.innerHTML =
+      '<svg class="btn-icon" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-label">Add</span>';
     add.addEventListener("click", () => startFromPending(row));
     actions.appendChild(add);
 
     const dismiss = document.createElement("button");
     dismiss.type = "button";
-    dismiss.className = "secondary compact";
-    dismiss.textContent = "Dismiss";
+    dismiss.className = "icon-btn";
+    dismiss.title = "Dismiss this field";
+    dismiss.innerHTML =
+      '<svg class="btn-icon" aria-hidden="true"><use href="#i-close"></use></svg><span class="btn-label">Skip</span>';
     dismiss.addEventListener("click", async () => {
       await dismissPendingQa(row.id);
       if (pendingDraftId === row.id) resetForm();
@@ -261,7 +280,7 @@ function startEdit(row) {
   pendingDraftId = null;
   editingId = row.id;
   els.formTitle.textContent = "Edit Q&A";
-  els.saveBtn.textContent = "Update Q&A";
+  setBtnLabel(els.saveBtn, "Update");
   els.cancelEditBtn.hidden = false;
   els.formQuestion.value = row.question || "";
   els.formAnswer.value = row.answer || "";
@@ -272,25 +291,104 @@ function startEdit(row) {
     els.formOptionsHint.textContent = "";
   }
   els.formQuestion.focus();
+  revealRowPage(row.id);
+  renderList();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
+function getPageSize() {
+  const n = Number(els.pageSizeSelect?.value || pageSize);
+  return Number.isFinite(n) && n > 0 ? n : 12;
+}
+
+function pageNumbers(pages, current) {
+  if (pages <= 7) return Array.from({ length: pages }, (_, i) => i + 1);
+  const set = new Set([1, pages, current, current - 1, current + 1]);
+  if (current <= 3) {
+    set.add(2);
+    set.add(3);
+    set.add(4);
+  }
+  if (current >= pages - 2) {
+    set.add(pages - 1);
+    set.add(pages - 2);
+    set.add(pages - 3);
+  }
+  return [...set].filter((n) => n >= 1 && n <= pages).sort((a, b) => a - b);
+}
+
+function renderPager(pages, total) {
+  if (!els.pager || !els.pagerPages) return;
+  if (total === 0 || pages <= 1) {
+    els.pager.hidden = true;
+    els.pagerPages.replaceChildren();
+    return;
+  }
+  els.pager.hidden = false;
+  if (els.pagePrev) els.pagePrev.disabled = currentPage <= 1;
+  if (els.pageNext) els.pageNext.disabled = currentPage >= pages;
+  const nums = pageNumbers(pages, currentPage);
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  for (const n of nums) {
+    if (last && n > last + 1) {
+      const dots = document.createElement("span");
+      dots.className = "pager-ellipsis";
+      dots.textContent = "…";
+      frag.appendChild(dots);
+    }
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `pager-num${n === currentPage ? " is-active" : ""}`;
+    btn.textContent = String(n);
+    btn.setAttribute("aria-label", `Page ${n}`);
+    if (n === currentPage) btn.setAttribute("aria-current", "page");
+    btn.addEventListener("click", () => goToPage(n));
+    frag.appendChild(btn);
+    last = n;
+  }
+  els.pagerPages.replaceChildren(frag);
+}
+
+function goToPage(n, { scroll = true } = {}) {
+  currentPage = Math.max(1, n);
+  renderList();
+  if (scroll) els.qaList?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+function revealRowPage(rowId) {
+  const rows = rowsForView();
+  const idx = rows.findIndex((r) => r.id === rowId);
+  if (idx < 0) return;
+  currentPage = Math.floor(idx / getPageSize()) + 1;
+}
+
 function renderList() {
+  pageSize = getPageSize();
   const rows = rowsForView();
   const view = filterProfileId();
-  const viewLabel =
-    view === ALL_ID ? "all profiles" : profileLabel(view);
-  els.countHint.textContent = `${rows.length} shown · ${allRows.length} total · viewing ${viewLabel}`;
+  const viewLabel = view === ALL_ID ? "all profiles" : profileLabel(view);
+  const pages = Math.max(1, Math.ceil(rows.length / pageSize) || 1);
+  if (currentPage > pages) currentPage = pages;
+  if (currentPage < 1) currentPage = 1;
+  const start = rows.length ? (currentPage - 1) * pageSize : 0;
+  const pageRows = rows.slice(start, start + pageSize);
+  const end = start + pageRows.length;
+
+  els.countHint.textContent = rows.length
+    ? `${start + 1}–${end} of ${rows.length} · ${allRows.length} total · ${viewLabel}`
+    : `0 shown · ${allRows.length} total · ${viewLabel}`;
 
   els.qaList.innerHTML = "";
   if (!rows.length) {
     els.qaList.innerHTML =
-      '<p class="hint" style="margin:0">No saved answers in this view. Add one above, or apply a few jobs with Learn mode on.</p>';
+      '<p class="qa-empty">No saved answers in this view. Add one above, or apply a few jobs with Learn mode on.</p>';
+    renderPager(0, 0);
     return;
   }
 
   const frag = document.createDocumentFragment();
-  for (const row of rows) {
+  for (const row of pageRows) {
     const item = document.createElement("div");
     item.className = "qa-item";
     if (row.id === editingId) item.classList.add("is-editing");
@@ -337,15 +435,19 @@ function renderList() {
 
     const edit = document.createElement("button");
     edit.type = "button";
-    edit.className = "secondary compact";
-    edit.textContent = "Edit";
+    edit.className = "icon-btn";
+    edit.title = "Edit this Q&A";
+    edit.innerHTML =
+      '<svg class="btn-icon" aria-hidden="true"><use href="#i-edit"></use></svg><span class="btn-label">Edit</span>';
     edit.addEventListener("click", () => startEdit(row));
     actions.appendChild(edit);
 
     const del = document.createElement("button");
     del.type = "button";
-    del.className = "secondary danger compact";
-    del.textContent = "Delete";
+    del.className = "icon-btn icon-btn-danger";
+    del.title = "Delete this Q&A";
+    del.innerHTML =
+      '<svg class="btn-icon" aria-hidden="true"><use href="#i-trash"></use></svg><span class="btn-label">Delete</span>';
     del.addEventListener("click", async () => {
       if (!window.confirm("Delete this Q&A?")) return;
       await deleteQa(row.id);
@@ -360,6 +462,7 @@ function renderList() {
     frag.appendChild(item);
   }
   els.qaList.appendChild(frag);
+  renderPager(pages, rows.length);
 }
 
 async function reload() {
@@ -401,6 +504,7 @@ async function saveForm() {
   }
 
   resetForm();
+  if (!existing) currentPage = 1;
   await reload();
   setStatus(existing ? "Q&A updated." : "Q&A saved.");
 }
@@ -447,17 +551,33 @@ async function clearShown() {
     await clearQa(view);
   }
   resetForm();
+  currentPage = 1;
   await reload();
   setStatus("Cleared.");
 }
 
-els.filterProfile.addEventListener("change", () => {
+function onFilterChange() {
+  currentPage = 1;
   const view = filterProfileId();
   if (view && view !== ALL_ID) els.formScope.value = view;
   renderList();
+}
+
+els.filterProfile.addEventListener("change", onFilterChange);
+els.filterType.addEventListener("change", () => {
+  currentPage = 1;
+  renderList();
 });
-els.filterType.addEventListener("change", renderList);
-els.searchInput.addEventListener("input", renderList);
+els.searchInput.addEventListener("input", () => {
+  currentPage = 1;
+  renderList();
+});
+els.pageSizeSelect?.addEventListener("change", () => {
+  currentPage = 1;
+  renderList();
+});
+els.pagePrev?.addEventListener("click", () => goToPage(currentPage - 1));
+els.pageNext?.addEventListener("click", () => goToPage(currentPage + 1));
 els.saveBtn.addEventListener("click", () => {
   saveForm().catch((err) => setStatus(String(err.message || err), true));
 });

@@ -36,14 +36,16 @@ body {
   font: 15px/1.45 Outfit, "Segoe UI", sans-serif;
 }
 
-html.ocean-in-panel #closeBtn {
-  display: none;
-}
-
 .page {
   max-width: 1180px;
   margin: 0 auto;
   padding: 28px 22px 56px;
+}
+
+.page-back-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 12px;
 }
 
 .hero {

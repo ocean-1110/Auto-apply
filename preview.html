@@ -7,36 +7,81 @@
     <link rel="stylesheet" href="preview.css" />
   </head>
   <body>
-    <div class="page">
-      <header class="hero">
-        <div>
-          <p class="eyebrow">Ocean</p>
-          <h1>Document preview</h1>
-          <p class="lede" id="jobHint">Generate a resume to preview it here instantly.</p>
+    <svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-prev" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14.5 6 8.5 12l6 6"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.2 12a7.2 7.2 0 1 1-2.1-5.1L19.5 8.5"/>
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.8v3.7h-3.7"/>
+      </symbol>
+      <symbol id="i-save" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M6.5 5.5h9.2L18.5 8.3V18.5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1z"/>
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M8.5 5.5v4.5h7V5.5M8.5 19v-5h7v5"/>
+      </symbol>
+      <symbol id="i-generate" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M12 4.5 13.2 9 17.5 10.2 13.2 11.4 12 16l-1.2-4.6L6.5 10.2 10.8 9 12 4.5zM18.2 15.2l.6 2.2 2.2.6-2.2.6-.6 2.2-.6-2.2-2.2-.6 2.2-.6.6-2.2z"/>
+      </symbol>
+    </svg>
+
+    <main class="page">
+      <header class="top-bar">
+        <img src="icons/ocean-icon.svg" alt="Ocean" class="brand-icon" />
+        <div class="brand-copy">
+          <p class="hype">Ocean</p>
+          <h1>Preview</h1>
+          <p class="lede" id="jobHint">Generate a resume to preview it here.</p>
         </div>
-        <div class="hero-actions">
-          <label class="filter">
+        <section id="atsPreviewBadge" class="ats-badge" hidden title="Final ATS score for the current resume">
+          <span class="ats-kicker">ATS</span>
+          <strong id="atsPreviewValue">—</strong>
+        </section>
+      </header>
+      <div class="page-back-row">
+        <button type="button" id="closeBtn" class="icon-btn" title="Back">
+          <svg class="btn-icon" aria-hidden="true"><use href="#i-prev"/></svg>
+          <span class="btn-label">Back</span>
+        </button>
+      </div>
+
+      <section class="neo-card doc-card">
+        <div class="doc-toolbar">
+          <div class="tabs" role="tablist" aria-label="Document">
+            <button type="button" id="tabResume" class="tab is-active" role="tab" aria-selected="true">Resume</button>
+            <button type="button" id="tabCover" class="tab" role="tab" aria-selected="false">Cover letter</button>
+          </div>
+          <label class="field template-field">
             <span>Template</span>
             <select id="templateSelect"></select>
           </label>
-          <button type="button" id="printBtn" class="ghost">Print</button>
-          <button type="button" id="refreshBtn" class="ghost">Refresh</button>
-          <button type="button" id="saveBtn" class="primary" hidden title="Render PDFs and save to the output folder">
-            Save PDFs
-          </button>
-          <button type="button" id="closeBtn" class="ghost">Close</button>
+          <div class="doc-actions">
+            <button type="button" id="refreshBtn" class="icon-btn" title="Reload the latest generated documents">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span class="btn-label">Refresh</span>
+            </button>
+            <button type="button" id="saveBtn" class="icon-btn icon-btn-accent" hidden title="Render PDFs and save to the output folder">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-save"/></svg>
+              <span class="btn-label">Save</span>
+            </button>
+          </div>
         </div>
-      </header>
 
-      <div class="tabs" role="tablist">
-        <button type="button" id="tabResume" class="tab is-active" role="tab">Resume</button>
-        <button type="button" id="tabCover" class="tab" role="tab">Cover letter</button>
-      </div>
+        <p id="pendingBanner" class="banner banner-info" hidden>
+          Preview mode — PDFs are not saved yet. Review below, then Save.
+        </p>
+        <p id="genBanner" class="banner banner-warn" hidden>Generating resume… this preview will update when it is ready.</p>
+        <p id="emptyState" class="empty" hidden></p>
+        <p id="atsPreviewDetail" class="ats-preview-detail" hidden></p>
 
-      <section id="revisePanel" class="revise-panel" hidden>
+        <div class="doc-stage">
+          <iframe id="previewFrame" class="preview-frame" title="Document preview"></iframe>
+        </div>
+      </section>
+
+      <section id="revisePanel" class="neo-card revise-panel" hidden>
         <label class="revise-label" for="revisePrompt">
           Update this resume
-          <span class="revise-hint">Sends the current resume JSON + JD + your instructions to GPT</span>
+          <span class="revise-hint">Looks at the preview first, then describe the change. Uses the current resume, JD, and your instructions.</span>
         </label>
         <textarea
           id="revisePrompt"
@@ -44,23 +89,14 @@
           placeholder="e.g. Emphasize nCino and Copado in the most recent role. Shorten the summary to 3 lines."
         ></textarea>
         <div class="revise-actions">
-          <button type="button" id="regenerateBtn" class="primary">Regenerate</button>
+          <button type="button" id="regenerateBtn" class="icon-btn icon-btn-accent" title="Regenerate with these instructions">
+            <svg class="btn-icon" aria-hidden="true"><use href="#i-generate"/></svg>
+            <span class="btn-label">Revise</span>
+          </button>
           <p id="reviseStatus" class="revise-status" hidden></p>
         </div>
       </section>
-
-      <p id="pendingBanner" class="pending-banner" hidden>
-        Preview mode — PDFs are not saved yet. Review, optionally regenerate, then click <strong>Save PDFs</strong>.
-      </p>
-      <section id="atsPreviewBadge" class="ats-preview-badge" hidden title="Final ATS score for the current resume">
-        <span class="ats-preview-label">ATS score</span>
-        <strong id="atsPreviewValue">—</strong>
-        <p id="atsPreviewDetail" class="ats-preview-detail"></p>
-      </section>
-      <p id="genBanner" class="gen-banner" hidden>Generating resume… preview will update when it is ready.</p>
-      <p id="emptyState" class="empty" hidden></p>
-      <iframe id="previewFrame" class="preview-frame" title="Document preview"></iframe>
-    </div>
+    </main>
     <script type="module" src="preview.js"></script>
   </body>
 </html>

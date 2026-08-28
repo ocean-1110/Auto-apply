@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-27.greenhouse-select.1";
+  const SCRIPT_BUILD = "2026-08-28.dismiss-modals.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -4142,52 +4142,106 @@
     ).filter((el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el));
   }
 
-  function jobgetherFollowUpModal() {
-    const nodes = queryAllDeep(
-      '[role="dialog"], dialog[open], [aria-modal="true"], [class*="Modal"], [class*="modal"], [class*="popup"], [class*="Popup"]'
-    );
-    for (const node of nodes) {
-      if (!isElVisible(node)) continue;
-      const text = String(node.innerText || node.textContent || "").slice(0, 2000);
-      if (
-        /did you submit your application/i.test(text) ||
-        /i applied,\s*contact hiring manager/i.test(text) ||
-        /i didn't actually apply|i did not actually apply/i.test(text) ||
-        /i['’]ll engage later/i.test(text)
-      ) {
-        return node;
-      }
-    }
-    return null;
+  const INTERRUPT_MODAL_TEXT_RE =
+    /waiting can cost you|turns applications into interviews|reaching the hiring team|did you submit your application|i applied,\s*contact hiring manager|i didn't actually apply|i did not actually apply|i['’]ll engage later|no thanks,?\s*exit|we use cookies|cookie (policy|preferences|consent)|this (site|website) uses cookies|subscribe to (our )?(newsletter|updates)|create a free account to|unlock (premium|faster)|boost your (application|chances)/i;
+  const DISMISS_MODAL_CTA_RE =
+    /no thanks,?\s*exit|no thanks|no,? exit|not now|maybe later|skip(?: for now)?|dismiss|i['’]ll engage later|i will engage later|i didn't actually apply|i did not actually apply|reject all|decline|continue without|close/i;
+  const KEEP_MODAL_OPEN_CTA_RE =
+    /ok,? let['’]?s do it|let['’]?s do it now|contact hiring|i applied|accept all|agree|subscribe|sign up|upgrade|boost|unlock|continue to apply with/i;
+
+  function modalRootSelector() {
+    return '[role="dialog"], dialog[open], [aria-modal="true"], [class*="Modal"], [class*="modal"], [class*="popup"], [class*="Popup"], [class*="overlay"], [class*="Overlay"]';
   }
 
-  function dismissJobgetherFollowUpModal() {
-    const modal = jobgetherFollowUpModal();
-    if (!modal) return false;
-    const controls = visibleActionControls(modal);
-    const closeBtn = controls.find((c) => {
-      const t = elActionText(c);
-      const aria = `${c.getAttribute?.("aria-label") || ""} ${c.getAttribute?.("title") || ""}`;
-      return /^[x×]$/i.test(t) || /^(close|dismiss)$/i.test(t) || /close|dismiss/i.test(aria);
-    });
-    const prefer = [
-      closeBtn,
-      controls.find((c) => /i['’]ll engage later|i will engage later/i.test(elActionText(c))),
-      controls.find((c) =>
-        /i didn't actually apply|i did not actually apply/i.test(elActionText(c))
-      )
-    ].filter(Boolean);
-    const el = prefer[0];
-    if (el) {
-      safeClick(el);
+  function modalCopy(node) {
+    return String(node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function isLikelyApplicationModal(node) {
+    if (!node) return false;
+    const fields = node.querySelectorAll(
+      'input:not([type="hidden"]):not([type="button"]):not([type="submit"]), textarea, select'
+    ).length;
+    if (fields >= 4) return true;
+    const text = modalCopy(node).slice(0, 1800);
+    if (fields >= 2 && /work experience|education|cover letter|first name|phone number|resume/i.test(text)) {
       return true;
     }
     return false;
   }
 
+  function isCloseControl(el) {
+    if (!el) return false;
+    const t = elActionText(el);
+    const hint = `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""} ${el.id || ""} ${el.className || ""}`;
+    if (/^[x×]$/i.test(t) || /^(close|dismiss)$/i.test(t)) return true;
+    if (/close|dismiss|modal-close|btn-close|popup-close/i.test(hint) && t.length <= 12) return true;
+    return false;
+  }
+
+  function findModalDismissControl(modal) {
+    const clickable = queryAllDeep(
+      "a, button, [role='button'], input[type='button'], input[type='submit'], [aria-label], [title]",
+      modal
+    ).filter((el) => isElVisible(el) && isElEnabled(el));
+    const closeBtn = clickable.find((el) => isCloseControl(el));
+    const dismissCta = clickable.find((el) => {
+      const t = elActionText(el);
+      if (!t || KEEP_MODAL_OPEN_CTA_RE.test(t)) return false;
+      return DISMISS_MODAL_CTA_RE.test(t);
+    });
+    return closeBtn || dismissCta || null;
+  }
+
+  function isInterruptModal(node) {
+    if (!node || !isElVisible(node) || isLikelyApplicationModal(node)) return false;
+    try {
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 180 || rect.height < 80) return false;
+    } catch {
+      /* ignore */
+    }
+    const text = modalCopy(node).slice(0, 2500);
+    if (INTERRUPT_MODAL_TEXT_RE.test(text)) return true;
+    const dismiss = findModalDismissControl(node);
+    if (!dismiss) return false;
+    const t = elActionText(dismiss);
+    if (!t || /^(close|dismiss|[x×])$/i.test(t)) return false;
+    return DISMISS_MODAL_CTA_RE.test(t);
+  }
+
+  function findInterruptModals() {
+    const seen = new Set();
+    const out = [];
+    for (const node of queryAllDeep(modalRootSelector())) {
+      if (seen.has(node) || !isInterruptModal(node)) continue;
+      seen.add(node);
+      out.push(node);
+    }
+    return out;
+  }
+
+  function dismissBlockingModalsOnce() {
+    let dismissed = false;
+    for (const modal of findInterruptModals()) {
+      const el = findModalDismissControl(modal);
+      if (!el) continue;
+      safeClick(el);
+      dismissed = true;
+    }
+    return dismissed;
+  }
+
+  async function dismissBlockingModals({ rounds = 4 } = {}) {
+    for (let i = 0; i < rounds; i += 1) {
+      if (!dismissBlockingModalsOnce()) break;
+      await sleep(450);
+    }
+  }
+
   function findJobgetherApplyButton() {
     if (!isJobgetherPage()) return null;
-    dismissJobgetherFollowUpModal();
+    dismissBlockingModalsOnce();
     const controls = visibleActionControls();
     const scored = [];
     for (const el of controls) {
@@ -4730,10 +4784,9 @@
   }
 
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
+    await sleep(400);
+    await dismissBlockingModals();
     if (isJobgetherPage()) {
-      dismissJobgetherFollowUpModal();
-      await sleep(700);
-      dismissJobgetherFollowUpModal();
       return clickLabeledEntry(findJobgetherApplyButton(), {
         preferNewTab,
         alreadyOpenText: "jobgether apply"
@@ -5116,6 +5169,7 @@
       summary.detail = goneAtStart;
       return summary;
     }
+    await dismissBlockingModals();
     if (detectPageBlocker()) {
       summary.status = "needs_review";
       summary.detail = detectPageBlocker();
@@ -5136,6 +5190,7 @@
 
     let noAdvance = 0;
     for (let step = 0; step < maxSteps; step += 1) {
+      await dismissBlockingModals();
       const goneNow = detectJobUnavailable();
       if (goneNow) {
         summary.status = "unavailable";

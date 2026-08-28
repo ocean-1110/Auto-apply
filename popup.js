@@ -2020,15 +2020,12 @@ function isResumeOnlyEnabled() {
 
 function updateGenerateButtonLabel() {
   if (!generateResumeBtn) return;
-  const hint = generateResumeBtn.querySelector(".shortcut-hint");
-  const hintHtml = hint ? ` <kbd class="shortcut-hint">${hint.textContent}</kbd>` : "";
-  if (isResumeOnlyEnabled()) {
-    generateResumeBtn.innerHTML = `Generate resume only${hintHtml}`;
-    generateResumeBtn.title = "Alt+Shift+G — Generate resume only (no cover letter)";
-  } else {
-    generateResumeBtn.innerHTML = `Generate resume &amp; cover letter${hintHtml}`;
-    generateResumeBtn.title = "Alt+Shift+G — Generate resume & cover letter";
-  }
+  const resumeOnly = isResumeOnlyEnabled();
+  const labelEl = generateResumeBtn.querySelector(".btn-label");
+  if (labelEl) labelEl.textContent = resumeOnly ? "Resume" : "Generate";
+  generateResumeBtn.title = resumeOnly
+    ? "Generate resume only — no cover letter (Alt+Shift+G)"
+    : "Generate resume & cover letter (Alt+Shift+G)";
 }
 
 async function persistResumeOnlySetting() {
@@ -2095,19 +2092,30 @@ async function refreshQaBank() {
       getQaCount(""),
       getPendingQaCount(profileId)
     ]);
-    const parts = [];
-    if (profileCount) parts.push(`${profileCount} this profile`);
-    if (sharedCount) parts.push(`${sharedCount} shared`);
-    if (pendingCount) parts.push(`${pendingCount} to register`);
-    qaBankNoteEl.textContent = parts.length ? parts.join(" · ") : "0 saved";
+    const total = Number(profileCount || 0) + Number(sharedCount || 0);
+    const pending = Number(pendingCount || 0);
+    qaBankNoteEl.textContent = pending ? `${total + pending}` : String(total);
+    qaBankNoteEl.hidden = total === 0 && pending === 0;
+    qaBankNoteEl.classList.toggle("is-pending", pending > 0);
+    if (qaOpenEditorBtn) {
+      const parts = [];
+      if (profileCount) parts.push(`${profileCount} this profile`);
+      if (sharedCount) parts.push(`${sharedCount} shared`);
+      if (pending) parts.push(`${pending} to register`);
+      qaOpenEditorBtn.title = parts.length
+        ? `Open Q&A bank — ${parts.join(" · ")}`
+        : "Open Q&A bank";
+    }
   } catch {
-    qaBankNoteEl.textContent = "Q&A";
+    qaBankNoteEl.textContent = "";
+    qaBankNoteEl.hidden = true;
   }
 }
 
 function closeSubpage() {
   if (!subpageOverlayEl || subpageOverlayEl.hidden) return;
   const wasProfile = subpageFrameEl?.dataset.kind === "profile";
+  const wasQa = subpageFrameEl?.dataset.kind === "qa";
   subpageOverlayEl.hidden = true;
   document.body.classList.remove("subpage-open");
   if (subpageFrameEl) {
@@ -2116,6 +2124,8 @@ function closeSubpage() {
   }
   if (wasProfile) {
     refreshProfiles(profileSelectEl?.value || DEFAULT_PROFILE_ID).catch(() => {});
+  }
+  if (wasProfile || wasQa) {
     refreshQaBank().catch(() => {});
   }
 }
@@ -2159,7 +2169,7 @@ async function openQaEditor() {
   const url = new URL(chrome.runtime.getURL("qa-editor.html"));
   const profileId = profileSelectEl?.value || "";
   if (profileId) url.searchParams.set("profileId", profileId);
-  openSubpage(url.toString(), { title: "Q&A Editor", kind: "qa" });
+  openSubpage(url.toString(), { title: "Q&A bank", kind: "qa" });
 }
 
 let autofillInProgress = false;
@@ -2169,9 +2179,15 @@ async function applyAutofillButtonState(button = null) {
   const label = String(button?.label || "Autofill").trim() || "Autofill";
   const title =
     String(button?.title || "").trim() ||
-    "Fill this step first. On a one-page form the button becomes Submit after filling.";
-  const hint = '<kbd class="shortcut-hint">Alt+Shift+E</kbd>';
-  autofillBtn.innerHTML = `${label} ${hint}`;
+    "Fill this step first. On a one-page form the button becomes Submit after filling. (Alt+Shift+E)";
+  const isSubmit = label.toLowerCase() === "submit";
+  const labelEl = autofillBtn.querySelector(".btn-label");
+  const fillIcon = autofillBtn.querySelector(".btn-icon-fill");
+  const sendIcon = autofillBtn.querySelector(".btn-icon-submit");
+  if (labelEl) labelEl.textContent = isSubmit ? "Submit" : "Autofill";
+  if (fillIcon) fillIcon.hidden = isSubmit;
+  if (sendIcon) sendIcon.hidden = !isSubmit;
+  autofillBtn.classList.toggle("is-submit", isSubmit);
   autofillBtn.title = title;
   autofillBtn.dataset.actionLabel = label;
 }

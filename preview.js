@@ -6,7 +6,6 @@ import { closeHostWindow } from "./close-host.js";
 const els = {
   templateSelect: document.getElementById("templateSelect"),
   refreshBtn: document.getElementById("refreshBtn"),
-  printBtn: document.getElementById("printBtn"),
   saveBtn: document.getElementById("saveBtn"),
   closeBtn: document.getElementById("closeBtn"),
   tabResume: document.getElementById("tabResume"),
@@ -35,6 +34,12 @@ let previewMode = false;
 let pendingSave = false;
 let busy = false;
 
+function setBtnLabel(btn, text) {
+  const label = btn?.querySelector(".btn-label");
+  if (label) label.textContent = text;
+  else if (btn) btn.textContent = text;
+}
+
 function fillTemplates(selectedId) {
   const templates = getAllTemplates();
   els.templateSelect.innerHTML = "";
@@ -57,7 +62,7 @@ function setReviseStatus(text, { error = false } = {}) {
   const msg = String(text || "").trim();
   els.reviseStatus.hidden = !msg;
   els.reviseStatus.textContent = msg;
-  els.reviseStatus.style.color = error ? "#9b2c2c" : "";
+  els.reviseStatus.style.color = error ? "var(--rose)" : "";
 }
 
 function renderAtsPreview() {
@@ -65,6 +70,7 @@ function renderAtsPreview() {
   const score = Number(atsReport?.finalScore ?? atsReport?.score);
   if (!Number.isFinite(score) || score <= 0) {
     els.atsPreviewBadge.hidden = true;
+    if (els.atsPreviewDetail) els.atsPreviewDetail.hidden = true;
     return;
   }
   els.atsPreviewBadge.hidden = false;
@@ -83,7 +89,9 @@ function renderAtsPreview() {
     bits.push(String(atsReport.rationale).slice(0, 160));
   }
   if (els.atsPreviewDetail) {
-    els.atsPreviewDetail.textContent = bits.join(" · ") || formatAtsTooltip(atsReport);
+    const detail = bits.join(" · ") || formatAtsTooltip(atsReport);
+    els.atsPreviewDetail.textContent = detail;
+    els.atsPreviewDetail.hidden = !detail;
   }
   els.atsPreviewBadge.title = formatAtsTooltip(atsReport) || "Final ATS score";
 }
@@ -96,7 +104,10 @@ function updateChrome() {
   if (els.saveBtn) {
     els.saveBtn.hidden = !((previewMode || pendingSave) && hasResume);
     els.saveBtn.disabled = busy || generating || !hasResume;
-    els.saveBtn.textContent = pendingSave ? "Save PDFs" : "Save PDFs again";
+    setBtnLabel(els.saveBtn, pendingSave ? "Save" : "Resave");
+    els.saveBtn.title = pendingSave
+      ? "Render PDFs and save to the output folder"
+      : "Save PDFs again to the output folder";
   }
   if (els.regenerateBtn) els.regenerateBtn.disabled = busy || generating || !hasResume;
   if (els.revisePrompt) els.revisePrompt.disabled = busy || generating;
@@ -110,6 +121,8 @@ function render() {
   if (view === "cover") {
     els.tabCover.classList.add("is-active");
     els.tabResume.classList.remove("is-active");
+    els.tabCover.setAttribute("aria-selected", "true");
+    els.tabResume.setAttribute("aria-selected", "false");
     if (!String(coverText || "").trim()) {
       els.emptyState.hidden = false;
       els.emptyState.textContent =
@@ -131,6 +144,8 @@ function render() {
 
   els.tabResume.classList.add("is-active");
   els.tabCover.classList.remove("is-active");
+  els.tabResume.setAttribute("aria-selected", "true");
+  els.tabCover.setAttribute("aria-selected", "false");
   if (!resumeData || typeof resumeData !== "object") {
     els.emptyState.hidden = false;
     els.emptyState.textContent = "No resume yet. Generate from the extension panel, then refresh.";
@@ -263,9 +278,6 @@ els.templateSelect.addEventListener("change", () => {
 });
 els.refreshBtn.addEventListener("click", () => {
   load().catch(() => {});
-});
-els.printBtn.addEventListener("click", () => {
-  els.previewFrame.contentWindow?.print();
 });
 els.saveBtn?.addEventListener("click", () => {
   saveDocuments().catch(() => {});
