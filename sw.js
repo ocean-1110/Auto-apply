@@ -788,7 +788,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-01.dice-unavailable-alert.2";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-01.dice-submit-page.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -2151,13 +2151,24 @@ function pickBestApplyAction(frameResults = []) {
   const emailVerificationText =
     frameResults.find((f) => f?.emailVerificationText)?.emailVerificationText || "";
   let workdayWizard = null;
+  let diceSubmitPage = false;
   for (const f of frameResults) {
     if (f?.workdayWizard && !workdayWizard) workdayWizard = f.workdayWizard;
+    if (f?.diceSubmitPage) diceSubmitPage = true;
     if (
       f?.workdayWizard?.isReview &&
       f.action?.type === "submit" &&
       best?.action?.type !== "submit"
     ) {
+      best = {
+        frameId: f.frameId,
+        action: f.action,
+        signature: f.signature || "",
+        href: f.href || "",
+        isApplicationForm: Boolean(f.isApplicationForm)
+      };
+    }
+    if (diceSubmitPage && f?.action?.type === "submit" && best?.action?.type !== "submit") {
       best = {
         frameId: f.frameId,
         action: f.action,
@@ -2183,6 +2194,7 @@ function pickBestApplyAction(frameResults = []) {
     emailVerification,
     emailVerificationText,
     workdayWizard,
+    diceSubmitPage,
     fillableCount: Math.max(0, ...frameResults.map((f) => Number(f?.fillableCount || 0))),
     applyUrls,
     needsFill: frameResults.some((f) => f?.needsFill),
@@ -3134,6 +3146,79 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
+    // Dice final step: wait 1s on the Submit page, click Submit, then close wizard tabs.
+    if (
+      site === "dice" &&
+      autoClickSubmit &&
+      (probe.diceSubmitPage || probe.best?.action?.type === "submit")
+    ) {
+      if (probe.uploadsBusy) {
+        for (let wait = 0; wait < 15 && probe.uploadsBusy; wait += 1) {
+          await setStatus("Auto Apply: waiting for upload before Submit...");
+          await sleepMs(700);
+          probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+          if (probe.applicationSuccess) break;
+        }
+      }
+      if (!probe.applicationSuccess) {
+        for (let i = 0; i < 15 && probe.best?.action?.type !== "submit"; i += 1) {
+          await setStatus("Auto Apply: on Submit page — waiting for button...");
+          await sleepMs(400);
+          probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+          if (probe.applicationSuccess) break;
+        }
+      }
+      if (probe.applicationSuccess && didClickSubmit) {
+        if (closeOnSuccess) {
+          await setStatus("Application submitted — closing application tabs...");
+          await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
+        }
+        summary.status = "submitted";
+        summary.detail = probe.applicationSuccess;
+        summary.tabId = closeOnSuccess ? null : currentTabId;
+        return summary;
+      }
+      if (probe.best?.action?.type === "submit") {
+        didClickSubmit = true;
+        const clickLabel = probe.best.action.text || "Submit";
+        const clickRes = await clickSubmitOnTab(currentTabId, {
+          frameId: probe.best.frameId,
+          clickLabel,
+          settleMs: 1000
+        });
+        if (clickRes?.externalRedirect) {
+          summary.status = "skipped";
+          summary.detail =
+            "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+          summary.tabId = currentTabId;
+          return summary;
+        }
+        if (!(clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit)) {
+          await markReadyToSubmit(
+            (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || ""
+          );
+          summary.status = "needs_review";
+          summary.detail =
+            "Could not click Submit. The application tab was left open so you can finish.";
+          summary.tabId = currentTabId;
+          return summary;
+        }
+        if (clickRes?.navigateUrl) {
+          await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+        }
+        const finished = await finishSubmittedApplication(currentTabId, {
+          closeOnSuccess,
+          clickLabel,
+          originTabId
+        });
+        summary.status = finished.status;
+        summary.detail = finished.detail;
+        summary.tabId = finished.tabId;
+        summary.steps = step + 1;
+        return summary;
+      }
+    }
+
     // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel / profile).
     if (!probe.anyForm) {
       const allowedApplyUrl = (probe.applyUrls || []).find(
@@ -3319,7 +3404,8 @@ async function startMultiStepApplyOnTab(
     // other ATS pause so you can review and click Submit in Ocean.
     if (
       (probe.uploadsBusy || probe.needsFill) &&
-      probe.best?.action?.type !== "submit"
+      probe.best?.action?.type !== "submit" &&
+      !probe.diceSubmitPage
     ) {
       for (let wait = 0; wait < 12; wait += 1) {
         await sleepMs(700);
@@ -3341,16 +3427,17 @@ async function startMultiStepApplyOnTab(
     }
 
     // Dice last wizard step: Submit can stay disabled until the SPA finishes
-    // rendering. Wait briefly so we click Submit instead of a leftover Next.
+    // rendering. Keep polling — never exit early on a carousel Next.
     if (site === "dice" && !probe.applicationSuccess && probe.best?.action?.type !== "submit") {
-      for (let i = 0; i < 10; i += 1) {
+      for (let i = 0; i < 12; i += 1) {
         await sleepMs(400);
         const again = await getApplyActionFromTab(currentTabId).catch(() => null);
         if (!again) continue;
         probe = again;
-        if (again.applicationSuccess || again.best?.action?.type === "submit") break;
+        if (again.applicationSuccess || again.best?.action?.type === "submit" || again.diceSubmitPage) {
+          break;
+        }
         if (again.uploadsBusy) continue;
-        if (!again.needsFill && again.best?.action?.type === "next") break;
       }
     }
 
@@ -3448,6 +3535,12 @@ async function startMultiStepApplyOnTab(
     const prevUrl = live?.url || "";
     const prevSig = probe.signature || "";
     const actionType = probe.best.action.type;
+
+    // Dice: never click carousel Next on the final Submit/review step.
+    if (site === "dice" && (probe.diceSubmitPage || actionType === "submit")) {
+      continue;
+    }
+
     if (actionType !== "next" && actionType !== "review") {
       summary.status = "ready_for_review";
       summary.detail = `Filled the form. Unexpected action "${probe.best.action.text || actionType}".`;

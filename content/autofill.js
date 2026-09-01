@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-01.dice-unavailable-alert.2";
+  const SCRIPT_BUILD = "2026-09-01.dice-submit-page.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -4017,6 +4017,108 @@
     return document;
   }
 
+  function isDiceWizardFooterButton(btn) {
+    if (!btn || typeof btn.closest !== "function") return false;
+    return Boolean(
+      btn.closest(
+        [
+          '[class*="footer"]',
+          '[class*="Footer"]',
+          '[data-testid*="footer"]',
+          '[class*="wizard-action"]',
+          '[class*="step-action"]',
+          '[class*="form-action"]',
+          '[class*="sticky"]',
+          '[class*="WizardFooter"]',
+          '[class*="wizard-footer"]',
+          '[class*="actions"]'
+        ].join(", ")
+      )
+    );
+  }
+
+  /** Job carousel / similar jobs chrome — not the application wizard footer. */
+  function isDiceJobCarouselControl(btn) {
+    if (!btn || !isDiceApplicationPath() || typeof btn.closest !== "function") return false;
+    if (isDiceWizardFooterButton(btn)) return false;
+    return Boolean(
+      btn.closest(
+        [
+          '[class*="carousel"]',
+          '[class*="Carousel"]',
+          '[class*="job-card"]',
+          '[class*="JobCard"]',
+          '[class*="similar-jobs"]',
+          '[class*="SimilarJobs"]',
+          '[class*="job-list"]',
+          '[class*="JobList"]',
+          '[data-testid*="job-card"]',
+          '[data-testid*="carousel"]',
+          '[class*="job-view"]',
+          '[class*="JobView"]',
+          "aside"
+        ].join(", ")
+      )
+    );
+  }
+
+  function findDiceWizardSubmitButton() {
+    if (!isDiceApplicationPath()) return null;
+    const root = getDiceWizardRoot() || document;
+    const buttons = [
+      ...root.querySelectorAll(
+        'button, [role="button"], input[type="submit"], input[type="button"]'
+      )
+    ].filter((el) => isElVisible(el) && !isSiteChromeControl(el) && !isDiceJobCarouselControl(el));
+
+    for (const btn of buttons) {
+      const text = elActionText(btn);
+      const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
+      const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
+      const isSubmit =
+        classifyActionButton(text) === "submit" ||
+        typeAttr === "submit" ||
+        /^\s*(submit|apply(\s+now)?)\s*$/i.test(text) ||
+        /submit/i.test(hint);
+      if (!isSubmit || ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) continue;
+      if (!isDiceWizardFooterButton(btn) && !/submit|apply/i.test(hint)) continue;
+      return {
+        type: "submit",
+        el: btn,
+        text: text || "Submit",
+        disabled: !isElEnabled(btn),
+        score: actionButtonScore(btn, "submit")
+      };
+    }
+    return null;
+  }
+
+  /** Dice final wizard step: review + Submit (carousel Next must not win). */
+  function detectDiceSubmitReviewPage() {
+    if (!isDiceApplicationPath()) return false;
+    if (detectApplicationSuccess()) return false;
+
+    const path = String(location.pathname || "");
+    if (/\/review(?:\/|$|\?)/i.test(path)) return true;
+
+    const root = getDiceWizardRoot() || document;
+    const heading = cleanLabelText(
+      root.querySelector('h1, h2, h3, [role="heading"], legend')?.textContent || ""
+    );
+    if (/\breview\b/i.test(heading)) return true;
+
+    const blob = cleanLabelText(root.innerText || "").slice(0, 8000).toLowerCase();
+    if (
+      /review your application|submit your application|ready to submit|confirm your application/.test(
+        blob
+      )
+    ) {
+      return true;
+    }
+
+    return Boolean(findDiceWizardSubmitButton());
+  }
+
   /** Header / avatar / account menu — never treat as Apply / Next / Submit. */
   function isSiteChromeControl(el) {
     if (!el || typeof el.closest !== "function") return true;
@@ -4572,6 +4674,12 @@
 
   const findActionButton = function (scope, { includeDisabledSubmit = false } = {}) {
     const scopeEl = scope || getApplyScope();
+    const diceSubmitPage = isDiceApplicationPath() && detectDiceSubmitReviewPage();
+    if (diceSubmitPage) {
+      const submitOnly = findDiceWizardSubmitButton();
+      if (submitOnly) return submitOnly;
+    }
+
     const allButtons = [
       ...scopeEl.querySelectorAll(
         'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"], [data-automation-id*="next"], [data-automation-id*="Next"], [data-automation-id*="submit"], [data-automation-id*="Submit"]'
@@ -4585,6 +4693,7 @@
       const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
       const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
       if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) continue;
+      if (isDiceApplicationPath() && isDiceJobCarouselControl(btn)) continue;
       if (EASY_BACK_RE.test(text) && !EASY_NEXT_RE.test(text) && !EASY_SUBMIT_RE.test(text)) {
         continue;
       }
@@ -4632,6 +4741,7 @@
           /^\s*(submit|apply(\s+now)?)\s*$/i.test(text) ||
           /submit/i.test(hint);
         if (!isSubmit || isInsideAdOrOverlay(btn) || ENTRY_JUNK_RE.test(text)) continue;
+        if (isDiceApplicationPath() && isDiceJobCarouselControl(btn)) continue;
         submit = {
           type: "submit",
           el: btn,
@@ -4653,7 +4763,11 @@
     // application step is Submit — always prefer it when it is on the wizard.
     if (isDiceApplicationPath()) {
       if (submit) return submit;
-      if (next) return next;
+      if (diceSubmitPage) {
+        const forced = findDiceWizardSubmitButton();
+        if (forced) return forced;
+      }
+      if (next && !diceSubmitPage) return next;
       if (review) return review;
     } else {
       if (next) return next;
@@ -5117,9 +5231,10 @@
       }
     }
     const busy = uploadsStillBusy();
+    const diceSubmitPage = isDiceApplicationPath() && detectDiceSubmitReviewPage();
     // On the final Submit step, optional empty fields must not block Auto Apply.
     const needsFill =
-      action?.type === "submit" ? busy : formNeedsFill() || busy;
+      action?.type === "submit" || diceSubmitPage ? busy : formNeedsFill() || busy;
     return {
       ok: true,
       href: location.href,
@@ -5127,6 +5242,7 @@
       isApplicationForm: Boolean(probe.isApplicationForm),
       site: applyPageSite(),
       workdayWizard,
+      diceSubmitPage,
       emailVerification: Boolean(emailVerification.ok),
       emailVerificationText: emailVerification.text || "",
       fillableCount: Number(probe.fillableCount || 0),
@@ -5430,6 +5546,7 @@
       if (action.type === "submit") {
         if (autoSubmit) {
           if (uploadsStillBusy()) await waitForUploadsToSettle(15000);
+          if (isDiceApplicationPath()) await sleep(1000);
           scrollElIntoView(action.el);
           action.el.click();
           const start = Date.now();
