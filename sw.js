@@ -1,4 +1,10 @@
-﻿import { appendJobToSpreadsheet, updateJobStatusInSpreadsheet } from "./sheets.js";
+﻿import {
+  appendJobToSpreadsheet,
+  updateJobStatusInSpreadsheet,
+  getExistingJobLinks,
+  isJobLinkOnSheet,
+  JobAlreadyOnSheetError
+} from "./sheets.js";
 import {
   ensureCaptureAlarm,
   registerCaptureAlarmListener,
@@ -416,8 +422,45 @@ function isCancelError(err) {
   return /cancelled by user/i.test(String(err?.message || err || ""));
 }
 
+function isJobAlreadyOnSheetError(err) {
+  return err instanceof JobAlreadyOnSheetError || err?.code === "ALREADY_ON_SHEET";
+}
+
+async function resolveSheetSettings(jobMeta = {}) {
+  const stored = await chrome.storage.local.get([
+    "spreadsheet_url",
+    "sheets_web_app_url",
+    "sheets_sheet_name"
+  ]);
+  return {
+    spreadsheetUrl: String(jobMeta.spreadsheetUrl || stored.spreadsheet_url || "").trim(),
+    webAppUrl: String(jobMeta.sheetsWebAppUrl || stored.sheets_web_app_url || "").trim(),
+    sheetName: String(jobMeta.sheetName || stored.sheets_sheet_name || "").trim()
+  };
+}
+
+async function assertJobNotAlreadyOnSheet(jobMeta = {}, sheetLinksCache = null) {
+  const jdLink = String(jobMeta.jdLink || "").trim();
+  if (!jdLink) return;
+
+  const { spreadsheetUrl, webAppUrl, sheetName } = await resolveSheetSettings(jobMeta);
+  if (!spreadsheetUrl || !webAppUrl) return;
+
+  const links =
+    sheetLinksCache ??
+    (await getExistingJobLinks({
+      spreadsheetUrl,
+      webAppUrl,
+      sheetName
+    }));
+
+  if (isJobLinkOnSheet(links, jdLink)) {
+    throw new JobAlreadyOnSheetError(jdLink);
+  }
+}
+
 function isRetryableGenerationError(err) {
-  if (isCancelError(err)) return false;
+  if (isCancelError(err) || isJobAlreadyOnSheetError(err)) return false;
   const msg = String(err?.message || err || "");
   if (/api key is (missing|invalid)|401\b/i.test(msg)) return false;
   if (/missing job description/i.test(msg)) return false;
@@ -4513,6 +4556,7 @@ async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
 async function runGenerationPipeline({ profileId, jobMeta }) {
   const { apiKey, model } = await getOpenAiSettings();
   const meta = jobMeta || {};
+  await assertJobNotAlreadyOnSheet(meta, meta._sheetLinksCache);
   const resumeOnly = meta.resumeOnly === true;
   await ensureCostSession(meta.jdLink || meta.jobTitle || "");
 
@@ -5518,6 +5562,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       let okCount = 0;
       let failCount = 0;
+      let skipCount = 0;
       let closedCount = 0;
       let cancelled = false;
       let probeTabId = null;
@@ -5528,6 +5573,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const trackStored =
           (await chrome.storage.local.get("track_application_status")).track_application_status ===
           true;
+
+        let sheetLinksCache = null;
+        try {
+          const sheetSettings = await resolveSheetSettings(shared);
+          if (sheetSettings.spreadsheetUrl && sheetSettings.webAppUrl) {
+            sheetLinksCache = await getExistingJobLinks(sheetSettings);
+          }
+        } catch (sheetErr) {
+          console.warn("[batch] sheet link prefetch failed:", sheetErr);
+        }
 
         for (let i = 0; i < jobIds.length; i += 1) {
           let importedJobId = "";
@@ -5616,7 +5671,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               trackApplicationStatus:
                 shared.trackApplicationStatus === true || trackStored,
               importedJobId,
-              previewMode: false
+              previewMode: false,
+              _sheetLinksCache: sheetLinksCache
             };
 
             await chrome.storage.local.set({
@@ -5697,8 +5753,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               }
               break;
             }
-            failCount += 1;
             const error = String(err?.message || err);
+            if (isJobAlreadyOnSheetError(err)) {
+              skipCount += 1;
+              if (importedJobId) {
+                await setImportedJobStatus(importedJobId, {
+                  status: "skipped",
+                  statusDetail: "Already on tracking sheet — resume not generated.",
+                  profileId
+                });
+              }
+              await setStatus(
+                `Batch ${i + 1}/${jobIds.length}: skipped — already on sheet. Continuing...`
+              );
+              continue;
+            }
+            failCount += 1;
             if (importedJobId) {
               await setImportedJobStatus(importedJobId, {
                 status: "failed",
@@ -5713,13 +5783,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         const closedNote = closedCount ? `, ${closedCount} closed/removed` : "";
+        const skipNote = skipCount ? `, ${skipCount} already on sheet` : "";
         if (cancelled) {
           await setStatus(
-            `Batch resume build stopped: ${okCount} saved, ${failCount} failed${closedNote} before cancel. ${await getCostSummaryText()}`
+            `Batch resume build stopped: ${okCount} saved, ${failCount} failed${skipNote}${closedNote} before cancel. ${await getCostSummaryText()}`
           );
         } else {
           await setStatus(
-            `Batch resume build finished: ${okCount} saved, ${failCount} failed${closedNote}. ${await getCostSummaryText()}`
+            `Batch resume build finished: ${okCount} saved, ${failCount} failed${skipNote}${closedNote}. ${await getCostSummaryText()}`
           );
         }
       } catch (err) {

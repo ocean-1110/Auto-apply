@@ -74,6 +74,39 @@ export function formatApplicationDate(date = new Date()) {
   return `${month}/${day}/${year}`;
 }
 
+/** Normalize job URLs for duplicate checks (matches capture queue logic). */
+export function normalizeSheetJobLink(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    if (url.pathname.length > 1) url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString();
+  } catch {
+    return raw.replace(/#.*$/, "").replace(/\/+$/, "");
+  }
+}
+
+export function isJobLinkOnSheet(existingLinks, jdLink) {
+  const target = normalizeSheetJobLink(jdLink).toLowerCase();
+  if (!target) return false;
+  return (existingLinks || []).some(
+    (link) => normalizeSheetJobLink(link).toLowerCase() === target
+  );
+}
+
+export class JobAlreadyOnSheetError extends Error {
+  constructor(jdLink = "") {
+    super(
+      `This job is already on your tracking sheet (column A). Skipping resume generation.\n${String(jdLink || "").trim()}`
+    );
+    this.name = "JobAlreadyOnSheetError";
+    this.code = "ALREADY_ON_SHEET";
+    this.jdLink = String(jdLink || "").trim();
+  }
+}
+
 /**
  * Tab-separated row matching sheet columns A–I:
  * JOB URL | JOB TITLE | COMPANY NAME | Application Date |
