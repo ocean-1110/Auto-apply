@@ -291,6 +291,14 @@ textarea:focus {
   filter: brightness(1.06);
 }
 
+.icon-btn-success {
+  color: var(--mint);
+}
+
+.icon-btn-success:hover:not(:disabled) {
+  color: #157a4d;
+}
+
 .icon-btn-hot {
   background: var(--accent-hot);
   color: #fff;

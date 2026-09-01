@@ -16,7 +16,7 @@ import {
   readJobUploadDocsFromDirectory,
   sanitizeJobFolderName
 } from "./fs-output.js";
-import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText } from "./csv-jobs.js";
+import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText, jobIdFromLink } from "./csv-jobs.js";
 import {
   AUTO_CAPTURE_ENABLED_KEY,
   LAST_CAPTURE_STATUS_KEY,
@@ -1790,6 +1790,52 @@ async function refreshScrapeSiteHint() {
   }
 }
 
+async function upsertScrapedJobIntoList(d, { site = "", tabUrl = "" } = {}) {
+  const jdLink = String(d.jdLink || tabUrl || "").trim();
+  if (!jdLink) return "";
+  const id = jobIdFromLink(jdLink);
+  if (!id) return "";
+  const now = Date.now();
+  const existing = importedJobsById[id];
+  const keepStatus = existing?.status === "completed" || existing?.status === "unavailable";
+  const job = {
+    ...(existing || {}),
+    id,
+    jobTitle: d.jobTitle || existing?.jobTitle || "",
+    companyName: d.companyName || existing?.companyName || "",
+    jdLink,
+    jdText: d.jdText || existing?.jdText || "",
+    source: site || existing?.source || "",
+    workArrangement: d.workArrangement || existing?.workArrangement || "",
+    employmentType: d.employmentType || existing?.employmentType || "",
+    salaryMin: d.salaryMin || existing?.salaryMin || "",
+    salaryMax: d.salaryMax || existing?.salaryMax || "",
+    datePosted: d.datePosted || existing?.datePosted || "",
+    status: keepStatus ? existing.status : existing?.status || "imported",
+    statusDetail: keepStatus
+      ? existing.statusDetail || ""
+      : "Scraped from the open tab.",
+    updatedAt: now,
+    createdAt: existing?.createdAt || now
+  };
+  const byId = { ...importedJobsById, [id]: job };
+  const order = importedJobsOrder.includes(id) ? importedJobsOrder : [id, ...importedJobsOrder];
+  importedJobsById = byId;
+  importedJobsOrder = order;
+  importedJobsSelectedId = id;
+  importedJobsChecked.add(id);
+  importedJobsVersion = now;
+  await chrome.storage.local.set({
+    imported_jobs_by_id: byId,
+    imported_jobs_order: order,
+    imported_jobs_selected_id: id,
+    imported_jobs_checked_ids: [...importedJobsChecked],
+    imported_jobs_version: now
+  });
+  renderImportedJobs();
+  return id;
+}
+
 async function scrapeCurrentJobPage() {
   setStatus("Scraping the open job page...", "running");
   setBusy(true);
@@ -1805,6 +1851,7 @@ async function scrapeCurrentJobPage() {
     jobTitleEl.value = d.jobTitle || "";
     companyNameEl.value = d.companyName || "";
     if (d.jdLink) jdLinkEl.value = d.jdLink;
+    else if (res.tabUrl) jdLinkEl.value = res.tabUrl;
     if (d.jdText) jdTextEl.value = d.jdText;
 
     scrapedJobMeta = {
@@ -1817,6 +1864,10 @@ async function scrapeCurrentJobPage() {
 
     await persistJobFields();
     await chrome.storage.local.set({ scraped_job_meta: scrapedJobMeta });
+    const jobId = await upsertScrapedJobIntoList(d, {
+      site: res.site || "",
+      tabUrl: res.tabUrl || ""
+    });
 
     if (!d.companyName) {
       setStatus(
@@ -1828,26 +1879,20 @@ async function scrapeCurrentJobPage() {
     }
 
     const site = res.site ? ` (${res.site})` : "";
-    setStatus(
-      `Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`,
-      "running"
-    );
+    setStatus(`Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`, "running");
 
     const gen = await startGenerationAndWait();
     if (!gen.ok) return;
 
-    setStatus("Resume saved. Running Autofill…", "running");
+    setStatus("Resume saved. Applying (same as the job-card Apply button)…", "running");
     setBusy(true);
-    await runAutofillOnCurrentPage({ quiet: true });
-
-    setStatus(
-      `Done: scraped${site}, generated ${
-        isResumeOnlyEnabled() ? "resume" : "resume & cover letter"
-      }, and ran Autofill.`,
-      "done"
-    );
+    if (jobId) {
+      await applyImportedJob(jobId);
+    } else {
+      setStatus("Resume saved, but this scrape has no job URL — use Apply on the job card.", "error");
+    }
   } catch (err) {
-    setStatus(`Scrape flow failed: ${String(err.message || err)}`, "error");
+    setStatus(`Scrape failed: ${String(err.message || err)}`, "error");
   } finally {
     setBusy(false);
     if (scrapePageBtn) scrapePageBtn.disabled = false;
@@ -2176,20 +2221,21 @@ let autofillInProgress = false;
 
 async function applyAutofillButtonState(button = null) {
   if (!autofillBtn) return;
-  const label = String(button?.label || "Autofill").trim() || "Autofill";
+  const actionType = String(button?.actionType || "").toLowerCase();
+  const isSubmit =
+    actionType === "submit" || String(button?.label || "").toLowerCase() === "submit";
   const title =
     String(button?.title || "").trim() ||
-    "Fill this step first. On a one-page form the button becomes Submit after filling. (Alt+Shift+E)";
-  const isSubmit = label.toLowerCase() === "submit";
+    "Apply: fill every step and continue the application. On Dice this runs through Submit. (Alt+Shift+E)";
   const labelEl = autofillBtn.querySelector(".btn-label");
   const fillIcon = autofillBtn.querySelector(".btn-icon-fill");
   const sendIcon = autofillBtn.querySelector(".btn-icon-submit");
-  if (labelEl) labelEl.textContent = isSubmit ? "Submit" : "Autofill";
+  if (labelEl) labelEl.textContent = "Apply";
   if (fillIcon) fillIcon.hidden = isSubmit;
   if (sendIcon) sendIcon.hidden = !isSubmit;
   autofillBtn.classList.toggle("is-submit", isSubmit);
   autofillBtn.title = title;
-  autofillBtn.dataset.actionLabel = label;
+  autofillBtn.dataset.actionLabel = isSubmit ? "submit" : "Apply";
 }
 
 async function refreshAutofillButtonLabel() {
@@ -2208,16 +2254,25 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
     setStatus("Select a profile first.", "error");
     return;
   }
+  if (autofillInProgress) return;
 
   const preferredAction =
     String(autofillBtn?.dataset?.actionLabel || "").toLowerCase() === "submit" ? "submit" : "";
 
   autofillInProgress = true;
   if (!quiet) {
-    setStatus(preferredAction === "submit" ? "Clicking Submit..." : "Autofill: filling this step...", "running");
+    setStatus(
+      preferredAction === "submit"
+        ? "Apply: submitting..."
+        : "Apply: filling the form and continuing the application...",
+      "running"
+    );
     updateJobsWorkStatus({
       running: true,
-      statusText: preferredAction === "submit" ? "Clicking Submit..." : "Autofill: filling this step..."
+      statusText:
+        preferredAction === "submit"
+          ? "Apply: submitting..."
+          : "Apply: filling the form and continuing..."
     });
   }
   setBusy(true);
@@ -2230,17 +2285,17 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
       preferredAction
     });
     if (!res?.ok) {
-      throw new Error(res?.error || "Autofill failed.");
+      throw new Error(res?.error || "Apply failed.");
     }
     if (res.button) await applyAutofillButtonState(res.button);
     if (!quiet) {
-      setStatus(res.status || "Autofill done.");
+      setStatus(res.status || "Apply done.");
     }
     await refreshQaBank();
     return res;
   } catch (err) {
     if (!quiet) {
-      setStatus(`Autofill failed: ${String(err.message || err)}`, "error");
+      setStatus(`Apply failed: ${String(err.message || err)}`, "error");
     }
     throw err;
   } finally {
@@ -2853,7 +2908,7 @@ panelPollTimer = setInterval(async () => {
     } else if (autofillInProgress) {
       updateJobsWorkStatus({
         running: true,
-        statusText: statusText || "Autofill: working..."
+        statusText: statusText || "Apply: working..."
       });
     } else if (wasGenerationRunning) {
       wasGenerationRunning = false;

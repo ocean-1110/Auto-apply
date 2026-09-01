@@ -74,7 +74,7 @@ ${list.map((c) => `<li>${escapeHtml(c)}</li>`).join("\n")}
 }
 
 const CSS = `
-    @page { size: Letter; margin: 0.44in 0.385in 0.8in 0.385in; }
+    @page { size: Letter; margin: 0.44in 0.385in 0.44in 0.385in; }
 
     * { box-sizing: border-box; }
 
@@ -148,6 +148,11 @@ const CSS = `
       page-break-inside: auto;
     }
 
+    section.experience {
+      break-before: page;
+      page-break-before: always;
+    }
+
     h2 {
       margin: 0 0 0;
       padding: 0 0 3px;
@@ -198,8 +203,8 @@ const CSS = `
 
     .job {
       margin: 8px 0 4px;
-      break-inside: avoid;
-      page-break-inside: avoid;
+      break-inside: auto;
+      page-break-inside: auto;
     }
 
     .job-header {
@@ -337,7 +342,7 @@ export const oceanBlueClassicTemplate = {
     return wrapHtmlDocument({
       title: `${name} - Resume`,
       css: CSS,
-      pageMargin: "0.44in 0.385in 0.8in 0.385in",
+      pageMargin: "0.44in 0.385in 0.44in 0.385in",
       pageWidth: "8.5in",
       body: `  <main class="resume">
     <header class="top">
@@ -351,15 +356,15 @@ export const oceanBlueClassicTemplate = {
       <p>${escapeHtml(data.profile || "")}</p>
     </section>
 
+    ${renderOptionalSection("Education", renderEducationAlbert(edu))}
+
+    ${renderOptionalSection("Certifications", renderCertsAlbert(data.certifications))}
+
     ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
 
     ${renderOptionalSection("Professional Experience", renderJobsAlbert(data.experience), {
       className: "experience"
     })}
-
-    ${renderOptionalSection("Education", renderEducationAlbert(edu))}
-
-    ${renderOptionalSection("Certifications", renderCertsAlbert(data.certifications))}
   </main>`
     });
   }

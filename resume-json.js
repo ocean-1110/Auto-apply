@@ -335,5 +335,5 @@ export function resumeJsonNeedsContinuation(rawText, data) {
   return !isUsableResumeJson(data);
 }
 
-export { resumeJsonToHtml, normalizeResumeData } from "./templates/index.js";
+export { resumeJsonToHtml, normalizeResumeData, markHtmlForPdf } from "./templates/index.js";
 export { normalizeSkills } from "./templates/shared.js";

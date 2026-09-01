@@ -2,11 +2,17 @@ import { getAllTemplates, DEFAULT_TEMPLATE_ID, resumeJsonToHtml } from "./templa
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import { formatAtsTooltip } from "./ats-score.js";
 import { closeHostWindow } from "./close-host.js";
+import {
+  browseLastSavedJobDirectory,
+  getLastSaveMeta,
+  sanitizeJobFolderName
+} from "./fs-output.js";
 
 const els = {
   templateSelect: document.getElementById("templateSelect"),
   refreshBtn: document.getElementById("refreshBtn"),
   saveBtn: document.getElementById("saveBtn"),
+  openFolderBtn: document.getElementById("openFolderBtn"),
   applyBtn: document.getElementById("applyBtn"),
   closeBtn: document.getElementById("closeBtn"),
   tabResume: document.getElementById("tabResume"),
@@ -33,6 +39,7 @@ let atsReport = null;
 let generating = false;
 let previewMode = false;
 let pendingSave = false;
+let savedFolderName = "";
 let busy = false;
 let applyContext = {
   jobId: "",
@@ -40,6 +47,18 @@ let applyContext = {
   status: "",
   jobMeta: {}
 };
+
+function folderNameFromPath(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  const last =
+    s
+      .split(/[/\\]/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .pop() || "";
+  return sanitizeJobFolderName(last);
+}
 
 function setBtnLabel(btn, text) {
   const label = btn?.querySelector(".btn-label");
@@ -115,6 +134,13 @@ function updateChrome() {
     els.saveBtn.title = pendingSave
       ? "Render PDFs and save to the output folder"
       : "Save PDFs again to the output folder";
+  }
+  if (els.openFolderBtn) {
+    els.openFolderBtn.hidden = !(hasResume && !pendingSave);
+    els.openFolderBtn.disabled = busy || generating;
+    els.openFolderBtn.title = savedFolderName
+      ? `Open saved folder (${savedFolderName})`
+      : "Open the saved resume folder";
   }
   if (els.applyBtn) {
     const hasJob = Boolean(applyContext.jobId);
@@ -201,7 +227,8 @@ async function load() {
     "preview_pending_meta",
     "imported_jobs_selected_id",
     "imported_jobs_by_id",
-    "selected_profile_id"
+    "selected_profile_id",
+    "last_output_dir"
   ]);
   generating = Boolean(stored.generation_running);
   previewMode = stored.preview_mode_enabled === true;
@@ -250,6 +277,9 @@ async function load() {
     jobTitle: applyContext.jobMeta.jobTitle,
     companyName: applyContext.jobMeta.companyName
   };
+  savedFolderName =
+    folderNameFromPath(job?.resumeFolder || job?.folderName || "") ||
+    folderNameFromPath(stored.last_output_dir || "");
   const hintParts = [jobMeta.jobTitle, jobMeta.companyName].filter(Boolean);
   const modeNote = previewMode ? "Preview mode on — edit with a prompt, then Save PDFs." : "";
   els.jobHint.textContent = hintParts.length
@@ -308,16 +338,78 @@ async function saveDocuments() {
   updateChrome();
   setReviseStatus("Rendering and saving PDFs…");
   try {
+    const templateId = els.templateSelect?.value || "";
+    // #region agent log
+    fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+      body: JSON.stringify({
+        sessionId: "df7ed5",
+        runId: "pre-fix",
+        hypothesisId: "B",
+        location: "preview.js:saveDocuments",
+        message: "preview save clicked",
+        data: { templateId, view, hasResume: Boolean(resumeData) },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
     const res = await chrome.runtime.sendMessage({
       type: "preview_save_documents",
-      templateId: els.templateSelect?.value || ""
+      templateId
     });
     if (!res?.ok) throw new Error(res?.error || "Save failed.");
     pendingSave = false;
+    if (res.folderName) savedFolderName = folderNameFromPath(res.folderName);
     if (typeof res.coverLetter === "string") coverText = res.coverLetter;
     setReviseStatus(res.status || "Saved to the output folder.");
     render();
   } catch (err) {
+    setReviseStatus(String(err?.message || err), { error: true });
+  } finally {
+    busy = false;
+    updateChrome();
+  }
+}
+
+async function openSavedFolder() {
+  busy = true;
+  updateChrome();
+  setReviseStatus("Opening saved folder…");
+  try {
+    const meta = await getLastSaveMeta();
+    const preferredFolder = savedFolderName || "";
+
+    if (!preferredFolder && !meta) {
+      throw new Error("Nothing saved yet. Save PDFs first.");
+    }
+
+    if (!preferredFolder && meta?.downloadId != null && meta.method === "downloads") {
+      const res = await chrome.runtime.sendMessage({
+        type: "open_saved_folder",
+        meta
+      });
+      if (!res?.ok) throw new Error(res?.error || "Could not open folder.");
+      setReviseStatus(`Opened folder: ${meta.pathLabel}`);
+      return;
+    }
+
+    const result = await browseLastSavedJobDirectory(preferredFolder);
+    if (result?.aborted) {
+      setReviseStatus("Folder browser closed.");
+      return;
+    }
+    const folderLabel = result?.folderName ? ` (${result.folderName})` : "";
+    if (result?.method === "file-picker" && Array.isArray(result.files) && result.files.length) {
+      setReviseStatus(`Opened ${result.files.join(", ")} from the saved folder${folderLabel}.`);
+      return;
+    }
+    setReviseStatus(`Opened the saved folder${folderLabel}.`);
+  } catch (err) {
+    if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
+      setReviseStatus("Folder browser closed.");
+      return;
+    }
     setReviseStatus(String(err?.message || err), { error: true });
   } finally {
     busy = false;
@@ -372,6 +464,9 @@ els.refreshBtn.addEventListener("click", () => {
 els.saveBtn?.addEventListener("click", () => {
   saveDocuments().catch(() => {});
 });
+els.openFolderBtn?.addEventListener("click", () => {
+  openSavedFolder().catch(() => {});
+});
 els.applyBtn?.addEventListener("click", () => {
   applyFromPreview().catch(() => {});
 });
@@ -393,6 +488,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     changes.preview_mode_enabled ||
     changes.preview_pending_save ||
     changes.preview_pending_meta ||
+    changes.last_output_dir ||
     changes.imported_jobs_by_id ||
     changes.imported_jobs_selected_id ||
     changes.selected_profile_id

@@ -291,12 +291,12 @@ export function wrapHtmlDocument({
   <style>
 ${css}
 
-    /* Preview / screen: show real page margins (@page alone is print-only). */
+    /* Preview iframe only — never used for PDF capture. */
     @media screen {
-      html {
+      html:not([data-ocean-pdf="1"]) {
         background: #d7e6f7;
       }
-      body {
+      html:not([data-ocean-pdf="1"]) body {
         box-sizing: border-box !important;
         width: ${width} !important;
         max-width: 100% !important;
@@ -308,8 +308,21 @@ ${css}
       }
     }
 
+    /* PDF print path: @page margins control spacing — no body padding. */
+    html[data-ocean-pdf="1"] body {
+      box-sizing: border-box !important;
+      width: ${width} !important;
+      max-width: none !important;
+      min-height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      background: #fff !important;
+      box-shadow: none !important;
+    }
+
     @media print {
       html { background: #fff !important; }
+      html[data-ocean-pdf="1"] body,
       body {
         margin: 0 !important;
         padding: 0 !important;

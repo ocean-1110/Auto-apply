@@ -62,10 +62,10 @@ function makeTemplate({ id, label, description, css }) {
       <h2>Summary</h2>
       <p>${escapeHtml(data.profile || "")}</p>
     </section>
-    ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
-    ${renderOptionalSection("Experience", renderJobsUs(data.experience))}
     ${renderOptionalSection("Education", renderEducationBlock(edu))}
     ${renderOptionalSection("Certifications", renderCerts(data.certifications))}
+    ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
+    ${renderOptionalSection("Experience", renderJobsUs(data.experience))}
   </main>`
       });
     }

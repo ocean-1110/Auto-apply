@@ -152,6 +152,25 @@ async function htmlToPdfBase64(html) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "ocean_html_to_pdf") return undefined;
+  // #region agent log
+  fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+    body: JSON.stringify({
+      sessionId: "df7ed5",
+      runId: "pre-fix",
+      hypothesisId: "A,E",
+      location: "pdf-render.js:onMessage",
+      message: "offscreen PDF request received",
+      data: {
+        htmlLength: String(message.html || "").length,
+        hasOceanPdfAttr: /data-ocean-pdf\s*=\s*["']1["']/i.test(String(message.html || "")),
+        hasPreviewShell: /class="page"|preview-frame|doc-toolbar/i.test(String(message.html || ""))
+      },
+      timestamp: Date.now()
+    })
+  }).catch(() => {});
+  // #endregion
   htmlToPdfBase64(message.html || "")
     .then((data) => sendResponse({ ok: true, data }))
     .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));

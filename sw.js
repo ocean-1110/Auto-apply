@@ -1298,7 +1298,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   if (!/^https?:\/\//i.test(tab.url || "")) {
     return {
       ok: false,
-      error: "The current tab is not a web page. Open the application form, then click Autofill."
+      error: "The current tab is not a web page. Open the application form, then click Apply."
     };
   }
 
@@ -1447,43 +1447,45 @@ function describeAutofillButton(probe = {}, { readyToSubmit = false } = {}) {
   const type = String(probe?.best?.action?.type || "");
   const text = String(probe?.best?.action?.text || "").trim();
   const needsFill = probe.needsFill !== false;
-  if (type === "submit") {
-    if (needsFill && !readyToSubmit) {
-      return {
-        label: "Autofill",
-        actionType: "fill",
-        actionText: text || "Submit",
-        title: "Fill this application first. The button becomes Submit after the form is filled."
-      };
-    }
+  const applyTitle =
+    "Apply: fill every step and continue the application. On Dice this runs through Submit. (Alt+Shift+E)";
+  if (type === "submit" && (!needsFill || readyToSubmit)) {
     return {
-      label: "Submit",
+      label: "Apply",
       actionType: "submit",
       actionText: text || "Submit",
-      title: "Click the page Submit button"
-    };
-  }
-  if (type === "next" || type === "review" || type === "entry") {
-    return {
-      label: "Next",
-      actionType: type,
-      actionText: text || "Next",
-      title: "Fill this step, then go to the next application page"
+      title: "Review the filled form, then click Apply to submit. (Alt+Shift+E)"
     };
   }
   return {
-    label: "Autofill",
-    actionType: "",
-    actionText: "",
-    title: "Fill fields on this page (Q&A bank, then AI for text and choices)"
+    label: "Apply",
+    actionType: type === "submit" ? "fill" : type || "",
+    actionText: text,
+    title: applyTitle
   };
 }
 
+function isDiceApplicationUrl(url) {
+  try {
+    const u = new URL(String(url || ""));
+    if (!/(^|\.)dice\.com$/i.test(u.hostname)) return false;
+    return /\/job-applications\b|\/wizard\b|easy-apply/i.test(`${u.pathname}${u.search}`);
+  } catch {
+    return /dice\.com\/(job-applications|wizard)/i.test(String(url || ""));
+  }
+}
+
+/** Job listing / job-detail (no application form): same path as the job-card Apply button. */
+function shouldUseJobCardApplyPath(url, probe) {
+  if (probe?.anyForm) return false;
+  const site = detectSiteFromUrl(url);
+  if (site === "dice") return !isDiceApplicationUrl(url);
+  return probe?.best?.action?.type === "entry";
+}
+
 /**
- * Panel Autofill button: fill the current page first.
- * On a single-page form (Submit only), stop after filling and switch the
- * button to Submit. The next click sends the application.
- * Next/Continue still fill-and-advance in one click.
+ * Panel Apply button: fill the current page first.
+ * On a job listing (especially Dice), uses the same Apply path as the job card.
  */
 async function runAutofillStep(
   profileId,
@@ -1503,6 +1505,45 @@ async function runAutofillStep(
   const ready = await isReadyToSubmit(tab.url || "");
   if (!userWantsSubmit && probe?.best?.action?.type === "submit" && ready) {
     userWantsSubmit = true;
+  }
+
+  if (!userWantsSubmit && shouldUseJobCardApplyPath(tab.url || "", probe)) {
+    if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
+      return {
+        ok: false,
+        error: "Generate a resume first, then click Apply — or use Apply on the job card.",
+        button: describeAutofillButton(probe)
+      };
+    }
+    const site = detectSiteFromUrl(tab.url || "");
+    await setStatus("Apply: applying from this job page (same as job-card Apply)...");
+    const ea = await startMultiStepApplyOnTab(profileId, tabId, {
+      maxSteps: 14,
+      uploadDocs: docs,
+      closeOnSuccess: false,
+      preferNewTab: site === "dice" || site === "jobgether"
+    });
+    if (!ea.ok && ea.error) {
+      return { ok: false, error: ea.error, button: describeAutofillButton(probe) };
+    }
+    const liveId = ea.tabId || tabId;
+    const after = liveId
+      ? await getApplyActionFromTab(liveId).catch(() => probe)
+      : probe;
+    return {
+      ok: true,
+      ...ea,
+      button: describeAutofillButton(after, {
+        readyToSubmit: String(ea.status || "") === "ready_for_review"
+      }),
+      status:
+        ea.detail ||
+        (ea.status === "submitted"
+          ? "Application submitted."
+          : ea.status === "skipped"
+            ? ea.detail || "No Apply button on this page."
+            : `Apply ${ea.status || "done"}.`)
+    };
   }
 
   async function fillSummary(fillRes, extra = "") {
@@ -1673,6 +1714,86 @@ async function runAutofillStep(
     advanced,
     submitted: false,
     button,
+    status
+  };
+}
+
+/**
+ * Panel Apply button: run the whole application (fill → Next → next page),
+ * same engine as job-card Apply. Dice clicks Submit automatically.
+ * Other ATS pause on Submit so a second Apply click sends the form.
+ */
+async function runPanelApply(profileId, { preferredAction = "" } = {}) {
+  const docs = await getLastGeneratedDocs();
+  const tab = await getCurrentApplicationTab();
+  if (!tab?.id) {
+    return { ok: false, error: "No application tab found. Open the job application page first." };
+  }
+  if (!/^https?:\/\//i.test(tab.url || "")) {
+    return {
+      ok: false,
+      error: "The current tab is not a web page. Open the job page, then click Apply."
+    };
+  }
+
+  let probe = await getApplyActionFromTab(tab.id).catch(() => ({ best: null, anyForm: false }));
+  const site = detectSiteFromUrl(tab.url || "");
+  const ready = await isReadyToSubmit(tab.url || "");
+  const wantsSubmit =
+    String(preferredAction || "").toLowerCase() === "submit" ||
+    (probe?.best?.action?.type === "submit" && ready);
+
+  if (wantsSubmit && probe?.best?.action?.type === "submit") {
+    return runAutofillStep(profileId, {
+      uploadDocs: docs,
+      clickAction: true,
+      preferredAction: "submit"
+    });
+  }
+
+  if (!probe?.anyForm && !docs?.resume?.base64 && !docs?.coverLetter?.base64) {
+    return {
+      ok: false,
+      error: "Generate a resume first, then click Apply.",
+      button: describeAutofillButton(probe)
+    };
+  }
+
+  await setStatus("Apply: filling the form and continuing the application...");
+  const ea = await startMultiStepApplyOnTab(profileId, tab.id, {
+    maxSteps: 14,
+    uploadDocs: docs,
+    closeOnSuccess: isAutoSubmitAllowedSite(site),
+    preferNewTab: site === "dice" || site === "jobgether"
+  });
+  if (!ea.ok && ea.error) {
+    return { ok: false, error: ea.error, button: describeAutofillButton(probe) };
+  }
+
+  const liveId = ea.tabId || tab.id;
+  const after = liveId
+    ? await getApplyActionFromTab(liveId).catch(() => probe)
+    : probe;
+  const readyForReview = String(ea.status || "") === "ready_for_review";
+  let status = String(ea.detail || "").trim();
+  if (ea.status === "submitted") {
+    status = status || "Application submitted.";
+  } else if (readyForReview) {
+    status =
+      status ||
+      "Filled every step. Review the form, then click Apply again to submit.";
+  } else if (ea.status === "skipped") {
+    status = status || "No Apply button on this page.";
+  } else if (ea.status === "already_applied") {
+    status = status || "Already applied.";
+  } else if (!status) {
+    status = `Apply ${ea.status || "done"}.`;
+  }
+
+  return {
+    ok: true,
+    ...ea,
+    button: describeAutofillButton(after, { readyToSubmit: readyForReview }),
     status
   };
 }
@@ -2842,7 +2963,7 @@ async function startMultiStepApplyOnTab(
       href: ""
     }));
 
-    if (probe.applicationSuccess && (didClickSubmit || site === "dice")) {
+    if (probe.applicationSuccess && didClickSubmit) {
       if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
@@ -2854,13 +2975,9 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.alreadyApplied) {
-      if (closeOnSuccess && site === "dice") {
-        await closeTabQuietly(currentTabId);
-        if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
-      }
       summary.status = "already_applied";
       summary.detail = probe.alreadyApplied;
-      summary.tabId = closeOnSuccess && site === "dice" ? null : currentTabId;
+      summary.tabId = currentTabId;
       return summary;
     }
 
@@ -2926,15 +3043,11 @@ async function startMultiStepApplyOnTab(
           (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
         );
         if (probe.best?.action?.type !== "entry" && !retryUrl) {
-          if (closeOnSuccess) {
-            await closeTabQuietly(currentTabId);
-            if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
-          }
           summary.status = "skipped";
           summary.detail =
             probe.blockedReason ||
             "No Apply / Easy Apply button on this page — continuing.";
-          summary.tabId = closeOnSuccess ? null : currentTabId;
+          summary.tabId = currentTabId;
           return summary;
         }
       }
@@ -3000,15 +3113,11 @@ async function startMultiStepApplyOnTab(
         await navigateTabToUrl(currentTabId, applyUrl);
         lookedForEntry = false;
       } else {
-        if (closeOnSuccess) {
-          await closeTabQuietly(currentTabId);
-          if (originTabId !== currentTabId) await closeTabQuietly(originTabId);
-        }
         summary.status = "skipped";
         summary.detail =
           probe.blockedReason ||
           "No Apply / Easy Apply button on this page — continuing.";
-        summary.tabId = closeOnSuccess ? null : currentTabId;
+        summary.tabId = currentTabId;
         return summary;
       }
 
@@ -3131,7 +3240,7 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    if (probe.applicationSuccess && (didClickSubmit || site === "dice")) {
+    if (probe.applicationSuccess && didClickSubmit) {
       if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
@@ -3307,7 +3416,7 @@ async function startMultiStepApplyOnTab(
     }
 
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
-    if (afterAdvance?.applicationSuccess && (didClickSubmit || site === "dice")) {
+    if (afterAdvance?.applicationSuccess && didClickSubmit) {
       if (closeOnSuccess && didClickSubmit) {
         await setStatus("Application submitted — closing application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
@@ -3732,34 +3841,125 @@ a, a:visited {
   return `<!doctype html><html><head><style>${css}</style></head><body>${html}</body></html>`;
 }
 
-async function ensurePdfOffscreen() {
-  try {
-    await chrome.offscreen.createDocument({
-      url: "pdf-render.html",
-      reasons: ["DOM_SCRAPING"],
-      justification: "Render resume HTML to PDF in the background without the debugger infobar."
+function debuggerAttach(debuggee) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach(debuggee, "1.3", () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
     });
-  } catch (err) {
-    const msg = String(err?.message || err);
-    if (!/already exists|only one offscreen/i.test(msg)) throw err;
+  });
+}
+
+function debuggerDetach(debuggee) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach(debuggee, () => resolve());
+  });
+}
+
+function debuggerCommand(debuggee, method, params = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand(debuggee, method, params, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(result);
+    });
+  });
+}
+
+function detectPdfPaperFromHtml(html) {
+  const blob = String(html || "");
+  if (/size\s*:\s*Letter/i.test(blob) || /width:\s*8\.5in/i.test(blob)) {
+    return { paperWidth: 8.5, paperHeight: 11, format: "letter" };
   }
+  return { paperWidth: 8.27, paperHeight: 11.69, format: "a4" };
 }
 
 async function htmlToPdfBase64(html) {
-  await ensurePdfOffscreen();
-  const payload = { type: "ocean_html_to_pdf", html: String(html || "") };
-  let lastErr = "PDF generation failed.";
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      const res = await chrome.runtime.sendMessage(payload);
-      if (res?.ok && res.data) return res.data;
-      lastErr = res?.error || lastErr;
-    } catch (err) {
-      lastErr = String(err?.message || err);
-    }
+  const htmlText = String(html || "");
+  const url = `data:text/html;charset=utf-8,${encodeURIComponent(htmlText)}`;
+  const tab = await chrome.tabs.create({ url, active: false });
+  if (!tab.id) throw new Error("Failed to create render tab.");
+  const tabId = tab.id;
+
+  try {
+    await awaitTabComplete(tabId);
     await sleepMs(250);
+    const debuggee = { tabId };
+    await debuggerAttach(debuggee);
+    try {
+      await debuggerCommand(debuggee, "Page.enable");
+      const paper = detectPdfPaperFromHtml(htmlText);
+      const result = await debuggerCommand(debuggee, "Page.printToPDF", {
+        printBackground: true,
+        paperWidth: paper.paperWidth,
+        paperHeight: paper.paperHeight,
+        marginTop: 0,
+        marginBottom: 0,
+        marginLeft: 0,
+        marginRight: 0,
+        preferCSSPageSize: true
+      });
+      if (!result?.data) throw new Error("PDF generation failed.");
+      // #region agent log
+      fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+        body: JSON.stringify({
+          sessionId: "df7ed5",
+          runId: "post-fix",
+          hypothesisId: "F",
+          location: "sw.js:htmlToPdfBase64",
+          message: "PDF render succeeded",
+          data: {
+            pdfMethod: "printToPDF",
+            paperFormat: paper.format,
+            printMargins: "css-only",
+            pdfBase64Length: String(result.data || "").length,
+            htmlHasExperiencePageBreak: /section\.experience[\s\S]*page-break-before\s*:\s*always/i.test(
+              htmlText
+            ),
+            htmlHasPdfBodyPadding: /html\[data-ocean-pdf="1"\]\s*body[\s\S]*padding:\s*0/i.test(
+              htmlText
+            )
+          },
+          timestamp: Date.now()
+        })
+      }).catch(() => {});
+      // #endregion
+      return result.data;
+    } finally {
+      await debuggerDetach(debuggee);
+    }
+  } catch (err) {
+    const error = String(err?.message || err);
+    // #region agent log
+    fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+      body: JSON.stringify({
+        sessionId: "df7ed5",
+        runId: "post-fix",
+        hypothesisId: "F",
+        location: "sw.js:htmlToPdfBase64",
+        message: "PDF render failed",
+        data: { pdfMethod: "printToPDF", error },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
+    throw err;
+  } finally {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch {
+      // tab may already be closed
+    }
   }
-  throw new Error(lastErr);
 }
 
 // MV3 service workers have no URL.createObjectURL / Blob URL support,
@@ -3776,7 +3976,27 @@ function downloadBase64File(base64, mimeType, filename) {
 
 async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
   const templateId = jobMeta.templateId || DEFAULT_TEMPLATE_ID;
-  const html = resumeJsonToHtml(resumeData, templateId);
+  const html = resumeJsonToHtml(resumeData, templateId, { forPdf: true });
+  // #region agent log
+  fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+    body: JSON.stringify({
+      sessionId: "df7ed5",
+      runId: "pre-fix",
+      hypothesisId: "A",
+      location: "sw.js:buildResumeFileBundle",
+      message: "resume HTML built for PDF",
+      data: {
+        templateId,
+        htmlLength: String(html || "").length,
+        hasOceanPdfAttr: /data-ocean-pdf\s*=\s*["']1["']/i.test(String(html || "")),
+        hasScreenCardCss: /@media\s+screen[\s\S]*html:not\(\[data-ocean-pdf/i.test(String(html || ""))
+      },
+      timestamp: Date.now()
+    })
+  }).catch(() => {});
+  // #endregion
   const pdfBase64 = await htmlToPdfBase64(html);
 
   const personName = String(resumeData?.name || "").trim() || "Candidate";
@@ -4532,7 +4752,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     ...saved,
     atsScore: Number(atsReport.finalScore ?? atsReport.score) || 0,
     atsReport,
-    status: `${saved.status} Click Autofill on the application page when ready. ${costLine}`.trim()
+    status: `${saved.status} Click Apply on the job or application page when ready. ${costLine}`.trim()
   };
 }
 
@@ -4804,29 +5024,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        await setStatus("Autofill: filling this step...");
-        const result = await runAutofillStep(profileId, {
-          clickAction: message.clickAction !== false,
+        if (isRunning) {
+          safeSendResponse(sendResponse, {
+            ok: false,
+            error: "Ocean is already running. Wait for it to finish, or cancel."
+          });
+          return;
+        }
+        isRunning = true;
+        clearGenerationCancel();
+        startKeepAlive();
+        await setStatus("Apply: filling the form and continuing the application...");
+        const result = await runPanelApply(profileId, {
           preferredAction: message.preferredAction || ""
         });
         if (result.skipped) {
-          await setStatus(`Autofill skipped: ${result.error}`);
+          await setStatus(`Apply skipped: ${result.error}`);
           safeSendResponse(sendResponse, { ok: false, error: result.error, button: result.button });
           return;
         }
         if (!result.ok) {
-          const err = result.error || "Autofill failed.";
-          await setStatus(`Autofill failed: ${err}`);
+          const err = result.error || "Apply failed.";
+          await setStatus(`Apply failed: ${err}`);
           safeSendResponse(sendResponse, { ok: false, error: err, button: result.button });
           return;
         }
-        const msg = result.status || "Autofill done.";
+        const msg = result.status || "Apply done.";
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Autofill failed: ${error}`);
-        safeSendResponse(sendResponse, { ok: false, error });
+        if (isCancelError(err)) {
+          await setStatus("Cancelled by user.");
+          safeSendResponse(sendResponse, { ok: false, error: "Cancelled by user." });
+        } else {
+          await setStatus(`Apply failed: ${error}`);
+          safeSendResponse(sendResponse, { ok: false, error });
+        }
+      } finally {
+        isRunning = false;
+        finishGenerationCancelState();
+        stopKeepAlive();
       }
     })();
     return true;
@@ -4945,7 +5183,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "easy_apply_current_page") {
-    // Legacy shortcut — same as unified Autofill step (fill + Next/Submit).
+    // Legacy shortcut — same as the panel Apply button (whole application).
     (async () => {
       try {
         const profileId = message.profileId;
@@ -4953,21 +5191,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        await setStatus("Autofill: filling this step...");
-        const result = await runAutofillStep(profileId, { clickAction: true });
+        if (isRunning) {
+          safeSendResponse(sendResponse, {
+            ok: false,
+            error: "Ocean is already running. Wait for it to finish, or cancel."
+          });
+          return;
+        }
+        isRunning = true;
+        clearGenerationCancel();
+        startKeepAlive();
+        await setStatus("Apply: filling the form and continuing the application...");
+        const result = await runPanelApply(profileId, { preferredAction: message.preferredAction || "" });
         if (result.skipped || !result.ok) {
-          const err = result.error || "Autofill failed.";
-          await setStatus(`Autofill failed: ${err}`);
+          const err = result.error || "Apply failed.";
+          await setStatus(`Apply failed: ${err}`);
           safeSendResponse(sendResponse, { ok: false, error: err, button: result.button });
           return;
         }
-        const msg = result.status || "Autofill done.";
+        const msg = result.status || "Apply done.";
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Autofill failed: ${error}`);
+        await setStatus(`Apply failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
+      } finally {
+        isRunning = false;
+        finishGenerationCancelState();
+        stopKeepAlive();
       }
     })();
     return true;
@@ -5829,6 +6081,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           salaryMax: pending.salaryMax || "",
           datePosted: pending.datePosted || ""
         };
+
+        // #region agent log
+        fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "df7ed5" },
+          body: JSON.stringify({
+            sessionId: "df7ed5",
+            runId: "pre-fix",
+            hypothesisId: "B,D",
+            location: "sw.js:preview_save_documents",
+            message: "preview save handler started",
+            data: {
+              messageTemplateId: message.templateId || "",
+              jobMetaTemplateId: jobMeta.templateId,
+              storedTemplateId: stored.selected_template_id || "",
+              pendingTemplateId: pending.templateId || "",
+              hasResumeData: Boolean(resumeData)
+            },
+            timestamp: Date.now()
+          })
+        }).catch(() => {});
+        // #endregion
 
         isRunning = true;
         clearGenerationCancel();

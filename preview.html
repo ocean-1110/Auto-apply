@@ -25,6 +25,9 @@
       <symbol id="i-generate" viewBox="0 0 24 24">
         <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M12 4.5 13.2 9 17.5 10.2 13.2 11.4 12 16l-1.2-4.6L6.5 10.2 10.8 9 12 4.5zM18.2 15.2l.6 2.2 2.2.6-2.2.6-.6 2.2-.6-2.2-2.2-.6 2.2-.6.6-2.2z"/>
       </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 8.2A1.8 1.8 0 0 1 5.8 6.4h4.2l1.6 1.8h6.6A1.8 1.8 0 0 1 20 10v7.2a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 17.2V8.2z"/>
+      </symbol>
     </svg>
 
     <main class="page">
@@ -65,6 +68,10 @@
             <button type="button" id="saveBtn" class="icon-btn icon-btn-accent" hidden title="Render PDFs and save to the output folder">
               <svg class="btn-icon" aria-hidden="true"><use href="#i-save"/></svg>
               <span class="btn-label">Save</span>
+            </button>
+            <button type="button" id="openFolderBtn" class="icon-btn icon-btn-success" hidden title="Open the saved resume folder">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-folder"/></svg>
+              <span class="btn-label">Open folder</span>
             </button>
             <button type="button" id="applyBtn" class="icon-btn icon-btn-hot" hidden title="Apply to this job (same as Apply on the job card)">
               <svg class="btn-icon" aria-hidden="true"><use href="#i-apply"/></svg>

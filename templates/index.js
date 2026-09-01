@@ -36,12 +36,24 @@ export function normalizeResumeData(data) {
   };
 }
 
+export function markHtmlForPdf(html) {
+  const src = String(html || "");
+  if (/data-ocean-pdf\s*=/i.test(src)) return src;
+  if (/<html\b/i.test(src)) {
+    return src.replace(/<html\b([^>]*)>/i, `<html data-ocean-pdf="1"$1>`);
+  }
+  return src;
+}
+
 /**
  * Render resume JSON to a full HTML document using the selected template.
+ * Preview uses the screen card layout. Pass { forPdf: true } for the PDF pipeline.
  * @param {object} data - Parsed resume JSON
  * @param {string} [templateId] - Template id from BUILTIN_TEMPLATES
+ * @param {{ forPdf?: boolean }} [options]
  */
-export function resumeJsonToHtml(data, templateId) {
+export function resumeJsonToHtml(data, templateId, { forPdf = false } = {}) {
   const template = getTemplateById(templateId);
-  return template.render(normalizeResumeData(data));
+  const html = template.render(normalizeResumeData(data));
+  return forPdf ? markHtmlForPdf(html) : html;
 }

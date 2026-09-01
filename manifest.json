@@ -3,7 +3,7 @@
   "name": "Ocean",
   "description": "Ocean — Auto Application App. Generate tailored resumes and cover letters, then autofill job applications.",
   "version": "1.6.5",
-  "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "offscreen", "notifications", "alarms", "sidePanel"],
+  "permissions": ["storage", "downloads", "clipboardRead", "tabs", "scripting", "debugger", "offscreen", "notifications", "alarms", "sidePanel"],
   "host_permissions": [
     "https://api.openai.com/*",
     "https://script.google.com/*",
@@ -94,7 +94,7 @@
         "default": "Alt+Shift+S",
         "mac": "Alt+Shift+S"
       },
-      "description": "Scrape open job → generate → Autofill"
+      "description": "Scrape the open job, generate a resume, then Apply"
     },
     "generate_docs": {
       "suggested_key": {
@@ -108,7 +108,7 @@
         "default": "Alt+Shift+E",
         "mac": "Alt+Shift+E"
       },
-      "description": "Autofill current application step (Next / Submit when available)"
+      "description": "Apply: fill the form and continue the whole application"
     }
   }
 }

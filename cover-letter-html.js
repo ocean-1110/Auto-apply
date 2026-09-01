@@ -97,8 +97,8 @@ export function buildCoverLetterHtml(rawText, contact = {}) {
   .signature .cl-name-sign { font-weight: 700; }
 
   @media screen {
-    html { background: #d7e6f7; }
-    body {
+    html:not([data-ocean-pdf="1"]) { background: #d7e6f7; }
+    html:not([data-ocean-pdf="1"]) body {
       box-sizing: border-box;
       width: 8.5in;
       max-width: 100%;
@@ -107,6 +107,19 @@ export function buildCoverLetterHtml(rawText, contact = {}) {
       padding: 0.7in;
       box-shadow: 0 8px 28px rgba(15, 39, 68, 0.14);
     }
+  }
+  html[data-ocean-pdf="1"] {
+    background: #fff !important;
+  }
+  html[data-ocean-pdf="1"] body {
+    box-sizing: border-box !important;
+    width: 8.5in !important;
+    max-width: none !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0.7in !important;
+    box-shadow: none !important;
+    background: #fff !important;
   }
   @media print {
     html { background: #fff; }
