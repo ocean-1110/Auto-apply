@@ -320,6 +320,25 @@ ${css}
       box-shadow: none !important;
     }
 
+    /* PDF pagination: flow sections continuously; keep headings with content. */
+    html[data-ocean-pdf="1"] section {
+      break-inside: auto !important;
+      page-break-inside: auto !important;
+    }
+    html[data-ocean-pdf="1"] section h2 {
+      break-after: avoid !important;
+      page-break-after: avoid !important;
+    }
+    html[data-ocean-pdf="1"] .job,
+    html[data-ocean-pdf="1"] article.job {
+      break-inside: auto !important;
+      page-break-inside: auto !important;
+    }
+    html[data-ocean-pdf="1"] .job-header {
+      break-after: avoid !important;
+      page-break-after: avoid !important;
+    }
+
     @media print {
       html { background: #fff !important; }
       html[data-ocean-pdf="1"] body,
@@ -330,6 +349,27 @@ ${css}
         max-width: none !important;
         min-height: 0 !important;
         box-shadow: none !important;
+      }
+      section {
+        break-inside: auto !important;
+        page-break-inside: auto !important;
+      }
+      section.experience {
+        break-before: auto !important;
+        page-break-before: auto !important;
+      }
+      section h2 {
+        break-after: avoid !important;
+        page-break-after: avoid !important;
+      }
+      .job,
+      article.job {
+        break-inside: auto !important;
+        page-break-inside: auto !important;
+      }
+      .job-header {
+        break-after: avoid !important;
+        page-break-after: avoid !important;
       }
     }
   </style>

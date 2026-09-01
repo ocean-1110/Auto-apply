@@ -138,19 +138,13 @@ const CSS = `
 
     section {
       margin: 0 0 8px;
-      break-inside: avoid;
-      page-break-inside: avoid;
-    }
-
-    section.skills,
-    section.experience {
       break-inside: auto;
       page-break-inside: auto;
     }
 
-    section.experience {
-      break-before: page;
-      page-break-before: always;
+    section h2 {
+      break-after: avoid;
+      page-break-after: avoid;
     }
 
     h2 {
@@ -213,6 +207,8 @@ const CSS = `
       align-items: baseline;
       gap: 12px;
       margin: 0;
+      break-after: avoid;
+      page-break-after: avoid;
     }
 
     .role {

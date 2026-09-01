@@ -4034,7 +4034,11 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
         templateId,
         htmlLength: String(html || "").length,
         hasOceanPdfAttr: /data-ocean-pdf\s*=\s*["']1["']/i.test(String(html || "")),
-        hasScreenCardCss: /@media\s+screen[\s\S]*html:not\(\[data-ocean-pdf/i.test(String(html || ""))
+        hasScreenCardCss: /@media\s+screen[\s\S]*html:not\(\[data-ocean-pdf/i.test(String(html || "")),
+        hasExperienceForcedPageBreak: /section\.experience[\s\S]*page-break-before\s*:\s*always/i.test(
+          String(html || "")
+        ),
+        hasSectionFlowCss: /section[\s\S]*break-inside:\s*auto/i.test(String(html || ""))
       },
       timestamp: Date.now()
     })
