@@ -580,6 +580,43 @@ function isUnusableJobTabUrl(url) {
   return !isHttpUrl(raw);
 }
 
+function isDiceJobUrl(url) {
+  try {
+    return /(^|\.)dice\.com$/i.test(new URL(String(url || "")).hostname);
+  } catch {
+    return /dice\.com/i.test(String(url || ""));
+  }
+}
+
+/**
+ * Probe a loaded tab for closed-job banners. Dice SPAs may paint the alert after
+ * the first body paint, so poll briefly on dice.com job-detail URLs.
+ */
+async function probeJobUnavailableOnTab(tabId, { url = "", pollMs = 0 } = {}) {
+  await ensureAutofillScript(tabId);
+  const dice = isDiceJobUrl(url);
+  const totalMs = dice ? Math.max(Number(pollMs) || 0, 4500) : 0;
+  const attempts = dice ? Math.max(4, Math.ceil(totalMs / 500)) : 1;
+
+  let lastProbe = null;
+  for (let i = 0; i < attempts; i += 1) {
+    const probe = await sendMessageToTab(
+      tabId,
+      { type: "probe_application_form" },
+      { attempts: 2 }
+    );
+    lastProbe = probe;
+    if (probe?.ok === false && probe?.error) {
+      return { closed: "", error: String(probe.error), probe };
+    }
+    const closed = String(probe?.jobUnavailable || "").trim();
+    if (closed) return { closed, error: "", probe };
+    if (i + 1 < attempts) await sleepMs(500);
+  }
+
+  return { closed: "", error: "", probe: lastProbe };
+}
+
 /**
  * Open (or reuse) a job URL and probe whether the posting is closed.
  * Never throws — unknown load/script errors are returned on `error`.
@@ -623,16 +660,13 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
       return { tabId, closed: "", error: "Job page failed to load.", url: target };
     }
 
-    await ensureAutofillScript(tabId);
-    const probe = await sendMessageToTab(
-      tabId,
-      { type: "probe_application_form" },
-      { attempts: 3 }
-    );
-    if (probe?.ok === false && probe?.error) {
-      return { tabId, closed: "", error: String(probe.error), url: target };
+    const { closed, error } = await probeJobUnavailableOnTab(tabId, {
+      url: target,
+      pollMs: isDiceJobUrl(target) ? 4500 : 0
+    });
+    if (error) {
+      return { tabId, closed: "", error, url: target };
     }
-    const closed = String(probe?.jobUnavailable || "").trim();
     return { tabId, closed, error: "", url: target };
   } catch (err) {
     return {
@@ -672,6 +706,43 @@ async function probeJobAvailabilityWithRetries(
   }
 
   return { ...last, tabId: null };
+}
+
+async function assertJobUrlStillAvailable(jobMeta = {}) {
+  const jobUrl = String(jobMeta.jdLink || "").trim();
+  if (!jobUrl || !/^https?:\/\//i.test(jobUrl)) return;
+
+  await setStatus("Checking if job posting is still open...");
+  const probe = await probeJobAvailabilityWithRetries(jobUrl, { attempts: 3 });
+  if (probe.tabId) {
+    await chrome.tabs.remove(probe.tabId).catch(() => {});
+  }
+
+  if (probe.closed) {
+    const detail = String(probe.closed || "This job is no longer available.").trim();
+    const importedJobId = String(jobMeta.importedJobId || "").trim();
+    if (importedJobId) {
+      await setImportedJobStatus(importedJobId, {
+        status: "unavailable",
+        statusDetail: `No longer available — ${detail}`
+      });
+    }
+    try {
+      await chrome.notifications.create(`job-unavailable-${Date.now()}`, {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
+        title: "Job no longer available",
+        message: detail,
+        priority: 1
+      });
+    } catch {
+      /* notifications may be blocked */
+    }
+    throw new Error(`Job no longer available — generation skipped.\n${detail}`);
+  }
+  if (probe.error) {
+    throw new Error(`Could not verify job is still open: ${probe.error}`);
+  }
 }
 
 async function recoverInterruptedImportedJobs() {
@@ -717,7 +788,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-08-28.cookie-skip-no-apply.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-01.dice-unavailable-alert.2";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -4560,6 +4631,9 @@ async function ensureResumeSkills(data, { apiKey, model, jdText = "" } = {}) {
 async function runGenerationPipeline({ profileId, jobMeta }) {
   const { apiKey, model } = await getOpenAiSettings();
   const meta = jobMeta || {};
+  if (!meta._availabilityChecked) {
+    await assertJobUrlStillAvailable(meta);
+  }
   await assertJobNotAlreadyOnSheet(meta, meta._sheetLinksCache);
   const resumeOnly = meta.resumeOnly === true;
   await ensureCostSession(meta.jdLink || meta.jobTitle || "");
@@ -5627,9 +5701,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               probeTabId = probe.tabId || probeTabId;
               if (probe.closed) {
                 closedCount += 1;
+                await setImportedJobStatus(importedJobId, {
+                  status: "unavailable",
+                  statusDetail: `No longer available — ${probe.closed}`,
+                  profileId
+                });
                 await removeImportedJobFromStorage(importedJobId);
+                try {
+                  await chrome.notifications.create(`job-unavailable-${Date.now()}`, {
+                    type: "basic",
+                    iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
+                    title: "Job no longer available",
+                    message: String(probe.closed || "").slice(0, 240),
+                    priority: 1
+                  });
+                } catch {
+                  /* notifications may be blocked */
+                }
                 await setStatus(
-                  `Closed — removed from list: ${job.jobTitle || importedJobId} (${probe.closed})`
+                  `Closed — skipped: ${job.jobTitle || importedJobId} (${probe.closed})`
                 );
                 continue;
               }
@@ -5676,7 +5766,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 shared.trackApplicationStatus === true || trackStored,
               importedJobId,
               previewMode: false,
-              _sheetLinksCache: sheetLinksCache
+              _sheetLinksCache: sheetLinksCache,
+              _availabilityChecked: true
             };
 
             await chrome.storage.local.set({

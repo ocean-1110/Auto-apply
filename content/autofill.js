@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-08-28.cookie-skip-no-apply.1";
+  const SCRIPT_BUILD = "2026-09-01.dice-unavailable-alert.2";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -3467,10 +3467,69 @@
     return "";
   }
 
+  /** Dice closed posting: div.alert-type-page with "no longer available" / similar jobs copy. */
+  function detectDiceUnavailableAlert() {
+    const host = String(location.hostname || "").toLowerCase();
+    if (!host.endsWith("dice.com")) return "";
+
+    const isVisible = (el) => {
+      if (!el) return false;
+      try {
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        const rect = el.getBoundingClientRect?.();
+        if (rect && (rect.width <= 0 || rect.height <= 0)) return false;
+      } catch {
+        /* ignore */
+      }
+      return true;
+    };
+
+    const messageFromText = (text) => {
+      const clean = cleanLabelText(text);
+      if (!clean) return "";
+      if (
+        JOB_GONE_RE.test(clean) ||
+        /sorry[, ]*this job is no longer available/i.test(clean) ||
+        /similar jobs shown below might interest you/i.test(clean)
+      ) {
+        return clean.slice(0, 200) || "This job is no longer available.";
+      }
+      return "";
+    };
+
+    // Primary: Dice banner container (class alert-type-page).
+    const alerts = document.querySelectorAll(
+      ".alert-type-page, div.alert-type-page, [class*='alert-type-page']"
+    );
+    for (const el of alerts) {
+      if (!isVisible(el)) continue;
+      const hit = messageFromText(el.textContent);
+      if (hit) return hit;
+    }
+
+    // Fallback: closed-job copy rendered without the alert wrapper.
+    const bodyText = String(document.body?.innerText || "").replace(/\s+/g, " ").trim();
+    if (
+      /sorry[, ]*this job is no longer available/i.test(bodyText) &&
+      /similar jobs shown below might interest you/i.test(bodyText)
+    ) {
+      const match = bodyText.match(
+        /sorry[^.!?]*(?:no longer available|similar jobs shown below)[^.!?]*[.!?]?/i
+      );
+      return cleanLabelText(match ? match[0] : bodyText).slice(0, 200);
+    }
+
+    return "";
+  }
+
   /** @returns {string} a short reason when the job is gone, else "" */
   function detectJobUnavailable() {
     const jobrightClosed = detectJobrightExpiredBadge();
     if (jobrightClosed) return jobrightClosed;
+
+    const diceClosed = detectDiceUnavailableAlert();
+    if (diceClosed) return diceClosed;
 
     const match = unavailableTextSnippet().match(JOB_GONE_RE);
     if (match) {

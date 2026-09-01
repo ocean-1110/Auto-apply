@@ -1,7 +1,7 @@
 /**
  * After resume JSON is generated, score it against the JD.
- * If ATS >= 80, keep that resume. If ATS < 80, rewrite until it reaches 80
- * (or max rewrite passes), then the caller renders PDF as usual.
+ * If ATS >= 80%, keep that resume. If below 80%, rewrite up to 3 passes
+ * until the score reaches 80%+, then the caller renders PDF as usual.
  */
 
 import { chatCompletion } from "./openai.js";
@@ -287,13 +287,12 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
   return applyLockedIdentity(data, next);
 }
 
-function needsRewrite(atsReport, localIssues, judge) {
-  // Hard rule: under 80% must rewrite.
-  if (Number(atsReport?.score) < ATS_REWRITE_MIN_SCORE) return true;
-  if ((atsReport?.criticalMissing || []).length) return true;
-  if (localIssues.length) return true;
-  if (judge && (judge.realistic === false || judge.customWrittenForThisJob === true)) return true;
-  return false;
+function needsRewrite(atsReport) {
+  return Number(atsReport?.score) < ATS_REWRITE_MIN_SCORE;
+}
+
+function rewriteStatusReason(atsReport) {
+  return `ATS ${atsReport.score}% is below ${ATS_REWRITE_MIN_SCORE}%`;
 }
 
 /**
@@ -312,11 +311,8 @@ export async function ensureAtsReadyResume(
   let atsReport = await scoreResumeAgainstJd(current, scoreOpts);
   const previousScore = atsReport.score;
 
-  // Fast path: 80%+ with no critical product gaps → accept without rewrite.
-  if (
-    Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE &&
-    !(atsReport?.criticalMissing || []).length
-  ) {
+  // Score already meets target — keep the resume (no rewrite for missing keywords alone).
+  if (Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE) {
     await status(`ATS ${atsReport.score}% (>= ${ATS_REWRITE_MIN_SCORE}%) — keeping this resume.`);
     return {
       data: current,
@@ -330,32 +326,24 @@ export async function ensureAtsReadyResume(
   }
 
   let localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
-  let judge = null;
-  if (Number(atsReport.score) < ATS_REWRITE_MIN_SCORE) {
-    await status(
-      `ATS ${atsReport.score}% is below ${ATS_REWRITE_MIN_SCORE}% — rewriting resume...`
-    );
-  } else {
-    await status(
-      `ATS ${atsReport.score}% but critical JD products are missing — rewriting resume...`
-    );
-  }
+  await status(`${rewriteStatusReason(atsReport)} — rewriting resume...`);
 
   const collectedIssues = [
     ...localIssues,
-    atsReport.score < ATS_REWRITE_MIN_SCORE
-      ? `ATS score ${atsReport.score} is below ${ATS_REWRITE_MIN_SCORE}.`
-      : "",
+    `ATS score ${atsReport.score} is below ${ATS_REWRITE_MIN_SCORE}.`,
     (atsReport?.criticalMissing || []).length
       ? `Named JD products still missing: ${atsReport.criticalMissing.join(", ")}.`
+      : "",
+    (atsReport?.missing || []).length
+      ? `Other gaps: ${atsReport.missing.slice(0, 6).join(", ")}.`
       : ""
   ].filter(Boolean);
 
   let attempts = 0;
-  while (attempts < MAX_REWRITE_ATTEMPTS && needsRewrite(atsReport, localIssues, judge)) {
+  while (attempts < MAX_REWRITE_ATTEMPTS && needsRewrite(atsReport)) {
     attempts += 1;
     await status(
-      `ATS ${atsReport.score}% — rewrite pass ${attempts}/${MAX_REWRITE_ATTEMPTS} (need ${ATS_REWRITE_MIN_SCORE}%+)...`
+      `${rewriteStatusReason(atsReport)} — rewrite pass ${attempts}/${MAX_REWRITE_ATTEMPTS}...`
     );
     const rewritten = await rewriteResumeJson(current, {
       apiKey,
@@ -370,12 +358,7 @@ export async function ensureAtsReadyResume(
     current = rewritten;
     atsReport = await scoreResumeAgainstJd(current, scoreOpts);
     localIssues = localRealismIssues(current, { jdText, jobTitle, companyName, atsReport });
-    judge = null;
-    // Accept as soon as we hit 80%+ without critical product gaps.
-    if (
-      Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE &&
-      !(atsReport?.criticalMissing || []).length
-    ) {
+    if (Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE) {
       await status(`ATS ${atsReport.score}% after rewrite — keeping this resume.`);
       break;
     }
