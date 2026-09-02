@@ -11,6 +11,7 @@
  * @property {boolean} autoSubmitAllowed
  * @property {boolean} [alwaysAutoSubmit]
  * @property {boolean} [isEmployerAts]
+ * @property {boolean} [isGateway]
  * @property {number} [stepBudget]
  * @property {boolean} [emailOtp]
  */
@@ -49,10 +50,19 @@ export const ATS_ADAPTERS = [
     emailOtp: true
   },
   {
+    id: "jobright",
+    label: "Jobright",
+    hostPatterns: [/(^|\.)jobright\.ai$/i],
+    autoSubmitAllowed: false,
+    isGateway: true,
+    stepBudget: 16
+  },
+  {
     id: "jobgether",
     label: "Jobgether",
     hostPatterns: [/(^|\.)jobgether\.com$/i],
     autoSubmitAllowed: false,
+    isGateway: true,
     stepBudget: 18
   },
   {
@@ -135,6 +145,16 @@ export function isEmployerAtsSite(site) {
 
 export function isAutoSubmitAllowedSite(site) {
   return Boolean(getAdapter(site)?.autoSubmitAllowed);
+}
+
+/**
+ * Gateway sites (Jobright, Jobgether) list jobs but hand the actual application
+ * off to an employer ATS — usually in a new tab. Orchestration uses this to
+ * follow that redirect instead of trying to fill the listing page.
+ * @param {string} site
+ */
+export function isGatewaySite(site) {
+  return Boolean(getAdapter(site)?.isGateway);
 }
 
 /**

@@ -98,9 +98,7 @@ export function isJobLinkOnSheet(existingLinks, jdLink) {
 
 export class JobAlreadyOnSheetError extends Error {
   constructor(jdLink = "") {
-    super(
-      `This job is already on your tracking sheet (column A). Skipping resume generation.\n${String(jdLink || "").trim()}`
-    );
+    super("This job is already on your tracking sheet (column A). Skipping resume generation.");
     this.name = "JobAlreadyOnSheetError";
     this.code = "ALREADY_ON_SHEET";
     this.jdLink = String(jdLink || "").trim();

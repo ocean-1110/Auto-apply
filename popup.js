@@ -2489,11 +2489,17 @@ scrapeSiteSelectEl?.addEventListener("change", () => {
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
 stopGenerateBtn?.addEventListener("click", () => {
+  generationStartPending = false;
+  autofillInProgress = false;
   chrome.runtime
     .sendMessage({ type: "cancel_generation" })
     .then(() => {
-      setStatus("Stopping generation…", "running");
-      if (genProgressDetailEl) genProgressDetailEl.textContent = "Stopping…";
+      updateGenerationProgress({
+        running: false,
+        statusText: "Cancelled by user.",
+        clearIdleStatus: true
+      });
+      setBusy(false);
     })
     .catch((err) => setStatus(String(err?.message || err), "error"));
 });
@@ -2890,14 +2896,15 @@ panelPollTimer = setInterval(async () => {
     const running = Boolean(data.generation_running);
     const statusText =
       typeof data.generation_status === "string" ? data.generation_status : "";
+    const cancelled = /\bcancel/i.test(statusText);
 
-    if (running) {
+    if (running && !cancelled) {
       generationStartPending = false;
       wasGenerationRunning = true;
       updateGenerationProgress({ running: true, statusText });
       setBusy(true);
       if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
-    } else if (generationStartPending) {
+    } else if (generationStartPending && !cancelled) {
       // Keep the local "Starting..." UI until the service worker flips the flag.
       updateGenerationProgress({
         running: true,
@@ -2905,6 +2912,16 @@ panelPollTimer = setInterval(async () => {
       });
       setBusy(true);
       if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+    } else if (cancelled) {
+      generationStartPending = false;
+      wasGenerationRunning = false;
+      updateGenerationProgress({
+        running: false,
+        statusText,
+        clearIdleStatus: true
+      });
+      setBusy(false);
+      renderAtsForCurrentJob(data.last_ats_report);
     } else if (autofillInProgress) {
       updateJobsWorkStatus({
         running: true,

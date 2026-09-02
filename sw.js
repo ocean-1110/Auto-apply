@@ -66,7 +66,8 @@ import {
   applySiteLabel,
   isUrlOnApplySite,
   stepBudgetForSite,
-  isAutoSubmitAllowedSite
+  isAutoSubmitAllowedSite,
+  isGatewaySite
 } from "./ats/adapters.js";
 import {
   ensureCostSession,
@@ -204,6 +205,25 @@ async function openPanelWindow() {
   await rememberPanelWindowId(win?.id ?? null);
 }
 
+/**
+ * Make sure the Ocean UI is available (for File System Access writes, preview,
+ * folder unlock) without switching modes. Sidebar stays sidebar — never pop a
+ * window just because generation finished.
+ */
+async function ensurePanelVisible() {
+  const mode = await getPreferredPanelMode();
+  if (mode === "sidebar") {
+    try {
+      await openSidePanelForBrowser();
+    } catch {
+      // Side panel may already be open, or Chrome blocked open() without a
+      // user gesture. Do not fall back to a popup window.
+    }
+    return;
+  }
+  await openPanelWindow();
+}
+
 chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId === panelWindowId) {
     rememberPanelWindowId(null).catch(() => {});
@@ -268,7 +288,7 @@ chrome.action.onClicked.addListener(() => {
 chrome.commands.onCommand.addListener((command) => {
   (async () => {
     if (command === "scrape_and_apply" || command === "generate_docs" || command === "easy_apply") {
-      await openPanelWindow();
+      await handleOpenPanel();
       // Give the panel a moment to load listeners, then relay the command.
       await new Promise((r) => setTimeout(r, 350));
       try {
@@ -414,12 +434,37 @@ function finishGenerationCancelState() {
 
 function assertNotCancelled() {
   if (generationCancelRequested || generationAbortController?.signal?.aborted) {
-    throw new Error("Generation cancelled by user.");
+    throw new Error("Cancelled by user.");
   }
 }
 
 function isCancelError(err) {
-  return /cancelled by user/i.test(String(err?.message || err || ""));
+  const msg = String(err?.message || err || "");
+  const name = String(err?.name || "");
+  return (
+    /cancell?ed by user/i.test(msg) ||
+    name === "AbortError" ||
+    /the user aborted a request/i.test(msg)
+  );
+}
+
+/** Mark jobs left in opening/generating/filling so the list is not stuck after Stop or a SW restart. */
+async function markInProgressJobsStopped(detail = "Cancelled by user.") {
+  const byId = await getImportedJobsById();
+  const now = Date.now();
+  let changed = false;
+  for (const [jobId, job] of Object.entries(byId)) {
+    const s = String(job?.status || "");
+    if (!["opening", "generating", "opening_form", "filling"].includes(s)) continue;
+    byId[jobId] = {
+      ...job,
+      status: "failed",
+      statusDetail: detail,
+      updatedAt: now
+    };
+    changed = true;
+  }
+  if (changed) await setImportedJobsById(byId, { bumpVersion: true });
 }
 
 function isJobAlreadyOnSheetError(err) {
@@ -625,10 +670,14 @@ async function probeJobUnavailableOnTab(tabId, { url = "", pollMs = 0 } = {}) {
 async function openAndProbeJobAvailability(url, { active = false, reuseTabId = null } = {}) {
   const target = String(url || "").trim();
   if (!isHttpUrl(target)) {
-    return { tabId: null, closed: "", error: "Invalid job URL.", url: target };
+    return { tabId: null, closed: "", error: "Invalid job URL.", url: target, createdTab: false };
   }
 
   let tabId = reuseTabId;
+  // Only tabs this probe *creates* may be closed later. A tab the user already
+  // had open (found via findTabByUrl) or a caller-supplied reuse tab must never
+  // be closed here — doing so was closing the user's current job tab.
+  let createdTab = false;
   try {
     if (tabId) {
       const live = await chrome.tabs.get(tabId).catch(() => null);
@@ -645,7 +694,10 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
       } else {
         const tab = await chrome.tabs.create({ url: target, active: Boolean(active) });
         tabId = tab?.id || null;
-        if (!tabId) return { tabId: null, closed: "", error: "Failed to open a tab.", url: target };
+        if (!tabId) {
+          return { tabId: null, closed: "", error: "Failed to open a tab.", url: target, createdTab: false };
+        }
+        createdTab = true;
         await waitForPageReady(tabId);
       }
     } else {
@@ -654,10 +706,10 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
 
     const live = await chrome.tabs.get(tabId).catch(() => null);
     if (!live?.id) {
-      return { tabId: null, closed: "", error: "Tab closed while loading.", url: target };
+      return { tabId: null, closed: "", error: "Tab closed while loading.", url: target, createdTab };
     }
     if (isUnusableJobTabUrl(live.url)) {
-      return { tabId, closed: "", error: "Job page failed to load.", url: target };
+      return { tabId, closed: "", error: "Job page failed to load.", url: target, createdTab };
     }
 
     const { closed, error } = await probeJobUnavailableOnTab(tabId, {
@@ -665,15 +717,16 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
       pollMs: isDiceJobUrl(target) ? 4500 : 0
     });
     if (error) {
-      return { tabId, closed: "", error, url: target };
+      return { tabId, closed: "", error, url: target, createdTab };
     }
-    return { tabId, closed, error: "", url: target };
+    return { tabId, closed, error: "", url: target, createdTab };
   } catch (err) {
     return {
       tabId,
       closed: "",
       error: String(err?.message || err || "Availability probe failed."),
-      url: target
+      url: target,
+      createdTab
     };
   }
 }
@@ -684,10 +737,12 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
  */
 async function probeJobAvailabilityWithRetries(
   url,
-  { attempts = 3, reuseTabId = null, onAttempt } = {}
+  { attempts = 3, reuseTabId = null, reuseTabCreated = false, onAttempt } = {}
 ) {
   let tabId = reuseTabId;
-  let last = { tabId, closed: "", error: "", url, attempts: 0 };
+  // Carry provenance across retries/navigations: only close tabs we opened.
+  let createdByUs = Boolean(reuseTabCreated);
+  let last = { tabId, closed: "", error: "", url, attempts: 0, createdTab: createdByUs };
   const max = Math.max(1, Number(attempts) || 3);
 
   for (let i = 1; i <= max; i += 1) {
@@ -696,16 +751,18 @@ async function probeJobAvailabilityWithRetries(
     }
     last = await openAndProbeJobAvailability(url, { active: false, reuseTabId: tabId });
     last.attempts = i;
-    if (last.closed || !last.error) return last;
+    createdByUs = createdByUs || Boolean(last.createdTab);
+    if (last.closed || !last.error) return { ...last, createdTab: createdByUs };
 
-    if (last.tabId) {
+    if (last.tabId && createdByUs) {
       await chrome.tabs.remove(last.tabId).catch(() => {});
     }
     tabId = null;
+    createdByUs = false;
     if (i < max) await sleepMs(700 * i);
   }
 
-  return { ...last, tabId: null };
+  return { ...last, tabId: null, createdTab: false };
 }
 
 async function assertJobUrlStillAvailable(jobMeta = {}) {
@@ -714,7 +771,8 @@ async function assertJobUrlStillAvailable(jobMeta = {}) {
 
   await setStatus("Checking if job posting is still open...");
   const probe = await probeJobAvailabilityWithRetries(jobUrl, { attempts: 3 });
-  if (probe.tabId) {
+  // Never close a tab the user already had open — only one this probe created.
+  if (probe.tabId && probe.createdTab) {
     await chrome.tabs.remove(probe.tabId).catch(() => {});
   }
 
@@ -745,7 +803,7 @@ async function assertJobUrlStillAvailable(jobMeta = {}) {
   }
 }
 
-async function recoverInterruptedImportedJobs() {
+async function recoverInterruptedImportedJobs({ immediate = false } = {}) {
   const INTERUPTED_AFTER_MS = 10 * 60 * 1000; // 10 minutes
 
   const data = await chrome.storage.local.get([IMPORTED_JOBS_BY_ID_KEY, IMPORTED_JOBS_VERSION_KEY]);
@@ -759,13 +817,17 @@ async function recoverInterruptedImportedJobs() {
     if (!["opening", "generating", "opening_form", "filling"].includes(s)) continue;
 
     const updatedAt = Number(job?.updatedAt || job?.createdAt || 0);
-    if (!updatedAt) continue;
-    if (now - updatedAt < INTERUPTED_AFTER_MS) continue;
+    if (!immediate) {
+      if (!updatedAt) continue;
+      if (now - updatedAt < INTERUPTED_AFTER_MS) continue;
+    }
 
     byId[jobId] = {
       ...job,
       status: "failed",
-      statusDetail: "Interrupted (service worker restarted). Retry.",
+      statusDetail: immediate
+        ? "Stopped (Ocean restarted). Retry Apply."
+        : "Interrupted (service worker restarted). Retry.",
       updatedAt: now
     };
     changed = true;
@@ -775,6 +837,25 @@ async function recoverInterruptedImportedJobs() {
     await setImportedJobsById(byId, { bumpVersion: true });
   }
 }
+
+// Fresh service-worker start means any previous Apply/Generate is dead.
+// Skip if a new run already started on this wake (avoid racing the first message).
+(async () => {
+  try {
+    const data = await chrome.storage.local.get(["generation_running"]);
+    if (isRunning) return;
+    if (data.generation_running) {
+      await chrome.storage.local.set({
+        generation_running: false,
+        generation_status: "Ready."
+      });
+    }
+    if (isRunning) return;
+    await recoverInterruptedImportedJobs({ immediate: true });
+  } catch {
+    /* ignore */
+  }
+})();
 
 async function getOpenAiSettings() {
   const apiKey = await getEnv("OPENAI_API_KEY");
@@ -1700,8 +1781,11 @@ async function runAutofillStep(
       await navigateTabToUrl(tabId, clickRes.navigateUrl);
     }
     await clearReadyToSubmit();
+    const submitSite = detectSiteFromUrl(
+      (await chrome.tabs.get(tabId).catch(() => null))?.url || tab.url || ""
+    );
     const finished = await finishSubmittedApplication(tabId, {
-      closeOnSuccess: true,
+      closeOnSuccess: isAutoSubmitAllowedSite(submitSite),
       clickLabel: liveProbe?.best?.action?.text || "Submit"
     });
     return {
@@ -1878,7 +1962,7 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
     maxSteps: 14,
     uploadDocs: docs,
     closeOnSuccess: isAutoSubmitAllowedSite(site),
-    preferNewTab: site === "dice" || site === "jobgether"
+    preferNewTab: site === "dice" || isGatewaySite(site)
   });
   if (!ea.ok && ea.error) {
     return { ok: false, error: ea.error, button: describeAutofillButton(probe) };
@@ -1921,7 +2005,7 @@ async function sleepMs(ms) {
   const end = Date.now() + Math.max(0, Number(ms) || 0);
   while (Date.now() < end) {
     if (generationCancelRequested || generationAbortController?.signal?.aborted) {
-      throw new Error("Generation cancelled by user.");
+      throw new Error("Cancelled by user.");
     }
     await new Promise((r) => setTimeout(r, Math.min(200, Math.max(0, end - Date.now()))));
   }
@@ -2003,7 +2087,7 @@ function isDiceProfileUrl(url) {
   }
 }
 
-/** Close Dice tabs sitting on /wizard/success (or equivalent). */
+/** Close Dice tabs sitting on /wizard/success (or equivalent). Never closes other sites. */
 async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
   if (delayMs > 0) await sleepMs(delayMs);
   const tabs = await chrome.tabs.query({});
@@ -2017,6 +2101,10 @@ async function closeAllDiceSuccessTabs({ delayMs = 1000 } = {}) {
     closed += 1;
   }
   return closed;
+}
+
+function isDiceTabUrl(url) {
+  return /(^|\.)dice\.com$/i.test(hostnameFromUrl(url));
 }
 
 /** Wait for load + a short SPA settle so the job/apply page is actually visible. */
@@ -2425,7 +2513,18 @@ async function closeTabQuietly(tabId) {
   await chrome.tabs.remove(tabId).catch(() => {});
 }
 
-/** After a successful apply: close success tabs, the wizard tab, and the original job tab. */
+/** True only for a live Dice tab — other sites must never be closed by Auto Apply. */
+async function isDiceBrowserTab(tabId) {
+  if (tabId == null) return false;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return Boolean(tab?.id && isDiceTabUrl(tab.url || tab.pendingUrl || ""));
+}
+
+/**
+ * After a confirmed Dice submit: close the success wizard and the original
+ * Dice job tab. Never closes non-Dice tabs, and never runs unless callers
+ * already verified Submit + the success page.
+ */
 async function closeApplyFlowTabs({
   currentTabId = null,
   originTabId = null,
@@ -2436,14 +2535,16 @@ async function closeApplyFlowTabs({
   if (currentTabId != null) ids.add(currentTabId);
   if (originTabId != null) ids.add(originTabId);
   for (const id of ids) {
-    await closeTabQuietly(id);
+    if (await isDiceBrowserTab(id)) {
+      await closeTabQuietly(id);
+    }
   }
 }
 
 /**
  * After Submit is clicked, wait for the ATS confirmation page, then close
- * only if confirmation is visible (or the tab closed itself). Never close on
- * a timeout — that was dropping applications before the user could finish.
+ * Dice tabs only if the success wizard is actually visible. Never close on
+ * a vanished tab, timeout, or non-Dice site.
  */
 async function finishSubmittedApplication(
   tabId,
@@ -2457,19 +2558,11 @@ async function finishSubmittedApplication(
       afterEpochMs: Date.now() - 15_000
     });
     if (otp.ok) {
-      if (closeOnSuccess) {
-        await setStatus("Application submitted — closing application tabs...");
-        await closeApplyFlowTabs({
-          currentTabId: tabId,
-          originTabId: originTabId != null ? originTabId : tabId,
-          delayMs: 1000
-        });
-      }
       return {
         status: "submitted",
         detail: otp.detail,
-        tabClosed: Boolean(closeOnSuccess),
-        tabId: closeOnSuccess ? null : tabId
+        tabClosed: false,
+        tabId
       };
     }
     return {
@@ -2482,13 +2575,15 @@ async function finishSubmittedApplication(
   const successTabId = waited.tabId || tabId;
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
-      await setStatus("Application submitted — closing application tabs...");
+      await setStatus("Application submitted — closing Dice application tabs...");
       await closeApplyFlowTabs({
         currentTabId: successTabId,
         originTabId: originTabId != null ? originTabId : tabId,
         delayMs: 1000
       });
-      if (successTabId !== tabId) await closeTabQuietly(tabId);
+      if (successTabId !== tabId && (await isDiceBrowserTab(tabId))) {
+        await closeTabQuietly(tabId);
+      }
     }
     return {
       status: "submitted",
@@ -2498,26 +2593,12 @@ async function finishSubmittedApplication(
     };
   }
   if (waited.tabGone) {
-    if (closeOnSuccess && originTabId != null && originTabId !== tabId) {
-      await closeTabQuietly(originTabId);
-    }
     return {
-      status: "submitted",
-      detail: `Clicked ${clickLabel}. The application tab closed after submit.`,
-      tabClosed: true,
-      tabId: null
+      status: "needs_review",
+      detail: `Clicked ${clickLabel}, but the application tab closed before the success page appeared. The job tab was left open.`,
+      tabClosed: false,
+      tabId: originTabId != null ? originTabId : null
     };
-  }
-  if (closeOnSuccess) {
-    const closed = await closeAllDiceSuccessTabs({ delayMs: 1000 });
-    if (closed > 0) {
-      return {
-        status: "submitted",
-        detail: `Clicked ${clickLabel}. Closed Dice confirmation tabs.`,
-        tabClosed: true,
-        tabId: null
-      };
-    }
   }
   return {
     status: "needs_review",
@@ -2549,7 +2630,7 @@ async function clickSubmitOnTab(tabId, { frameId, clickLabel = "Submit", settleM
   return clickRes;
 }
 
-async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false } = {}) {
+async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false, gateway = false } = {}) {
   const start = Date.now();
   const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
 
@@ -2582,6 +2663,18 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
         await waitForPageReady(fresh.id).catch(() => {});
         return { advanced: true, tabId: fresh.id, reason: "adopted_new_tab" };
+      }
+      // Gateway sites (Jobright/Jobgether) hand off to an arbitrary employer ATS.
+      // Adopt whatever real page they open, as long as it isn't the gateway itself.
+      if (
+        gateway &&
+        isHttpUrl(newUrl) &&
+        !isGatewaySite(detectSiteFromUrl(newUrl)) &&
+        !isDiceProfileUrl(newUrl)
+      ) {
+        await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
+        await waitForPageReady(fresh.id).catch(() => {});
+        return { advanced: true, tabId: fresh.id, reason: "adopted_gateway_tab" };
       }
       if (isDiceProfileUrl(newUrl)) {
         await chrome.tabs.remove(fresh.id).catch(() => {});
@@ -2773,7 +2866,6 @@ async function runApplyImportedJobCore(
         site,
         detail: availProbe.alreadyApplied
       });
-      await closeTabQuietly(tabId);
       await setStatus(`${prefix}Already applied — skipped.`);
       return {
         ok: true,
@@ -2899,7 +2991,7 @@ async function runApplyImportedJobCore(
   const ea = await startMultiStepApplyOnTab(profileId, tabId, {
     maxSteps: 14,
     uploadDocs,
-    closeOnSuccess: true,
+    closeOnSuccess: isAutoSubmitAllowedSite(site),
     preferNewTab: site === "dice"
   });
   if (!ea.ok && ea.error) throw new Error(ea.error);
@@ -2962,7 +3054,7 @@ async function runApplyImportedJobCore(
         `${ea.detail || ""}`.trim()
     });
     await setStatus(
-      `${prefix}Applied — tabs closed.${sheetNote} ${await getCostSummaryText()}`.trim()
+      `${prefix}Applied.${isAutoSubmitAllowedSite(site) ? " Dice tabs closed." : ""} ${sheetNote} ${await getCostSummaryText()}`.trim()
     );
     return {
       ok: true,
@@ -3036,8 +3128,11 @@ async function startMultiStepApplyOnTab(
   const siteLabel = applySiteLabel(initialSite);
   const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
   let stepBudget = stepBudgetInit;
-  const useNewTab = preferNewTab || initialSite === "dice" || initialSite === "jobgether";
+  const useNewTab = preferNewTab || initialSite === "dice" || isGatewaySite(initialSite);
   const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
+  // Dice only: close the job + wizard tabs after Submit AND the success page.
+  // Other sites never close the current tab.
+  const mayCloseTabs = Boolean(closeOnSuccess && autoClickSubmit);
   const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
   await ensureCostSession(tab.url || "");
   const summary = {
@@ -3062,10 +3157,23 @@ async function startMultiStepApplyOnTab(
   let greenhouseSubmitAt = 0;
   let didClickSubmit = false;
   let lookedForEntry = false;
+  let rebudgetedForLiveSite = false;
 
   for (let step = 0; step < stepBudget; step += 1) {
+    assertNotCancelled();
     const liveNow = await chrome.tabs.get(currentTabId).catch(() => null);
     liveSite = detectSiteFromUrl(liveNow?.url || summary.tabUrl);
+    // A gateway (Jobright/Jobgether) hands off to an employer ATS with its own
+    // step count — grow the budget once to fit the real destination.
+    if (
+      !rebudgetedForLiveSite &&
+      isGatewaySite(initialSite) &&
+      liveSite !== initialSite &&
+      !isGatewaySite(liveSite)
+    ) {
+      stepBudget = stepBudgetForSite(liveSite, stepBudget);
+      rebudgetedForLiveSite = true;
+    }
     if (initialSite === "indeed" && liveNow?.url && !isUrlOnApplySite(liveNow.url, "indeed")) {
       summary.status = "skipped";
       summary.detail =
@@ -3090,13 +3198,13 @@ async function startMultiStepApplyOnTab(
     }));
 
     if (probe.applicationSuccess && didClickSubmit) {
-      if (closeOnSuccess && didClickSubmit) {
-        await setStatus("Application submitted — closing application tabs...");
+      if (mayCloseTabs) {
+        await setStatus("Application submitted — closing Dice application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? null : currentTabId;
       return summary;
     }
 
@@ -3129,13 +3237,13 @@ async function startMultiStepApplyOnTab(
       });
       if (otp.ok) {
         if (didClickSubmit) {
-          if (closeOnSuccess) {
-            await setStatus("Application submitted — closing application tabs...");
+          if (mayCloseTabs) {
+            await setStatus("Application submitted — closing Dice application tabs...");
             await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
           }
           summary.status = "submitted";
           summary.detail = otp.detail;
-          summary.tabId = closeOnSuccess ? null : currentTabId;
+          summary.tabId = mayCloseTabs ? null : currentTabId;
           return summary;
         }
         continue;
@@ -3169,13 +3277,13 @@ async function startMultiStepApplyOnTab(
         }
       }
       if (probe.applicationSuccess && didClickSubmit) {
-        if (closeOnSuccess) {
-          await setStatus("Application submitted — closing application tabs...");
+        if (mayCloseTabs) {
+          await setStatus("Application submitted — closing Dice application tabs...");
           await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
         }
         summary.status = "submitted";
         summary.detail = probe.applicationSuccess;
-        summary.tabId = closeOnSuccess ? null : currentTabId;
+        summary.tabId = mayCloseTabs ? null : currentTabId;
         return summary;
       }
       if (probe.best?.action?.type === "submit") {
@@ -3207,7 +3315,7 @@ async function startMultiStepApplyOnTab(
           await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
         }
         const finished = await finishSubmittedApplication(currentTabId, {
-          closeOnSuccess,
+          closeOnSuccess: mayCloseTabs,
           clickLabel,
           originTabId
         });
@@ -3321,7 +3429,8 @@ async function startMultiStepApplyOnTab(
       }
 
       const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 10000, {
-        preferNewTab: useNewTab
+        preferNewTab: useNewTab,
+        gateway: isGatewaySite(liveSite)
       });
       currentTabId = advanced.tabId;
       summary.tabId = currentTabId;
@@ -3442,13 +3551,13 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.applicationSuccess && didClickSubmit) {
-      if (closeOnSuccess && didClickSubmit) {
-        await setStatus("Application submitted — closing application tabs...");
+      if (mayCloseTabs) {
+        await setStatus("Application submitted — closing Dice application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? null : currentTabId;
       return summary;
     }
 
@@ -3520,7 +3629,7 @@ async function startMultiStepApplyOnTab(
         await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
       }
       const finished = await finishSubmittedApplication(currentTabId, {
-        closeOnSuccess,
+        closeOnSuccess: mayCloseTabs,
         clickLabel,
         originTabId
       });
@@ -3582,7 +3691,7 @@ async function startMultiStepApplyOnTab(
       didClickSubmit = true;
       greenhouseSubmitAt = Date.now();
       const finished = await finishSubmittedApplication(currentTabId, {
-        closeOnSuccess: autoClickSubmit && closeOnSuccess,
+        closeOnSuccess: mayCloseTabs,
         clickLabel: probe.best.action.text || "Submit",
         originTabId
       });
@@ -3602,7 +3711,8 @@ async function startMultiStepApplyOnTab(
     }
 
     const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 15000, {
-      preferNewTab: useNewTab
+      preferNewTab: useNewTab,
+      gateway: isGatewaySite(liveSite)
     });
     currentTabId = advanced.tabId;
     summary.tabId = currentTabId;
@@ -3624,13 +3734,13 @@ async function startMultiStepApplyOnTab(
 
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
     if (afterAdvance?.applicationSuccess && didClickSubmit) {
-      if (closeOnSuccess && didClickSubmit) {
-        await setStatus("Application submitted — closing application tabs...");
+      if (mayCloseTabs) {
+        await setStatus("Application submitted — closing Dice application tabs...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;
-      summary.tabId = closeOnSuccess && didClickSubmit ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? null : currentTabId;
       return summary;
     }
 
@@ -3640,13 +3750,13 @@ async function startMultiStepApplyOnTab(
       });
       if (otp.ok) {
         if (didClickSubmit) {
-          if (closeOnSuccess) {
-            await setStatus("Application submitted — closing application tabs...");
+          if (mayCloseTabs) {
+            await setStatus("Application submitted — closing Dice application tabs...");
             await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
           }
           summary.status = "submitted";
           summary.detail = otp.detail;
-          summary.tabId = closeOnSuccess ? null : currentTabId;
+          summary.tabId = mayCloseTabs ? null : currentTabId;
           return summary;
         }
         continue;
@@ -4402,7 +4512,7 @@ async function ensureUploadDocsForImportedJob(jobId, job = null) {
       docs = null;
     } else {
       try {
-        await openPanelWindow();
+        await ensurePanelVisible();
       } catch {
         /* panel may already be open */
       }
@@ -4420,7 +4530,7 @@ async function ensureUploadDocsForImportedJob(jobId, job = null) {
   if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
     // One more try via panel even when SW read returned empty (permission/path issues).
     try {
-      await openPanelWindow();
+      await ensurePanelVisible();
     } catch {
       /* ignore */
     }
@@ -4454,7 +4564,7 @@ async function ensureUploadDocsForImportedJob(jobId, job = null) {
  */
 async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 120000) {
   try {
-    await openPanelWindow();
+    await ensurePanelVisible();
   } catch {
     /* panel may already be open */
   }
@@ -4507,9 +4617,10 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
   await setPendingOutputFiles({ folderName, files });
   await setStatus(`Saving to ${rootLabel || "selected folder"} / ${folderName} ...`);
 
-  // Ensure the panel is open so it can write with the directory handle (silent).
+  // Ensure the panel is available so it can write with the directory handle.
+  // Respect sidebar vs window — do not pop a window if the user is in sidebar.
   try {
-    await openPanelWindow();
+    await ensurePanelVisible();
   } catch {
     /* panel may already be open */
   }
@@ -4895,7 +5006,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
     }
 
     try {
-      await openPanelWindow();
+      await ensurePanelVisible();
     } catch {
       /* panel may already be open */
     }
@@ -4978,7 +5089,7 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
       const { getLastSaveMeta } = await import("./fs-output.js");
       const meta = await getLastSaveMeta();
       if (meta?.method === "fs") {
-        await openPanelWindow();
+        await ensurePanelVisible();
         await new Promise((r) => setTimeout(r, 400));
       }
       await openSavedFolderFromMeta(meta);
@@ -4992,14 +5103,24 @@ chrome.notifications.onButtonClicked.addListener((notificationId, buttonIndex) =
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "cancel_generation") {
-    if (!isRunning) {
-      safeSendResponse(sendResponse, { ok: false, error: "Nothing is generating." });
-      return false;
-    }
-    requestGenerationCancel();
-    setStatus("Generation cancelled by user.");
-    safeSendResponse(sendResponse, { ok: true, cancelling: true });
-    return false;
+    (async () => {
+      const wasRunning = isRunning;
+      requestGenerationCancel();
+      // Clear the "In progress" flag immediately so Stop does not leave the
+      // panel stuck while the apply loop is still winding down (or after the
+      // service worker died and isRunning was lost).
+      await chrome.storage.local.set({ generation_running: false });
+      await markInProgressJobsStopped("Cancelled by user.");
+      await setStatus("Cancelled by user.");
+      if (!wasRunning) {
+        finishGenerationCancelState();
+        stopKeepAlive();
+      }
+      safeSendResponse(sendResponse, { ok: true, cancelling: wasRunning, cleared: !wasRunning });
+    })().catch((err) => {
+      safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+    });
+    return true;
   }
 
   if (message?.type === "reset_generation_state") {
@@ -5249,6 +5370,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         isRunning = true;
         clearGenerationCancel();
         startKeepAlive();
+        await chrome.storage.local.set({ generation_running: true });
         await setStatus("Apply: filling the form and continuing the application...");
         const result = await runPanelApply(profileId, {
           preferredAction: message.preferredAction || ""
@@ -5277,6 +5399,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error });
         }
       } finally {
+        await chrome.storage.local.set({ generation_running: false });
         isRunning = false;
         finishGenerationCancelState();
         stopKeepAlive();
@@ -5416,6 +5539,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         isRunning = true;
         clearGenerationCancel();
         startKeepAlive();
+        await chrome.storage.local.set({ generation_running: true });
         await setStatus("Apply: filling the form and continuing the application...");
         const result = await runPanelApply(profileId, { preferredAction: message.preferredAction || "" });
         if (result.skipped || !result.ok) {
@@ -5429,9 +5553,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });
       } catch (err) {
         const error = String(err?.message || err);
-        await setStatus(`Apply failed: ${error}`);
-        safeSendResponse(sendResponse, { ok: false, error });
+        if (isCancelError(err)) {
+          await setStatus("Cancelled by user.");
+          safeSendResponse(sendResponse, { ok: false, error: "Cancelled by user." });
+        } else {
+          await setStatus(`Apply failed: ${error}`);
+          safeSendResponse(sendResponse, { ok: false, error });
+        }
       } finally {
+        await chrome.storage.local.set({ generation_running: false });
         isRunning = false;
         finishGenerationCancelState();
         stopKeepAlive();
@@ -5737,6 +5867,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       let closedCount = 0;
       let cancelled = false;
       let probeTabId = null;
+      let probeTabCreated = false;
       try {
         let byId = await getImportedJobsById();
         const resumeOnlyStored =
@@ -5784,14 +5915,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             if (jobUrl) {
               const probe = await probeJobAvailabilityWithRetries(jobUrl, {
                 attempts: 3,
-                reuseTabId: probeTabId,
+                reuseTabId: probeTabCreated ? probeTabId : null,
+                reuseTabCreated: probeTabCreated,
                 onAttempt: async (attempt, max) => {
                   await setStatus(
                     `Batch ${i + 1}/${jobIds.length}: checking job (try ${attempt}/${max})...`
                   );
                 }
               });
-              probeTabId = probe.tabId || probeTabId;
+              probeTabId = probe.tabId || null;
+              probeTabCreated = probe.tabId ? Boolean(probe.createdTab) : false;
               if (probe.closed) {
                 closedCount += 1;
                 await setImportedJobStatus(importedJobId, {
@@ -5983,12 +6116,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
       } catch (err) {
         if (isCancelError(err)) {
-          await setStatus("Generation cancelled by user.");
+          await setStatus("Cancelled by user.");
         } else {
           await setStatus(`Batch resume build failed: ${String(err?.message || err)}`);
         }
       } finally {
-        if (probeTabId) {
+        if (probeTabId && probeTabCreated) {
           await chrome.tabs.remove(probeTabId).catch(() => {});
         }
         await chrome.storage.local.set({ generation_running: false });
@@ -6030,6 +6163,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       let failedCount = 0;
       let cancelled = false;
       let probeTabId = null;
+      let probeTabCreated = false;
       try {
         for (let i = 0; i < jobIds.length; i += 1) {
           try {
@@ -6072,7 +6206,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             try {
               probe = await probeJobAvailabilityWithRetries(jobUrl, {
                 attempts: 3,
-                reuseTabId: probeTabId,
+                reuseTabId: probeTabCreated ? probeTabId : null,
+                reuseTabCreated: probeTabCreated,
                 onAttempt: async (attempt, max) => {
                   await setStatus(
                     `Availability ${i + 1}/${jobIds.length}: ${job.jobTitle || importedJobId} (try ${attempt}/${max})`
@@ -6086,11 +6221,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                 error: String(err?.message || err || "Availability probe failed."),
                 attempts: 3
               };
-              if (probeTabId) {
+              if (probeTabId && probeTabCreated) {
                 await chrome.tabs.remove(probeTabId).catch(() => {});
               }
+              probeTabCreated = false;
             }
             probeTabId = probe.tabId || null;
+            probeTabCreated = probe.tabId ? Boolean(probe.createdTab) : false;
 
             if (probe.closed) {
               closedCount += 1;
@@ -6107,6 +6244,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             if (probe.error) {
               failedCount += 1;
               probeTabId = null;
+              probeTabCreated = false;
               await setImportedJobStatus(importedJobId, {
                 status: "check_failed",
                 statusDetail: `Could not verify after ${probe.attempts || 3} tries: ${probe.error}`
@@ -6132,10 +6270,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             });
           } catch (jobErr) {
             failedCount += 1;
-            if (probeTabId) {
+            if (probeTabId && probeTabCreated) {
               await chrome.tabs.remove(probeTabId).catch(() => {});
-              probeTabId = null;
             }
+            probeTabId = null;
+            probeTabCreated = false;
             await setImportedJobStatus(importedJobId, {
               status: "check_failed",
               statusDetail: `Could not verify: ${String(jobErr?.message || jobErr)}`
@@ -6156,7 +6295,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await setStatus(`Availability check failed: ${String(err?.message || err)}`);
         }
       } finally {
-        if (probeTabId) {
+        if (probeTabId && probeTabCreated) {
           await chrome.tabs.remove(probeTabId).catch(() => {});
         }
         await chrome.storage.local.set({ generation_running: false });
@@ -6469,7 +6608,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     } catch (err) {
       await chrome.storage.local.set({ generation_running: false });
       if (isCancelError(err)) {
-        await setStatus("Generation cancelled by user.");
+        await setStatus("Cancelled by user.");
       } else {
         await setStatus(`Generation failed: ${String(err?.message || err)}`);
       }

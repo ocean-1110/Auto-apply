@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-01.dice-submit-page.1";
+  const SCRIPT_BUILD = "2026-09-02.jobright-gateway-apply.1";
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -3207,6 +3207,27 @@
       }
     }
 
+    // Jobright hands off to an employer ATS. Surface the external apply link so
+    // the SW can open it directly when the CTA is a plain anchor.
+    if (applyUrls.length < 5 && isJobrightPage()) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        try {
+          const href = a.href || "";
+          if (!/^https?:\/\//i.test(href)) continue;
+          if (/(^|\.)jobright\.ai$/i.test(new URL(href).hostname)) continue;
+          const text = String(a.textContent || a.getAttribute("aria-label") || "").trim();
+          const hint = `${a.getAttribute("title") || ""} ${a.id || ""} ${a.className || ""}`;
+          if (JOBRIGHT_JUNK_RE.test(text) || JOBRIGHT_JUNK_RE.test(hint)) continue;
+          if (APPLY_NOW_RE.test(text) || JOBGETHER_APPLY_RE.test(text) || /apply/i.test(hint)) {
+            pushUrl(href);
+          }
+        } catch {
+          /* ignore */
+        }
+        if (applyUrls.length >= 5) break;
+      }
+    }
+
     return applyUrls;
   }
 
@@ -3238,6 +3259,14 @@
   function isJobgetherPage(url = location.href) {
     try {
       return /(^|\.)jobgether\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isJobrightPage(url = location.href) {
+    try {
+      return /(^|\.)jobright\.ai$/i.test(new URL(String(url || location.href)).hostname);
     } catch {
       return false;
     }
@@ -3276,6 +3305,7 @@
     if (isIndeedPage(url)) return "indeed";
     if (isWorkdayPage(url)) return "workday";
     if (isGreenhousePage(url)) return "greenhouse";
+    if (isJobrightPage(url)) return "jobright";
     if (isJobgetherPage(url)) return "jobgether";
     if (isSmartRecruitersPage(url)) return "smartrecruiters";
     if (isZohoRecruitPage(url)) return "zohorecruit";
@@ -3620,7 +3650,9 @@
             isWorkdayApplyPage ||
             looksLikeHistoryForm()
         );
-    if (isJobgetherPage()) isApplicationForm = false;
+    // Jobright/Jobgether are gateways: the listing page is never the application
+    // form itself — the real form lives on the employer ATS they open.
+    if (isJobgetherPage() || isJobrightPage()) isApplicationForm = false;
     if (
       (isSmartRecruitersPage() || isZohoRecruitPage() || isOracleCloudPage()) &&
       identityFields < 2 &&
@@ -3639,7 +3671,7 @@
       hasFileInput,
       blockedReason: detectPageBlocker(),
       jobUnavailable: detectJobUnavailable(),
-      alreadyApplied: detectDiceAlreadyApplied(),
+      alreadyApplied: detectDiceAlreadyApplied() || detectJobrightAlreadyApplied(),
       applyUrls: collectApplyUrlCandidates()
     };
   }
@@ -4291,10 +4323,30 @@
     return "";
   }
 
+  /** Jobright job detail: the CTA has flipped to "Applied" / an applied badge is shown. */
+  function detectJobrightAlreadyApplied() {
+    if (!isJobrightPage()) return "";
+    for (const el of document.querySelectorAll(
+      "button, a, [role='button'], span, div"
+    )) {
+      if (!isElVisible(el)) continue;
+      if (isSiteChromeControl(el) || isInsideAdOrOverlay(el)) continue;
+      const text = elActionText(el);
+      if (!text) continue;
+      if (ALREADY_APPLIED_TEXT_RE.test(text) || /^\s*application submitted\s*$/i.test(text)) {
+        return "Already applied on Jobright (marked Applied).";
+      }
+    }
+    return "";
+  }
+
   const IM_INTERESTED_RE = /^\s*i(?:['’]| a)?m interested\s*$/i;
   const APPLY_NOW_RE = /^\s*apply\s*now\s*$/i;
   const JOBGETHER_APPLY_RE = /^\s*apply\s*$/i;
   const JOBGETHER_AUTO_APPLY_RE = /^\s*auto\s*apply\s*$/i;
+  // Jobright chrome that must never be treated as the apply CTA.
+  const JOBRIGHT_JUNK_RE =
+    /\b(ask\s*orion|orion|autofill|auto\s*fill|save|saved|not\s*interested|ask\s*ai|copilot|refer|share)\b/i;
 
   function visibleActionControls(root = document) {
     return queryAllDeep(
@@ -4543,6 +4595,35 @@
     return scored[0] || null;
   }
 
+  /** Jobright job detail: the "APPLY NOW" CTA that hands off to the employer ATS. */
+  function findJobrightApplyButton() {
+    if (!isJobrightPage()) return null;
+    dismissBlockingModalsOnce();
+    const controls = visibleActionControls();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("title") || ""} ${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
+      if (JOBRIGHT_JUNK_RE.test(text) || JOBRIGHT_JUNK_RE.test(hint)) continue;
+      if (JOBGETHER_AUTO_APPLY_RE.test(text)) continue;
+      const isApplyNow = APPLY_NOW_RE.test(text);
+      const isApply = JOBGETHER_APPLY_RE.test(text) || /^\s*apply\s+externally\s*$/i.test(text);
+      if (!isApplyNow && !isApply) continue;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      let score = isApplyNow ? 120 : 80;
+      if (/apply/i.test(hint)) score += 20;
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= 72 && rect.height >= 28) score += 20;
+      } catch {
+        /* ignore */
+      }
+      scored.push({ type: "entry", el, text: text || "Apply Now", score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
   function findImInterestedButton() {
     if (!isSmartRecruitersPage() && !isZohoRecruitPage()) return null;
     const controls = visibleActionControls();
@@ -4625,6 +4706,8 @@
 
   function findEasyApplyEntryButton() {
     dismissBlockingModalsOnce();
+    const jobrightApply = findJobrightApplyButton();
+    if (jobrightApply) return jobrightApply;
     const jobgetherApply = findJobgetherApplyButton();
     if (jobgetherApply) return jobgetherApply;
     const interested = findImInterestedButton();
@@ -5202,7 +5285,8 @@
     const workdayWizard = isWorkdayPage() ? detectWorkdayWizardState() : null;
     // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
     if (!probe.isApplicationForm) {
-      const alreadyApplied = probe.alreadyApplied || detectDiceAlreadyApplied();
+      const alreadyApplied =
+        probe.alreadyApplied || detectDiceAlreadyApplied() || detectJobrightAlreadyApplied();
       const entry = alreadyApplied ? null : findEasyApplyEntryButton();
       return {
         ok: true,
