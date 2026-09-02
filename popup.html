@@ -160,7 +160,7 @@
                     <svg class="btn-icon" aria-hidden="true"><use href="#i-check"/></svg>
                     <span class="btn-label">Check</span>
                   </button>
-                  <button type="button" id="batchRemoveBtn" class="icon-btn icon-btn-danger" disabled title="Remove checked jobs from the list">
+                  <button type="button" id="batchRemoveBtn" class="icon-btn icon-btn-danger" disabled title="Remove all checked jobs from the list">
                     <svg class="btn-icon" aria-hidden="true"><use href="#i-trash"/></svg>
                     <span class="btn-label">Remove</span>
                   </button>
@@ -247,10 +247,22 @@
                   <strong>Files saved</strong>
                   <span id="saveBannerPath"></span>
                 </div>
-                <button type="button" id="openSavedFolder" class="icon-btn icon-btn-success" title="Open saved folder">
-                  <svg class="btn-icon" aria-hidden="true"><use href="#i-folder"/></svg>
-                  <span class="btn-label">Folder</span>
-                </button>
+                <div class="save-banner-actions">
+                  <button
+                    type="button"
+                    id="copyResumePathBtn"
+                    class="icon-btn"
+                    disabled
+                    title="Copy resume folder path to clipboard"
+                  >
+                    <svg class="btn-icon" aria-hidden="true"><use href="#i-copy"/></svg>
+                    <span class="btn-label">Copy path</span>
+                  </button>
+                  <button type="button" id="openSavedFolder" class="icon-btn icon-btn-success" title="Open saved folder">
+                    <svg class="btn-icon" aria-hidden="true"><use href="#i-folder"/></svg>
+                    <span class="btn-label">Folder</span>
+                  </button>
+                </div>
               </section>
 
               <section id="atsScoreBadge" class="ats-badge" hidden title="Final ATS score after generation/rewrite">

@@ -6,7 +6,8 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-02.jobright-gateway-apply.1";
+  const SCRIPT_BUILD = "2026-09-02.form-recognition.1";
+  const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
@@ -731,7 +732,9 @@
     }
 
     add(el.getAttribute("aria-label") || "", 1050);
-    add(el.getAttribute("placeholder") || "", 500);
+    add(el.getAttribute("placeholder") || "", 850);
+    add(el.getAttribute("aria-placeholder") || "", 840);
+    add(identityHintFromControl(el), 820);
 
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
@@ -838,8 +841,9 @@
     if (AUTOCOMPLETE_FIELD_MAP[autocomplete]) return AUTOCOMPLETE_FIELD_MAP[autocomplete];
 
     const question = questionLabelForControl(el);
-    const primary = normalize(question);
-    const full = primary || labelTextForControl(el);
+    const identityHint = identityHintFromControl(el);
+    const primary = normalize(question || el.getAttribute("placeholder") || identityHint);
+    const full = normalize([question, labelTextForControl(el), identityHint].filter(Boolean).join(" "));
 
     if (/\bextension\b/.test(primary)) return null;
     if (/\bdevice type\b/.test(primary)) return "phoneDeviceType";
@@ -900,6 +904,12 @@
     }
     const aria = cleanLabelText(el.getAttribute("aria-label"));
     if (aria) candidates.push(aria);
+    const placeholder = cleanLabelText(el.getAttribute("placeholder") || el.getAttribute("aria-placeholder"));
+    if (placeholder && !/^(type here|enter text|write here|your answer|select)\.?$/i.test(placeholder)) {
+      candidates.push(placeholder);
+    }
+    const identityHint = cleanLabelText(identityHintFromControl(el));
+    if (identityHint) candidates.push(identityHint);
 
     const prev = el.previousElementSibling;
     if (prev && /LABEL|SPAN|DIV|P|LEGEND|H1|H2|H3|H4|H5|H6/i.test(prev.tagName)) {
@@ -958,6 +968,30 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function pauseBetweenFields() {
+    await sleep(FIELD_FILL_DELAY_MS);
+  }
+
+  /** Turn name/id tokens like candidate_profile.company-name.1 into "company name". */
+  function identityHintFromControl(el) {
+    const raw = [
+      el.getAttribute?.("name") || "",
+      el.getAttribute?.("id") || "",
+      el.getAttribute?.("data-automation-id") || ""
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (!raw) return "";
+    return normalize(
+      raw
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/[._\[\]/\\-]+/g, " ")
+        .replace(/\b\d+\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
   }
 
   function fillSelect(select, value, key = null) {
@@ -1024,6 +1058,22 @@
       ".select__placeholder, [class*='select__placeholder'], .select2-selection__placeholder"
     );
     return isSelectPlaceholderText(cleanLabelText(ph?.textContent || ""));
+  }
+
+  function looksLikeAsyncAutocomplete(el) {
+    if (!el || el.tagName !== "INPUT") return false;
+    if (looksLikeCombobox(el) || isReactSelectInput(el) || isSelectPlaceholderWidget(el)) return false;
+    const type = (el.type || "text").toLowerCase();
+    if (!["text", "search", ""].includes(type)) return false;
+    if (el.getAttribute("list")) return true;
+    if (el.getAttribute("aria-autocomplete") === "list") return true;
+    const cls = String(el.className || "");
+    if (/\b(autocomplete|typeahead|awesomplete|ui-autocomplete-input)\b/i.test(cls)) return true;
+    return Boolean(
+      el.closest?.(
+        '[class*="autocomplete"], [class*="typeahead"], [class*="combobox"], [class*="select__control"]'
+      )
+    );
   }
 
   function looksLikeCombobox(el) {
@@ -1330,6 +1380,65 @@
     return selectLooksCommitted(el, candidates);
   }
 
+  async function pickFirstVisibleOption(input, el, candidates) {
+    const options = await waitForOptions(12, 100);
+    if (!options.length) return false;
+    clickOptionNode(options[0]);
+    await sleep(80);
+    if (selectLooksCommitted(el, candidates)) return true;
+    if (String(selectWidgetDisplayValue(el) || el?.value || "").trim()) return true;
+    if (input) {
+      pressKey(input, "Enter", "Enter");
+      await sleep(80);
+    }
+    return Boolean(String(selectWidgetDisplayValue(el) || el?.value || "").trim());
+  }
+
+  async function fillAsyncAutocomplete(el, value, key = null) {
+    if (value == null || String(value).trim() === "") return false;
+    const candidates = key ? expandValueCandidates(key, value) : [String(value).trim()];
+    const filterText = String(candidates.find((c) => String(c).trim()) || "").trim();
+    if (!filterText) return false;
+
+    const listId = el.getAttribute("list");
+    if (listId) {
+      const dl = document.getElementById(listId);
+      if (dl) {
+        const opts = [...dl.querySelectorAll("option")];
+        const match = opts.find((o) => optionMatchesAny(o.value || o.textContent, candidates));
+        if (match) {
+          setNativeValue(el, match.value || match.textContent);
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+      }
+    }
+
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      try {
+        el.focus();
+      } catch {
+        /* ignore */
+      }
+    }
+    await typeIntoSelectFilter(el, filterText);
+    await sleep(300);
+
+    let options = await waitForOptions(15, 100);
+    let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
+    if (match && clickOptionNode(match)) return true;
+    if (await pickFirstVisibleOption(el, el, candidates)) return true;
+
+    pressKey(el, "ArrowDown", "ArrowDown");
+    await sleep(100);
+    options = collectVisibleOptions(document);
+    if (options.length && clickOptionNode(options[0])) return true;
+    pressKey(el, "Enter", "Enter");
+    return Boolean(String(el.value || "").trim());
+  }
+
   async function fillCustomDropdown(el, value, key = null) {
     if (value == null || String(value).trim() === "") return false;
     const candidates = key ? expandValueCandidates(key, value) : [String(value).trim()];
@@ -1389,6 +1498,12 @@
       }
 
       if (selectLooksCommitted(el, candidates)) return true;
+
+      if (await pickFirstVisibleOption(input, el, candidates)) {
+        clearReactSelectFilter(input);
+        return true;
+      }
+
       clearReactSelectFilter(input);
       pressKey(input, "Escape", "Escape");
     }
@@ -1475,6 +1590,10 @@
       // React-Select / combobox: ONLY pick from the option list — never type an answer.
       if (isReactSelectInput(el) || looksLikeCombobox(el)) {
         return fillCustomDropdown(el, value, key);
+      }
+
+      if (looksLikeAsyncAutocomplete(el)) {
+        return fillAsyncAutocomplete(el, value, key);
       }
 
       // Known select-like profile fields: try list first; never leave lowercase yes/no typed in.
@@ -2195,7 +2314,9 @@
 
       const questionLike =
         looksLikeQuestionLabel(questionLabel) || looksLikeQuestionLabel(labelNorm) || rich;
-      const hasUsefulLabel = String(questionLabel || labelNorm).trim().length >= 3;
+      const placeholder = cleanLabelText(el.getAttribute("placeholder") || el.getAttribute("aria-placeholder"));
+      const hasUsefulLabel =
+        String(questionLabel || labelNorm || placeholder || identityHintFromControl(el)).trim().length >= 3;
       if (!questionLike && !multiline && !hasUsefulLabel) continue;
       if (multiline && !questionLike && String(questionLabel || labelNorm).trim().length < 8) {
         continue;
@@ -2253,6 +2374,7 @@
       }
       if (await fillControl(el, answer, null)) {
         filled.push({ id, label: labelTextForControl(el), preview: answer.slice(0, 80) });
+        await pauseBetweenFields();
       }
     }
     return { filledCount: filled.length, filled };
@@ -2396,7 +2518,10 @@
           if (el.tagName === "SELECT") break; // one select is enough
         }
       }
-      if (ok) filled.push({ id, preview: answer.slice(0, 80) });
+      if (ok) {
+        filled.push({ id, preview: answer.slice(0, 80) });
+        await pauseBetweenFields();
+      }
     }
     return { filledCount: filled.length, filled };
   }
@@ -2692,6 +2817,7 @@
       if (!value) continue;
       if (await fillControl(el, value, key)) {
         filled.push({ key, label: questionLabelForControl(el) });
+        await pauseBetweenFields();
       }
     }
     return { filledCount: filled.length, filled };
@@ -2729,8 +2855,18 @@
 
   function classifyHistoryField(el, sectionKind) {
     const type = (el.type || "").toLowerCase();
-    const label = normalize(questionLabelForControl(el) || labelTextForControl(el));
+    const label = normalize(
+      [
+        questionLabelForControl(el),
+        labelTextForControl(el),
+        el.getAttribute?.("placeholder") || "",
+        identityHintFromControl(el)
+      ]
+        .filter(Boolean)
+        .join(" ")
+    );
     const ctx = `${label} ${historyContext(el)}`;
+    const nameBlob = normalize([el.name, el.id, identityHintFromControl(el)].join(" "));
     const isCheck = type === "checkbox" || type === "radio";
 
     if (/\b(street|address line|zip|postal|ssn|password|salary|compensation)\b/.test(ctx)) {
@@ -2755,12 +2891,17 @@
     }
 
     if (sectionKind === "work") {
-      if (/\b(company|employer|organization|organisation)\b/.test(ctx) && !/\b(email|phone|website)\b/.test(ctx)) {
+      if (
+        (/\b(company|employer|organization|organisation)\b/.test(ctx) ||
+          /\b(company name|employer name|organization name)\b/.test(nameBlob)) &&
+        !/\b(email|phone|website)\b/.test(ctx)
+      ) {
         return "company";
       }
       if (
         /^(title|role|position)$/.test(label) ||
-        /\b(job title|position title|role title|title of (the )?(job|role|position)|position held)\b/.test(ctx)
+        /\b(job title|position title|role title|title of (the )?(job|role|position)|position held)\b/.test(ctx) ||
+        /\b(job title|position title|role title)\b/.test(nameBlob)
       ) {
         return "title";
       }
@@ -2938,7 +3079,10 @@
     const tryFill = async (kind, values) => {
       const el = slot[kind];
       if (!el || isHistoryFilled(el)) return;
-      if (await fillHistoryValue(el, values)) filled.push(kind);
+      if (await fillHistoryValue(el, values)) {
+        filled.push(kind);
+        await pauseBetweenFields();
+      }
     };
 
     if (sectionKind === "education") {
@@ -3040,7 +3184,10 @@
       if (!key) continue;
       const value = resolveApplicantValue(applicantInfo, key);
       if (!value) continue;
-      if (await fillControl(el, value, key)) filled.push({ key, label });
+      if (await fillControl(el, value, key)) {
+        filled.push({ key, label });
+        await pauseBetweenFields();
+      }
     }
 
     const choicePass = await fillRemainingChoiceControls(applicantInfo);

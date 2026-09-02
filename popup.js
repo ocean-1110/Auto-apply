@@ -26,7 +26,7 @@ import {
 import { getQaCount } from "./qa-store.js";
 import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
-import { setGeneratedDocsForJob } from "./upload-assets.js";
+import { setGeneratedDocsForJob, getGeneratedDocsForJob } from "./upload-assets.js";
 
 const UI_MODE = new URLSearchParams(location.search).get("mode") === "sidebar" ? "sidebar" : "window";
 document.body.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
@@ -89,6 +89,7 @@ const permBannerEl = document.getElementById("permBanner");
 const permBannerPathEl = document.getElementById("permBannerPath");
 const grantFolderAccessBtn = document.getElementById("grantFolderAccess");
 const openSavedFolderBtn = document.getElementById("openSavedFolder");
+const copyResumePathBtn = document.getElementById("copyResumePathBtn");
 const genProgressEl = document.getElementById("genProgress");
 const genProgressStateEl = document.getElementById("genProgressState");
 const genProgressDetailEl = document.getElementById("genProgressDetail");
@@ -426,6 +427,7 @@ async function refreshOutputDirLabel() {
   const name = await getOutputDirectoryName();
   outputDirLabelEl.value = name || "";
   outputDirLabelEl.placeholder = name ? name : "No folder selected";
+  await refreshCopyResumePathBtn();
 }
 
 async function selectOutputDirectory() {
@@ -475,6 +477,77 @@ async function pathLabelForImportedJob(job) {
   return root ? `${root} / ${folder}` : folder;
 }
 
+function formatPathForClipboard(pathLabel) {
+  return String(pathLabel || "")
+    .replace(/\s*\/\s*/g, "\\")
+    .trim();
+}
+
+async function resolveResumeFolderPath() {
+  const selectedJob = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
+  if (selectedJob) {
+    const fromJob = await pathLabelForImportedJob(selectedJob);
+    if (fromJob) return fromJob;
+    try {
+      const docs = await getGeneratedDocsForJob(importedJobsSelectedId);
+      if (docs?.pathLabel) return docs.pathLabel;
+      if (docs?.folderName) {
+        const root = (await getOutputDirectoryName()) || "";
+        return root ? `${root} / ${docs.folderName}` : docs.folderName;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const meta = await getLastSaveMeta();
+  if (meta?.pathLabel) return meta.pathLabel;
+
+  try {
+    const data = await chrome.storage.local.get("last_upload_docs_meta");
+    const uploadMeta = data.last_upload_docs_meta;
+    if (uploadMeta?.pathLabel) return uploadMeta.pathLabel;
+    if (uploadMeta?.folderName) {
+      const root = (await getOutputDirectoryName()) || "";
+      return root ? `${root} / ${uploadMeta.folderName}` : uploadMeta.folderName;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const pending = await chrome.storage.local.get(["pending_fs_folder", "last_output_dir"]);
+  const folder = String(pending.pending_fs_folder || pending.last_output_dir || "").trim();
+  if (folder) {
+    const root = (await getOutputDirectoryName()) || "";
+    return root ? `${root} / ${folder}` : folder;
+  }
+  return "";
+}
+
+async function refreshCopyResumePathBtn() {
+  if (!copyResumePathBtn) return;
+  const path = await resolveResumeFolderPath();
+  copyResumePathBtn.disabled = !path;
+  copyResumePathBtn.title = path
+    ? `Copy resume folder path: ${formatPathForClipboard(path)}`
+    : "Generate a resume first to copy its folder path";
+}
+
+async function copyResumeFolderPath() {
+  const path = await resolveResumeFolderPath();
+  if (!path) {
+    setStatus("No resume folder yet — generate a resume first.", "error");
+    return;
+  }
+  const text = formatPathForClipboard(path);
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`Copied path: ${text}`, "done");
+  } catch (err) {
+    setStatus(`Could not copy path: ${String(err.message || err)}`, "error");
+  }
+}
+
 async function refreshSaveBannerForCurrentJob() {
   const job = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
   if (job) {
@@ -496,11 +569,13 @@ async function refreshSaveBannerForCurrentJob() {
           : { score, finalScore: score, source: "stored" };
       chrome.storage.local.set({ last_ats_report: report }).catch(() => {});
     }
+    await refreshCopyResumePathBtn();
     return;
   }
   const meta = await getLastSaveMeta();
   if (meta?.pathLabel) showSaveBanner(meta.pathLabel);
   else hideSaveBanner();
+  await refreshCopyResumePathBtn();
 }
 
 function wireAccordion(el, storageKey) {
@@ -595,22 +670,13 @@ async function refreshImportedJobsFromStorage() {
       if (importedJobsById[id]) importedJobsChecked.add(String(id));
     }
   } else {
-    // First load / no preference yet — check every job by default.
+    // First load / no preference yet — check every unfinished job by default.
     for (const id of importedJobsOrder) {
       const status = importedJobsById[id]?.status;
       if (status !== "unavailable" && status !== "completed") importedJobsChecked.add(String(id));
     }
     persistCheckedJobs();
   }
-  let stripped = false;
-  for (const id of [...importedJobsChecked]) {
-    const status = importedJobsById[id]?.status;
-    if (status === "completed" || status === "unavailable") {
-      importedJobsChecked.delete(id);
-      stripped = true;
-    }
-  }
-  if (stripped) persistCheckedJobs();
 
   renderImportedJobs();
 }
@@ -733,8 +799,12 @@ function jobReadyForBatchApply(job) {
 }
 
 function updateBatchBar() {
-  const visible = batchableImportedJobIds();
+  const visible = visibleImportedJobIds();
   const selectedVisible = visible.filter((id) => importedJobsChecked.has(id));
+  const batchableSelected = selectedVisible.filter((id) => {
+    const status = String(importedJobsById[id]?.status || "");
+    return status !== "completed" && status !== "unavailable";
+  });
   const applyReady = selectedVisible.filter((id) => jobReadyForBatchApply(importedJobsById[id]));
   if (batchSelectionNoteEl) {
     batchSelectionNoteEl.textContent = `${selectedVisible.length} selected`;
@@ -745,7 +815,7 @@ function updateBatchBar() {
       selectedVisible.length > 0 && selectedVisible.length < visible.length;
   }
   if (batchGenerateBtn) {
-    batchGenerateBtn.disabled = selectedVisible.length === 0;
+    batchGenerateBtn.disabled = batchableSelected.length === 0;
   }
   if (batchApplyBtn) {
     batchApplyBtn.disabled = applyReady.length === 0;
@@ -754,7 +824,7 @@ function updateBatchBar() {
     batchRemoveBtn.disabled = selectedVisible.length === 0;
   }
   if (checkAvailabilityBtn) {
-    checkAvailabilityBtn.disabled = selectedVisible.length === 0;
+    checkAvailabilityBtn.disabled = batchableSelected.length === 0;
   }
 }
 
@@ -832,9 +902,11 @@ function renderImportedJobs() {
     const check = document.createElement("input");
     check.type = "checkbox";
     check.className = "job-check";
-    check.title = isCompleted ? "Already applied" : "Select for batch resume build";
-    check.checked = !isCompleted && importedJobsChecked.has(jobId);
-    check.disabled = isCompleted;
+    check.title = isCompleted
+      ? "Select to remove this applied job from the list"
+      : "Select for batch actions (Resumes / Apply / Remove)";
+    check.checked = importedJobsChecked.has(jobId);
+    check.disabled = false;
     check.addEventListener("click", (e) => {
       e.stopPropagation();
     });
@@ -1297,23 +1369,51 @@ async function checkSelectedJobsAvailability() {
   }
 }
 
-async function replaceImportedJobs(jobs) {
+/**
+ * Add CSV jobs to the persisted queue. Existing jobs keep their apply/resume
+ * status so a later import (or Chrome restart) does not wipe progress.
+ */
+async function mergeImportedJobs(jobs) {
   const now = Date.now();
-  const byId = {};
-  const order = [];
-  const existingSet = new Set();
+  const stored = await chrome.storage.local.get([
+    "imported_jobs_by_id",
+    "imported_jobs_order",
+    "imported_jobs_checked_ids"
+  ]);
+  const byId = { ...(stored.imported_jobs_by_id || importedJobsById || {}) };
+  const order = Array.isArray(stored.imported_jobs_order)
+    ? stored.imported_jobs_order.slice()
+    : importedJobsOrder.slice();
+  const seenInFile = new Set();
+  let added = 0;
+  let alreadyQueued = 0;
   let duplicateIds = 0;
 
   for (const job of jobs) {
     const id = String(job.id || "").trim();
     if (!id) continue;
-
-    if (existingSet.has(id)) {
+    if (seenInFile.has(id)) {
       duplicateIds += 1;
       continue;
     }
-    existingSet.add(id);
-    order.push(id);
+    seenInFile.add(id);
+
+    const existing = byId[id];
+    if (existing) {
+      alreadyQueued += 1;
+      const next = { ...existing };
+      if (!String(next.jdText || "").trim() && String(job.jdText || "").trim()) {
+        next.jdText = job.jdText;
+      }
+      if (!String(next.jobTitle || "").trim() && job.jobTitle) next.jobTitle = job.jobTitle;
+      if (!String(next.companyName || "").trim() && job.companyName) {
+        next.companyName = job.companyName;
+      }
+      next.updatedAt = now;
+      byId[id] = next;
+      continue;
+    }
+
     byId[id] = {
       ...job,
       status: "imported",
@@ -1322,26 +1422,38 @@ async function replaceImportedJobs(jobs) {
       createdAt: now,
       updatedAt: now
     };
+    order.unshift(id);
+    added += 1;
+    importedJobsChecked.add(id);
+  }
+
+  const checked = Array.isArray(stored.imported_jobs_checked_ids)
+    ? stored.imported_jobs_checked_ids.map(String)
+    : [...importedJobsChecked];
+  const checkedSet = new Set(checked);
+  for (const id of seenInFile) {
+    if (byId[id] && String(byId[id].status || "") !== "completed") checkedSet.add(id);
   }
 
   await chrome.storage.local.set({
     imported_jobs_by_id: byId,
     imported_jobs_order: order,
-    imported_jobs_selected_id: null,
-    imported_jobs_checked_ids: order.slice(),
+    imported_jobs_selected_id: importedJobsSelectedId,
+    imported_jobs_checked_ids: [...checkedSet],
     imported_jobs_version: now
   });
 
   importedJobsById = byId;
   importedJobsOrder = order;
-  importedJobsSelectedId = null;
   importedJobsChecked.clear();
-  for (const id of order) importedJobsChecked.add(id);
+  for (const id of checkedSet) {
+    if (byId[id]) importedJobsChecked.add(id);
+  }
   importedJobsVersion = now;
 
   renderImportedJobs();
 
-  return { imported: order.length, duplicateIds };
+  return { imported: added, alreadyQueued, duplicateIds };
 }
 
 async function openImportedJobPage(jobId) {
@@ -2555,7 +2667,7 @@ filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jo
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));
 selectAllJobsEl?.addEventListener("change", () => {
-  const visible = batchableImportedJobIds();
+  const visible = visibleImportedJobIds();
   if (selectAllJobsEl.checked) {
     for (const id of visible) importedJobsChecked.add(id);
   } else {
@@ -2642,11 +2754,12 @@ csvFileInputEl?.addEventListener("change", async () => {
       return;
     }
 
-    const replaceRes = await replaceImportedJobs(parsed.jobs);
+    const mergeRes = await mergeImportedJobs(parsed.jobs);
 
     const summary =
-      `Loaded ${replaceRes.imported} job(s) from ${parsed.format || "CSV"} export. ` +
-      `Ignored ${parsed.skipped} invalid row(s), ${(parsed.duplicateUrls || 0) + replaceRes.duplicateIds} duplicate(s).`;
+      `Added ${mergeRes.imported} new job(s) from ${parsed.format || "CSV"} export. ` +
+      `${mergeRes.alreadyQueued} already in the list (status kept). ` +
+      `Ignored ${parsed.skipped} invalid row(s), ${(parsed.duplicateUrls || 0) + mergeRes.duplicateIds} duplicate(s).`;
     setStatus(`CSV import complete. ${summary}`);
     if (importStatusEl) importStatusEl.textContent = summary;
 
@@ -2713,6 +2826,9 @@ closePanelBtn?.addEventListener("click", () => {
 });
 openSavedFolderBtn?.addEventListener("click", () => {
   openSavedFolder().catch((err) => setStatus(String(err.message || err)));
+});
+copyResumePathBtn?.addEventListener("click", () => {
+  copyResumeFolderPath().catch((err) => setStatus(String(err.message || err)));
 });
 grantFolderAccessBtn?.addEventListener("click", () => {
   tryFlushPendingOutput({ interactive: true }).catch((err) =>
