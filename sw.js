@@ -12,7 +12,7 @@ import {
   isCaptureRunning as isJobCaptureRunning
 } from "./capture-runner.js";
 import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
-import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeSkills } from "./resume-json.js";
+import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeResumePayload, normalizeSkills } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
 import { ensureAtsReadyResume } from "./ats-rewrite.js";
 import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
@@ -869,7 +869,7 @@ async function getOpenAiSettings() {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-01.dice-submit-page.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-02.form-recognition.2";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1024,8 +1024,15 @@ function detectSiteFromUrl(url) {
 }
 
 async function ensureAutofillScript(tabId) {
-  // Inject into every frame — iCIMS / some Workday pages host the form inside
-  // an iframe. The content script guards itself with SCRIPT_BUILD so re-inject is safe.
+  // Skip re-inject when the tab already runs the current build — re-injecting
+  // every apply step was freezing heavy ATS pages.
+  try {
+    const pong = await chrome.tabs.sendMessage(tabId, { type: "autofill_ping" });
+    if (pong?.build === AUTOFILL_SCRIPT_BUILD) return;
+  } catch {
+    /* not injected yet */
+  }
+
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
@@ -4881,6 +4888,35 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       "OpenAI response is not valid resume JSON. Try again or check the profile prompt."
     );
   }
+  data = normalizeResumePayload(data);
+
+  // #region agent log
+  fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "30a7bc" },
+    body: JSON.stringify({
+      sessionId: "30a7bc",
+      runId: "pre-fix",
+      hypothesisId: "A",
+      location: "sw.js:runGenerationPipeline:afterExtract",
+      message: "Experience entries right after AI JSON parse",
+      data: {
+        profileId,
+        experienceCount: Array.isArray(data?.experience) ? data.experience.length : 0,
+        entries: (data?.experience || []).map((j, i) => ({
+          index: i,
+          keys: j && typeof j === "object" ? Object.keys(j) : [],
+          company: j?.company ?? null,
+          employer: j?.employer ?? null,
+          organization: j?.organization ?? null,
+          title: j?.title ?? null,
+          dates: j?.dates ?? null
+        }))
+      },
+      timestamp: Date.now()
+    })
+  }).catch(() => {});
+  // #endregion
 
   data = await ensureResumeSkills(data, {
     apiKey,
@@ -4919,6 +4955,31 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       })
     };
   }
+
+  // #region agent log
+  fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "30a7bc" },
+    body: JSON.stringify({
+      sessionId: "30a7bc",
+      runId: "pre-fix",
+      hypothesisId: "B",
+      location: "sw.js:runGenerationPipeline:afterAtsRewrite",
+      message: "Experience entries after ATS rewrite",
+      data: {
+        rewritten: Boolean(improved?.atsReport?.rewritten),
+        entries: (data?.experience || []).map((j, i) => ({
+          index: i,
+          keys: j && typeof j === "object" ? Object.keys(j) : [],
+          company: j?.company ?? null,
+          title: j?.title ?? null,
+          dates: j?.dates ?? null
+        }))
+      },
+      timestamp: Date.now()
+    })
+  }).catch(() => {});
+  // #endregion
 
   assertNotCancelled();
   data = await ensureResumeSkills(data, {

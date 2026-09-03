@@ -11,6 +11,8 @@ const HANDLE_KEY = "output_directory";
 const LAST_JOB_DIR_KEY = "last_job_directory";
 const PENDING_KEY = "pending_output_files";
 const OUTPUT_DIR_NAME_KEY = "output_directory_name";
+/** User-entered absolute path to the selected output folder (FS Access API cannot expose this). */
+const OUTPUT_DIR_ABS_PATH_KEY = "output_directory_absolute_path";
 const LAST_SAVE_META_KEY = "last_save_meta";
 
 function openDb() {
@@ -84,9 +86,54 @@ export async function getOutputDirectoryName() {
   return data[OUTPUT_DIR_NAME_KEY] || "";
 }
 
+/** Normalize a Windows/Unix absolute folder path for storage / clipboard. */
+export function normalizeAbsoluteDirectoryPath(raw) {
+  let path = String(raw || "").trim().replace(/^["']|["']$/g, "");
+  if (!path) return "";
+  // Prefer Windows backslashes when a drive letter is present.
+  if (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\")) {
+    path = path.replace(/\//g, "\\");
+  }
+  return path.replace(/[\\/]+$/, "");
+}
+
+export async function getOutputDirectoryAbsolutePath() {
+  const data = await chrome.storage.local.get(OUTPUT_DIR_ABS_PATH_KEY);
+  return normalizeAbsoluteDirectoryPath(data[OUTPUT_DIR_ABS_PATH_KEY] || "");
+}
+
+export async function setOutputDirectoryAbsolutePath(absolutePath) {
+  const path = normalizeAbsoluteDirectoryPath(absolutePath);
+  if (!path) {
+    await chrome.storage.local.remove(OUTPUT_DIR_ABS_PATH_KEY);
+    return "";
+  }
+  await chrome.storage.local.set({ [OUTPUT_DIR_ABS_PATH_KEY]: path });
+  return path;
+}
+
+/**
+ * Join absolute output-folder path with a job subfolder name for clipboard / Explorer.
+ * Falls back to relative "root / job" when absolute path is not configured.
+ */
+export async function buildResumeFolderAbsolutePath(jobFolderName) {
+  const folder = sanitizeJobFolderName(jobFolderName);
+  if (!folder || folder === "untitled") return "";
+  const absRoot = await getOutputDirectoryAbsolutePath();
+  if (absRoot) {
+    const sep = /\\/.test(absRoot) || /^[A-Za-z]:/.test(absRoot) ? "\\" : "/";
+    // Avoid duplicating the job folder if the stored path already ends with it.
+    const rootTail = absRoot.split(/[/\\]/).filter(Boolean).pop() || "";
+    if (rootTail.toLowerCase() === folder.toLowerCase()) return absRoot;
+    return `${absRoot}${sep}${folder}`;
+  }
+  const rootName = (await getOutputDirectoryName()) || "";
+  return rootName ? `${rootName} / ${folder}` : folder;
+}
+
 export async function clearOutputDirectoryHandle() {
   await idbDelete(HANDLE_STORE, HANDLE_KEY);
-  await chrome.storage.local.remove(OUTPUT_DIR_NAME_KEY);
+  await chrome.storage.local.remove([OUTPUT_DIR_NAME_KEY, OUTPUT_DIR_ABS_PATH_KEY]);
 }
 
 function hasUserActivation() {

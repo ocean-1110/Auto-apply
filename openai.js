@@ -139,6 +139,7 @@ LENGTH AND COMPLETENESS — CRITICAL (API responses tend to undershoot; do not):
 - Produce a FULL-LENGTH resume comparable to a strong ChatGPT web reply. Never abbreviate to save tokens.
 - skills: include ALL relevant categories from the user prompt (typically 6–9+). Each "items" string must be dense with many technologies/tools (comma-separated), not a short handful.
 - experience: include EVERY required job with the EXACT bullet counts from the user prompt. Do not drop jobs or bullets.
+- Each experience entry MUST include company, location, title, dates, and a bullets array. Never omit the company name.
 - Each experience bullet must be ONE long sentence (~170–240 characters), describing concrete implementation work with technologies and impact — not short vague lines.
 - profile: 5–7 full sentences as specified in the user prompt.
 - certifications: include every certification listed in the user prompt, verbatim. If the prompt lists none, return an empty array (do not invent any).

@@ -6,9 +6,16 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-02.form-recognition.1";
+  const SCRIPT_BUILD = "2026-09-02.form-recognition.2";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
+  if (window.__resumeBotAutofillMessageListener) {
+    try {
+      chrome.runtime.onMessage.removeListener(window.__resumeBotAutofillMessageListener);
+    } catch {
+      /* ignore */
+    }
+  }
   window.__resumeBotAutofillBuild = SCRIPT_BUILD;
   window.__resumeBotAutofillInstalled = true;
 
@@ -1067,13 +1074,9 @@
     if (!["text", "search", ""].includes(type)) return false;
     if (el.getAttribute("list")) return true;
     if (el.getAttribute("aria-autocomplete") === "list") return true;
+    if ((el.getAttribute("role") || "").toLowerCase() === "combobox") return true;
     const cls = String(el.className || "");
-    if (/\b(autocomplete|typeahead|awesomplete|ui-autocomplete-input)\b/i.test(cls)) return true;
-    return Boolean(
-      el.closest?.(
-        '[class*="autocomplete"], [class*="typeahead"], [class*="combobox"], [class*="select__control"]'
-      )
-    );
+    return /\b(typeahead|awesomplete|ui-autocomplete-input|pac-target-input)\b/i.test(cls);
   }
 
   function looksLikeCombobox(el) {
@@ -1426,7 +1429,7 @@
     await typeIntoSelectFilter(el, filterText);
     await sleep(300);
 
-    let options = await waitForOptions(15, 100);
+    let options = await waitForOptions(8, 100);
     let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match && clickOptionNode(match)) return true;
     if (await pickFirstVisibleOption(el, el, candidates)) return true;
@@ -3157,6 +3160,22 @@
     credentials = {},
     history = {}
   ) {
+    // #region agent log
+    const autofillStartedAt = Date.now();
+    fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "30a7bc" },
+      body: JSON.stringify({
+        sessionId: "30a7bc",
+        runId: "post-fix",
+        hypothesisId: "F",
+        location: "content/autofill.js:autofillApplication:start",
+        message: "Autofill started",
+        data: { url: location.href, build: SCRIPT_BUILD },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
     suppressLearn();
     const filled = [];
     const wd = isWorkdayPage() ? detectWorkdayWizardState() : null;
@@ -3225,7 +3244,7 @@
     const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
     const unmatchedChoiceQuestions = await collectUnmatchedChoiceQuestions();
 
-    return {
+    const result = {
       ok: true,
       filledCount: filled.length,
       filled,
@@ -3239,6 +3258,26 @@
       unmatchedChoiceQuestions,
       workdayWizard: wd
     };
+    // #region agent log
+    fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "30a7bc" },
+      body: JSON.stringify({
+        sessionId: "30a7bc",
+        runId: "post-fix",
+        hypothesisId: "F",
+        location: "content/autofill.js:autofillApplication:end",
+        message: "Autofill finished",
+        data: {
+          ms: Date.now() - autofillStartedAt,
+          filledCount: result.filledCount,
+          unmatched: unmatchedQuestions.length
+        },
+        timestamp: Date.now()
+      })
+    }).catch(() => {});
+    // #endregion
+    return result;
   }
 
   function collectApplyUrlCandidates() {
@@ -5990,7 +6029,8 @@
 
   // Job-page scraping lives in content/scrapers/ (see runner.js).
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  let autofillInProgress = false;
+  const autofillMessageListener = (message, _sender, sendResponse) => {
     if (message?.type === "autofill_ping") {
       sendResponse({ ok: true, build: SCRIPT_BUILD });
       return false;
@@ -6080,6 +6120,11 @@
       return true;
     }
     if (message?.type !== "autofill_application") return undefined;
+    if (autofillInProgress) {
+      sendResponse({ ok: false, error: "Autofill already running on this page." });
+      return false;
+    }
+    autofillInProgress = true;
     autofillApplication(
       message.applicantInfo || {},
       message.uploadFiles || {},
@@ -6090,7 +6135,12 @@
       }
     )
       .then((result) => sendResponse(result))
-      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }))
+      .finally(() => {
+        autofillInProgress = false;
+      });
     return true;
-  });
+  };
+  window.__resumeBotAutofillMessageListener = autofillMessageListener;
+  chrome.runtime.onMessage.addListener(autofillMessageListener);
 })();

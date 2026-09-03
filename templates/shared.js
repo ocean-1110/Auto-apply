@@ -146,6 +146,28 @@ export function normalizeCerts(certs) {
     .filter(Boolean);
 }
 
+export function normalizeExperience(experience) {
+  if (!Array.isArray(experience)) return [];
+  return experience.map((job) => {
+    if (!job || typeof job !== "object") return job;
+    const company = String(
+      job.company || job.employer || job.employerName || job.organization || job.companyName || ""
+    ).trim();
+    return {
+      ...job,
+      company,
+      title: String(job.title || job.role || job.position || "").trim(),
+      dates: String(job.dates || job.date || job.period || "").trim(),
+      location: String(job.location || "").trim(),
+      bullets: Array.isArray(job.bullets)
+        ? job.bullets.filter(Boolean)
+        : Array.isArray(job.responsibilities)
+          ? job.responsibilities.filter(Boolean)
+          : []
+    };
+  });
+}
+
 export function renderCerts(certs, { listClass = "certifications" } = {}) {
   const items = normalizeCerts(certs);
   if (!items.length) return "";

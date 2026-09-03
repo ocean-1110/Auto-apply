@@ -1,3 +1,5 @@
+import { normalizeExperience, normalizeSkills } from "./templates/shared.js";
+
 const EXPECTED_BULLET_COUNTS = [
   { match: /sfa\s*solutions/i, count: 6 },
   { match: /^amazon$/i, count: 5 },
@@ -335,5 +337,13 @@ export function resumeJsonNeedsContinuation(rawText, data) {
   return !isUsableResumeJson(data);
 }
 
+export function normalizeResumePayload(data) {
+  if (!data || typeof data !== "object") return data || {};
+  return {
+    ...data,
+    experience: normalizeExperience(data.experience)
+  };
+}
+
 export { resumeJsonToHtml, normalizeResumeData, markHtmlForPdf } from "./templates/index.js";
-export { normalizeSkills } from "./templates/shared.js";
+export { normalizeExperience, normalizeSkills };

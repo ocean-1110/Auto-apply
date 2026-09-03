@@ -10,6 +10,10 @@ import { getPresetForProfile } from "./sheet-presets.js";
 import {
   saveOutputDirectoryHandle,
   getOutputDirectoryName,
+  getOutputDirectoryAbsolutePath,
+  setOutputDirectoryAbsolutePath,
+  buildResumeFolderAbsolutePath,
+  normalizeAbsoluteDirectoryPath,
   flushPendingOutputToSelectedDirectory,
   getLastSaveMeta,
   browseLastSavedJobDirectory,
@@ -59,6 +63,7 @@ const companyNameEl = document.getElementById("companyName");
 const jdLinkEl = document.getElementById("jdLink");
 const jdTextEl = document.getElementById("jdText");
 const outputDirLabelEl = document.getElementById("outputDirLabel");
+const outputDirAbsPathEl = document.getElementById("outputDirAbsPath");
 const selectOutputDirBtn = document.getElementById("selectOutputDir");
 const aiQaSectionEl = document.getElementById("aiQaSection");
 const copySheetRowBtn = document.getElementById("copySheetRow");
@@ -427,7 +432,22 @@ async function refreshOutputDirLabel() {
   const name = await getOutputDirectoryName();
   outputDirLabelEl.value = name || "";
   outputDirLabelEl.placeholder = name ? name : "No folder selected";
+  if (outputDirAbsPathEl) {
+    const abs = await getOutputDirectoryAbsolutePath();
+    outputDirAbsPathEl.value = abs || "";
+    outputDirAbsPathEl.placeholder = name
+      ? `Paste full path to "${name}" (e.g. D:\\Bid\\BR-AI\\${name})`
+      : "e.g. D:\\Bid\\BR-AI\\09-01W";
+  }
   await refreshCopyResumePathBtn();
+}
+
+async function persistOutputAbsolutePathFromInput() {
+  if (!outputDirAbsPathEl) return "";
+  const path = await setOutputDirectoryAbsolutePath(outputDirAbsPathEl.value);
+  outputDirAbsPathEl.value = path;
+  await refreshCopyResumePathBtn();
+  return path;
 }
 
 async function selectOutputDirectory() {
@@ -443,7 +463,32 @@ async function selectOutputDirectory() {
     });
     const name = await saveOutputDirectoryHandle(handle);
     outputDirLabelEl.value = name;
-    setStatus(`Output folder set: ${name}`);
+
+    // Chrome only returns the leaf folder name — ask for the absolute path once.
+    const prevAbs = await getOutputDirectoryAbsolutePath();
+    let suggestion = prevAbs;
+    if (!suggestion) {
+      suggestion = `D:\\Bid\\BR-AI\\${name}`;
+    } else {
+      const leaf = suggestion.split(/[/\\]/).filter(Boolean).pop() || "";
+      if (leaf.toLowerCase() !== String(name).toLowerCase()) {
+        suggestion = `${suggestion.replace(/[\\/]+$/, "")}\\${name}`;
+      }
+    }
+    const typed = window.prompt(
+      `Chrome cannot read the full disk path.\n\nPaste the absolute path to the folder you just selected ("${name}"):`,
+      suggestion
+    );
+    if (typed != null && String(typed).trim()) {
+      const abs = await setOutputDirectoryAbsolutePath(typed);
+      if (outputDirAbsPathEl) outputDirAbsPathEl.value = abs;
+      setStatus(`Output folder set: ${abs || name}`);
+    } else {
+      setStatus(
+        `Output folder set: ${name}. Paste its absolute path below so Copy path works in Explorer.`
+      );
+    }
+    await refreshCopyResumePathBtn();
   } catch (err) {
     if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
       setStatus("Folder selection canceled.");
@@ -473,27 +518,32 @@ function resumeFolderNameForJob(job) {
 async function pathLabelForImportedJob(job) {
   const folder = resumeFolderNameForJob(job);
   if (!folder) return "";
-  const root = (await getOutputDirectoryName()) || "";
-  return root ? `${root} / ${folder}` : folder;
+  return (await buildResumeFolderAbsolutePath(folder)) || folder;
 }
 
 function formatPathForClipboard(pathLabel) {
-  return String(pathLabel || "")
-    .replace(/\s*\/\s*/g, "\\")
-    .trim();
+  const raw = String(pathLabel || "").trim();
+  if (!raw) return "";
+  // Already looks like an absolute Windows/UNC path — keep as-is.
+  if (/^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) {
+    return normalizeAbsoluteDirectoryPath(raw);
+  }
+  return raw.replace(/\s*\/\s*/g, "\\").trim();
 }
 
 async function resolveResumeFolderPath() {
   const selectedJob = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
   if (selectedJob) {
-    const fromJob = await pathLabelForImportedJob(selectedJob);
-    if (fromJob) return fromJob;
+    const folder = resumeFolderNameForJob(selectedJob);
+    if (folder) {
+      const abs = await buildResumeFolderAbsolutePath(folder);
+      if (abs) return abs;
+    }
     try {
       const docs = await getGeneratedDocsForJob(importedJobsSelectedId);
-      if (docs?.pathLabel) return docs.pathLabel;
-      if (docs?.folderName) {
-        const root = (await getOutputDirectoryName()) || "";
-        return root ? `${root} / ${docs.folderName}` : docs.folderName;
+      const docsFolder = sanitizeJobFolderName(docs?.folderName || "");
+      if (docsFolder && docsFolder !== "untitled") {
+        return await buildResumeFolderAbsolutePath(docsFolder);
       }
     } catch {
       /* ignore */
@@ -501,15 +551,25 @@ async function resolveResumeFolderPath() {
   }
 
   const meta = await getLastSaveMeta();
-  if (meta?.pathLabel) return meta.pathLabel;
+  const metaFolder = sanitizeJobFolderName(meta?.folderName || "");
+  if (metaFolder && metaFolder !== "untitled") {
+    return await buildResumeFolderAbsolutePath(metaFolder);
+  }
+  if (meta?.pathLabel) {
+    // Prefer rebuilding from absolute root when pathLabel is relative-only.
+    const rebuilt = await buildResumeFolderAbsolutePath(
+      String(meta.pathLabel).split(/[/\\]/).filter(Boolean).pop() || ""
+    );
+    if (rebuilt && (await getOutputDirectoryAbsolutePath())) return rebuilt;
+    return meta.pathLabel;
+  }
 
   try {
     const data = await chrome.storage.local.get("last_upload_docs_meta");
     const uploadMeta = data.last_upload_docs_meta;
-    if (uploadMeta?.pathLabel) return uploadMeta.pathLabel;
-    if (uploadMeta?.folderName) {
-      const root = (await getOutputDirectoryName()) || "";
-      return root ? `${root} / ${uploadMeta.folderName}` : uploadMeta.folderName;
+    const uploadFolder = sanitizeJobFolderName(uploadMeta?.folderName || "");
+    if (uploadFolder && uploadFolder !== "untitled") {
+      return await buildResumeFolderAbsolutePath(uploadFolder);
     }
   } catch {
     /* ignore */
@@ -518,8 +578,7 @@ async function resolveResumeFolderPath() {
   const pending = await chrome.storage.local.get(["pending_fs_folder", "last_output_dir"]);
   const folder = String(pending.pending_fs_folder || pending.last_output_dir || "").trim();
   if (folder) {
-    const root = (await getOutputDirectoryName()) || "";
-    return root ? `${root} / ${folder}` : folder;
+    return await buildResumeFolderAbsolutePath(folder);
   }
   return "";
 }
@@ -534,6 +593,15 @@ async function refreshCopyResumePathBtn() {
 }
 
 async function copyResumeFolderPath() {
+  const absRoot = await getOutputDirectoryAbsolutePath();
+  if (!absRoot) {
+    setStatus(
+      "Set Absolute path under Scrape & save (e.g. D:\\Bid\\BR-AI\\09-01W), then Copy path again.",
+      "error"
+    );
+    outputDirAbsPathEl?.focus();
+    return;
+  }
   const path = await resolveResumeFolderPath();
   if (!path) {
     setStatus("No resume folder yet — generate a resume first.", "error");
@@ -2588,6 +2656,16 @@ wireAccordion(qaBankSectionEl, "ui_qa_bank_section_open");
 
 selectOutputDirBtn.addEventListener("click", () => {
   selectOutputDirectory().catch((err) => setStatus(String(err.message || err)));
+});
+outputDirAbsPathEl?.addEventListener("change", () => {
+  persistOutputAbsolutePathFromInput()
+    .then((path) => {
+      if (path) setStatus(`Absolute path saved: ${path}`);
+    })
+    .catch((err) => setStatus(String(err.message || err)));
+});
+outputDirAbsPathEl?.addEventListener("blur", () => {
+  persistOutputAbsolutePathFromInput().catch(() => {});
 });
 
 pasteJdBtn.addEventListener("click", pasteJdFromClipboard);

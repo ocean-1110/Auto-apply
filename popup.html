@@ -378,7 +378,20 @@
                 <span class="btn-label">Folder</span>
               </button>
             </div>
-            <p class="hint">Saves to: folder / {job_title}-{company}-{name}/</p>
+            <label class="field">
+              <span>Absolute path (for Copy path)</span>
+              <input
+                id="outputDirAbsPath"
+                type="text"
+                placeholder="e.g. D:\Bid\BR-AI\09-01W"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <p class="hint">
+              Chrome cannot read the full disk path. Paste the absolute path to your output folder so
+              Copy path can produce e.g. D:\Bid\BR-AI\09-01W\{job-folder}\.
+            </p>
           </section>
 
           <details class="accordion" id="qaBankSection">
