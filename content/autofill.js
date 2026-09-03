@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-02.form-recognition.2";
+  const SCRIPT_BUILD = "2026-09-03.combobox-commit.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -739,9 +739,11 @@
     }
 
     add(el.getAttribute("aria-label") || "", 1050);
-    add(el.getAttribute("placeholder") || "", 850);
-    add(el.getAttribute("aria-placeholder") || "", 840);
-    add(identityHintFromControl(el), 820);
+    // Placeholder / name hints are fallbacks only — high scores were stealing
+    // real question labels and breaking Q&A bank matching.
+    add(el.getAttribute("placeholder") || "", 480);
+    add(el.getAttribute("aria-placeholder") || "", 470);
+    add(identityHintFromControl(el), 200);
 
     const labelledBy = el.getAttribute("aria-labelledby");
     if (labelledBy) {
@@ -849,8 +851,12 @@
 
     const question = questionLabelForControl(el);
     const identityHint = identityHintFromControl(el);
-    const primary = normalize(question || el.getAttribute("placeholder") || identityHint);
-    const full = normalize([question, labelTextForControl(el), identityHint].filter(Boolean).join(" "));
+    const placeholder = String(el.getAttribute("placeholder") || "").trim();
+    // Prefer real labels for bank/profile matching; name/id hints only fill gaps.
+    const primary = normalize(question || placeholder || identityHint);
+    const full = normalize(
+      [question, labelTextForControl(el), !question ? identityHint : ""].filter(Boolean).join(" ")
+    );
 
     if (/\bextension\b/.test(primary)) return null;
     if (/\bdevice type\b/.test(primary)) return "phoneDeviceType";
@@ -1107,7 +1113,13 @@
         ".select2-results",
         ".select2-dropdown",
         "[class*='Select-menu']",
-        "[id*='react-select'][id*='-listbox']"
+        "[id*='react-select'][id*='-listbox']",
+        ".ui-autocomplete",
+        ".pac-container",
+        "[class*='autocomplete'][class*='menu']",
+        "[class*='typeahead']",
+        "[class*='dropdown-menu']",
+        "[class*='Suggestions']"
       ].join(", "),
       root
     );
@@ -1190,22 +1202,74 @@
   function clickOptionNode(node) {
     if (!node) return false;
     const clickable =
-      node.closest("[role='option'], .select__option, [class*='select__option'], li, button") ||
-      node;
-    // React-Select listens to mousedown more reliably than click alone.
-    clickable.dispatchEvent(
-      new MouseEvent("pointerdown", { bubbles: true, cancelable: true, view: window })
-    );
-    clickable.dispatchEvent(
-      new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window })
-    );
-    clickable.dispatchEvent(
-      new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window })
-    );
-    clickable.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true, view: window })
-    );
+      node.closest?.(
+        "[role='option'], .select__option, [class*='select__option'], .select2-results__option, li, button, a, div"
+      ) || node;
+    try {
+      clickable.scrollIntoView?.({ block: "nearest" });
+    } catch {
+      /* ignore */
+    }
+    // React-Select / many ATS widgets listen to mousedown more than click.
+    for (const type of ["pointerdown", "mousedown", "mouseup", "pointerup", "click"]) {
+      try {
+        clickable.dispatchEvent(
+          new MouseEvent(type, { bubbles: true, cancelable: true, view: window, buttons: 1 })
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      clickable.click?.();
+    } catch {
+      /* ignore */
+    }
     return true;
+  }
+
+  function isDropdownMenuOpen(el = null) {
+    if (activeSelectMenu(document)) return true;
+    const node = el || document.activeElement;
+    if (!node) return false;
+    if (String(node.getAttribute?.("aria-expanded") || "").toLowerCase() === "true") return true;
+    const combo = node.closest?.('[role="combobox"], [aria-haspopup="listbox"], .select__control, [class*="select__control"]');
+    if (combo && String(combo.getAttribute?.("aria-expanded") || "").toLowerCase() === "true") {
+      return true;
+    }
+    return false;
+  }
+
+  /** Options near the focused combobox — catches custom popovers collectVisibleOptions misses. */
+  function collectOptionsNearInput(input) {
+    const near = collectVisibleOptions(document);
+    if (near.length) return near;
+    if (!input?.getBoundingClientRect) return [];
+    const ir = input.getBoundingClientRect();
+    const candidates = queryAllDeep(
+      '[role="option"], [role="menuitem"], .select__option, [class*="select__option"], .select2-results__option, li[data-value], li'
+    );
+    const out = [];
+    const seen = new Set();
+    for (const node of candidates) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      const text = cleanLabelText(node.textContent);
+      if (!text || text.length > 180) continue;
+      if (isSelectPlaceholderText(text)) continue;
+      if (/^no (options|results|matches)/i.test(text)) continue;
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      const r = node.getBoundingClientRect();
+      if (r.width < 4 || r.height < 4) continue;
+      // Prefer items below/near the input (typical dropdown).
+      if (r.top < ir.top - 40) continue;
+      if (r.top > ir.bottom + 420) continue;
+      if (r.left > ir.right + 80 || r.right < ir.left - 80) continue;
+      out.push(node);
+      if (out.length >= 40) break;
+    }
+    return out;
   }
 
   function openReactSelect(el) {
@@ -1245,23 +1309,55 @@
 
   function pressKey(el, key, code = key) {
     if (!el) return;
-    const keyCode = key === "Enter" ? 13 : key === "ArrowDown" ? 40 : key === "Escape" ? 27 : 0;
-    const opts = {
-      key,
-      code,
-      keyCode,
-      which: keyCode,
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: window
-    };
+    const keyCode =
+      key === "Enter"
+        ? 13
+        : key === "ArrowDown"
+          ? 40
+          : key === "ArrowUp"
+            ? 38
+            : key === "Escape"
+              ? 27
+              : key === "Tab"
+                ? 9
+                : 0;
+    const targets = [el];
     try {
-      el.dispatchEvent(new KeyboardEvent("keydown", opts));
-      el.dispatchEvent(new KeyboardEvent("keypress", opts));
-      el.dispatchEvent(new KeyboardEvent("keyup", opts));
+      if (document.activeElement && document.activeElement !== el) {
+        targets.push(document.activeElement);
+      }
     } catch {
       /* ignore */
+    }
+    for (const target of targets) {
+      const opts = {
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+      try {
+        target.focus?.({ preventScroll: true });
+      } catch {
+        try {
+          target.focus?.();
+        } catch {
+          /* ignore */
+        }
+      }
+      try {
+        target.dispatchEvent(new KeyboardEvent("keydown", opts));
+        if (key === "Enter" || key.length === 1) {
+          target.dispatchEvent(new KeyboardEvent("keypress", opts));
+        }
+        target.dispatchEvent(new KeyboardEvent("keyup", opts));
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -1331,6 +1427,40 @@
     return optionMatchesAny(shown, candidates);
   }
 
+  /**
+   * True only when a dropdown choice is finalized — not when the user/filter
+   * text is still sitting in an open combobox input.
+   */
+  function hasCommittedSelectValue(el, typedFilter = "") {
+    if (isDropdownMenuOpen(el)) return false;
+    const shown = selectWidgetDisplayValue(el);
+    const typed = normalize(typedFilter);
+    if (shown && !isSelectPlaceholderText(shown)) {
+      // React-Select single-value is a real commit.
+      const root = getReactSelectRoot(el);
+      if (
+        root?.querySelector?.(
+          ".select__single-value, [class*='select__single-value'], .select2-selection__rendered, [class*='singleValue']"
+        )
+      ) {
+        return true;
+      }
+      if (typed && normalize(shown) === typed) {
+        // Same as typed filter and menu closed — accept.
+        return true;
+      }
+      if (!typed || normalize(shown) !== typed) return true;
+    }
+    const raw = String(el?.value || "").trim();
+    if (!raw || isSelectPlaceholderText(raw) || isPlaceholderChoiceValue(raw)) return false;
+    if (el?.tagName === "INPUT" && typed && normalize(raw) === typed) {
+      // Typed filter text alone is not a committed option while we expected a pick.
+      return false;
+    }
+    if (el?.tagName === "INPUT" && looksLikeCombobox(el)) return false;
+    return true;
+  }
+
   function setReactSelectFilter(input, text) {
     if (!input || input.tagName !== "INPUT") return;
     setNativeValue(input, text);
@@ -1369,32 +1499,140 @@
     return firstHighlightedOption(activeSelectMenu()) || (typedNorm ? options[0] : null);
   }
 
-  async function confirmSelectChoice(input, el, candidates) {
+  async function confirmSelectChoice(input, el, candidates, typedFilter = "") {
     if (selectLooksCommitted(el, candidates)) return true;
     const menu = activeSelectMenu();
     const highlighted = firstHighlightedOption(menu);
     if (highlighted) {
       clickOptionNode(highlighted);
-      await sleep(80);
+      await sleep(120);
       if (selectLooksCommitted(el, candidates)) return true;
+      if (hasCommittedSelectValue(el, typedFilter)) return true;
     }
     pressKey(input, "Enter", "Enter");
-    await sleep(80);
-    return selectLooksCommitted(el, candidates);
+    await sleep(120);
+    if (selectLooksCommitted(el, candidates)) return true;
+    return hasCommittedSelectValue(el, typedFilter);
   }
 
-  async function pickFirstVisibleOption(input, el, candidates) {
-    const options = await waitForOptions(12, 100);
+  async function pickFirstVisibleOption(input, el, candidates = [], typedFilter = "") {
+    let options = collectOptionsNearInput(input);
+    if (!options.length) options = await waitForOptions(12, 100);
     if (!options.length) return false;
-    clickOptionNode(options[0]);
-    await sleep(80);
-    if (selectLooksCommitted(el, candidates)) return true;
-    if (String(selectWidgetDisplayValue(el) || el?.value || "").trim()) return true;
-    if (input) {
-      pressKey(input, "Enter", "Enter");
-      await sleep(80);
+
+    const match =
+      (candidates.length && options.find((n) => optionMatchesAny(n.textContent, candidates))) ||
+      options[0];
+    clickOptionNode(match);
+    await sleep(150);
+    if (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter)) {
+      return true;
     }
-    return Boolean(String(selectWidgetDisplayValue(el) || el?.value || "").trim());
+    if (input) {
+      pressKey(input, "ArrowDown", "ArrowDown");
+      await sleep(80);
+      pressKey(input, "Enter", "Enter");
+      await sleep(150);
+    }
+    return selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter);
+  }
+
+  /**
+   * After typing into a combobox: wait for list → click match/first →
+   * ArrowDown+Enter until the menu closes. Never treat typed filter text alone
+   * as a successful selection while the list is still open.
+   */
+  async function commitTypedDropdown(input, el, candidates) {
+    if (!input) return false;
+    const typedFilter = String(input.value || candidates[0] || "").trim();
+
+    // Give async suggestion APIs time to render.
+    await sleep(400);
+    let options = collectOptionsNearInput(input);
+    if (!options.length) options = await waitForOptions(18, 120);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      options = collectOptionsNearInput(input);
+      if (!options.length) options = collectVisibleOptions(document);
+      if (options.length) {
+        const match =
+          options.find((n) => optionMatchesAny(n.textContent, candidates)) ||
+          pickFilteredOption(options, candidates, typedFilter) ||
+          options[0];
+        clickOptionNode(match);
+        await sleep(180);
+        if (!isDropdownMenuOpen(el) && (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter))) {
+          return true;
+        }
+        // Some widgets need a second click on the same option.
+        clickOptionNode(match);
+        await sleep(120);
+        if (!isDropdownMenuOpen(el)) {
+          if (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter)) {
+            return true;
+          }
+        }
+      }
+
+      // Keyboard path: highlight first suggestion then commit.
+      try {
+        input.focus({ preventScroll: true });
+      } catch {
+        try {
+          input.focus();
+        } catch {
+          /* ignore */
+        }
+      }
+      pressKey(input, "ArrowDown", "ArrowDown");
+      await sleep(120);
+      pressKey(input, "Enter", "Enter");
+      await sleep(180);
+
+      if (!isDropdownMenuOpen(el)) {
+        if (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter)) {
+          return true;
+        }
+        // Menu closed after Enter — accept if input holds a real value.
+        const raw = String(el?.value || input.value || "").trim();
+        if (raw && !isSelectPlaceholderText(raw)) return true;
+      }
+    }
+
+    // Final force: click first visible option once more, then Enter, then blur.
+    options = collectOptionsNearInput(input);
+    if (options.length) {
+      clickOptionNode(options[0]);
+      await sleep(150);
+    }
+    pressKey(input, "Enter", "Enter");
+    await sleep(100);
+
+    if (isDropdownMenuOpen(el)) {
+      // Close leftover open list without wiping a committed single-value.
+      const before = selectWidgetDisplayValue(el);
+      pressKey(input, "Tab", "Tab");
+      await sleep(80);
+      if (isDropdownMenuOpen(el)) {
+        pressKey(input, "Escape", "Escape");
+        await sleep(60);
+        // If Escape cleared a good single-value, we still report based on state.
+        if (!selectWidgetDisplayValue(el) && before) {
+          /* ignore */
+        }
+      }
+    }
+
+    try {
+      input.blur?.();
+    } catch {
+      /* ignore */
+    }
+
+    if (selectLooksCommitted(el, candidates)) return true;
+    if (hasCommittedSelectValue(el, typedFilter)) return true;
+    const raw = String(el?.value || input.value || "").trim();
+    return Boolean(raw && !isSelectPlaceholderText(raw) && !isDropdownMenuOpen(el));
   }
 
   async function fillAsyncAutocomplete(el, value, key = null) {
@@ -1408,7 +1646,8 @@
       const dl = document.getElementById(listId);
       if (dl) {
         const opts = [...dl.querySelectorAll("option")];
-        const match = opts.find((o) => optionMatchesAny(o.value || o.textContent, candidates));
+        const match =
+          opts.find((o) => optionMatchesAny(o.value || o.textContent, candidates)) || opts[0];
         if (match) {
           setNativeValue(el, match.value || match.textContent);
           el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1427,19 +1666,7 @@
       }
     }
     await typeIntoSelectFilter(el, filterText);
-    await sleep(300);
-
-    let options = await waitForOptions(8, 100);
-    let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
-    if (match && clickOptionNode(match)) return true;
-    if (await pickFirstVisibleOption(el, el, candidates)) return true;
-
-    pressKey(el, "ArrowDown", "ArrowDown");
-    await sleep(100);
-    options = collectVisibleOptions(document);
-    if (options.length && clickOptionNode(options[0])) return true;
-    pressKey(el, "Enter", "Enter");
-    return Boolean(String(el.value || "").trim());
+    return commitTypedDropdown(el, el, candidates);
   }
 
   async function fillCustomDropdown(el, value, key = null) {
@@ -1456,15 +1683,30 @@
 
     let options = collectVisibleOptions(document);
     let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
-    if (match) return clickOptionNode(match);
+    if (match) {
+      clickOptionNode(match);
+      await sleep(120);
+      if (!isDropdownMenuOpen(el)) return true;
+    }
 
     const input = openReactSelect(el);
-    options = await waitForOptions(reactSelect ? 12 : 6, reactSelect ? 90 : 70);
+    options = await waitForOptions(reactSelect ? 14 : 8, reactSelect ? 100 : 80);
     match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match) {
-      const ok = clickOptionNode(match);
-      if (ok && reactSelect) clearReactSelectFilter(input);
-      if (ok) return true;
+      clickOptionNode(match);
+      await sleep(150);
+      if (!isDropdownMenuOpen(el)) {
+        if (reactSelect) clearReactSelectFilter(input);
+        return true;
+      }
+    }
+    if (options.length) {
+      clickOptionNode(options[0]);
+      await sleep(150);
+      if (!isDropdownMenuOpen(el)) {
+        if (reactSelect) clearReactSelectFilter(input);
+        return true;
+      }
     }
 
     const filterText = isYesNoValue(candidates[0])
@@ -1477,38 +1719,15 @@
 
     if (input && input.tagName === "INPUT" && filterText) {
       await typeIntoSelectFilter(input, filterText);
-      options = await waitForOptions(reactSelect ? 12 : 6, 80);
-      match = pickFilteredOption(options, candidates, filterText);
-      if (match) {
-        clickOptionNode(match);
-        await sleep(80);
-        if (selectLooksCommitted(el, candidates) || optionMatchesAny(match.textContent, candidates)) {
-          clearReactSelectFilter(input);
-          return true;
-        }
-      }
-
-      if (await confirmSelectChoice(input, el, candidates)) {
-        clearReactSelectFilter(input);
+      const ok = await commitTypedDropdown(input, el, candidates);
+      if (ok) {
+        if (reactSelect && !isDropdownMenuOpen(el)) clearReactSelectFilter(input);
         return true;
       }
-
-      pressKey(input, "ArrowDown", "ArrowDown");
-      await sleep(50);
-      if (await confirmSelectChoice(input, el, candidates)) {
-        clearReactSelectFilter(input);
-        return true;
-      }
-
-      if (selectLooksCommitted(el, candidates)) return true;
-
-      if (await pickFirstVisibleOption(input, el, candidates)) {
-        clearReactSelectFilter(input);
-        return true;
-      }
-
-      clearReactSelectFilter(input);
-      pressKey(input, "Escape", "Escape");
+    } else if (input) {
+      // No filter text — still force first option / Enter on an open list.
+      const ok = await commitTypedDropdown(input, el, candidates);
+      if (ok) return true;
     }
 
     if (native && fillSelect(native, value, key)) return true;
@@ -2353,8 +2572,9 @@
       if (!id || !answer) continue;
       const el = document.querySelector(`[data-resume-bot-qid="${CSS.escape(id)}"]`);
       if (!el) continue;
-      // Combobox / React-Select must never receive free-text AI answers.
-      if (isReactSelectInput(el) || looksLikeCombobox(el)) {
+      // Combobox / React-Select must never receive free-text AI answers —
+      // those go through the choice/Q&A path. Async autocomplete may still fill.
+      if (isReactSelectInput(el) || (looksLikeCombobox(el) && !looksLikeAsyncAutocomplete(el))) {
         el.removeAttribute("data-resume-bot-qid");
         continue;
       }
@@ -5877,7 +6097,9 @@
 
   function captureQuestionText(el) {
     const q = questionLabelForControl(el);
-    if (q) return q;
+    if (q && !isSelectPlaceholderText(q) && !/^(type here|enter text|write here|your answer|search)\.?$/i.test(q)) {
+      return q;
+    }
     const fieldset = el.closest("fieldset");
     const legend = fieldset?.querySelector(":scope > legend");
     if (legend) {
@@ -5887,7 +6109,9 @@
     const group = el.closest('[role="radiogroup"], [role="group"]');
     const aria = group?.getAttribute?.("aria-label");
     if (aria) return cleanLabelText(aria);
-    return questionTextForAi(el);
+    const fromAi = questionTextForAi(el);
+    if (fromAi) return fromAi;
+    return q || "";
   }
 
   function readControlAnswer(el) {

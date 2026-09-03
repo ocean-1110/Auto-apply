@@ -52,7 +52,7 @@ import {
   activateGeneratedDocsForJob,
   clearGeneratedDocsForJob
 } from "./upload-assets.js";
-import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, isComplexQuestion, shouldBankAnswer, generateRoleSummaries } from "./ai-answers.js";
+import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, classifyApplicationQuestions, isComplexQuestion, shouldBankAnswer, generateRoleSummaries, DEFAULT_OPENAI_FORM_MODEL } from "./ai-answers.js";
 import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
 import { upsertPendingQa, dismissPendingMatchingQuestion } from "./pending-qa.js";
 import {
@@ -868,8 +868,32 @@ async function getOpenAiSettings() {
   return { apiKey, model };
 }
 
+/** Form classify + autofill answers — always prefer cheap mini, not the resume model. */
+async function getOpenAiFormSettings() {
+  const apiKey = await getEnv("OPENAI_API_KEY");
+  if (!apiKey) {
+    throw new Error(
+      "OpenAI API key is missing. Add OPENAI_API_KEY to the extension .env file (see .env.example), then reload the extension."
+    );
+  }
+  const model =
+    (await getEnv("OPENAI_FORM_MODEL", DEFAULT_OPENAI_FORM_MODEL)) || DEFAULT_OPENAI_FORM_MODEL;
+  return { apiKey, model };
+}
+
+async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
+  if (!question) return null;
+  let match = null;
+  try {
+    match = await findQaMatch(profileId, question, { threshold });
+  } catch {
+    match = null;
+  }
+  return match;
+}
+
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-02.form-recognition.2";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-03.combobox-commit.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1227,8 +1251,11 @@ function queueUnbankedQuestions(profileId, questions, site = "") {
 }
 
 /**
- * Answer application questions: Q&A bank first for reusable/simple items,
- * then OpenAI last resort. Complex JD essays are never stored in the bank.
+ * Answer application questions:
+ * 1) Q&A bank first (learned answers)
+ * 2) gpt-4o-mini classifies field type (identity/factual/choice/thinking/skip)
+ * 3) Remaining: gpt-4o-mini answers — thinking uses JD + resume; factual stays short
+ * Complex JD essays are never stored in the bank.
  * @returns {Promise<Array<{ id: string, answer: string, source?: string }>>}
  */
 async function resolveTextAnswers({
@@ -1247,33 +1274,97 @@ async function resolveTextAnswers({
   const stillNeed = [];
   let bankHits = 0;
 
+  // Pass 1 — Q&A bank before any LLM (skip long thinking essays).
   for (const q of list) {
-    if (!isComplexQuestion(q)) {
-      let match = null;
-      try {
-        match = await findQaMatch(profileId, q.label);
-      } catch {
-        match = null;
-      }
-      if (match?.record?.answer) {
-        resolved.push({ id: q.id, answer: match.record.answer, source: "bank" });
-        recordQaUsage(match.record.id).catch(() => {});
-        bankHits += 1;
-        continue;
-      }
+    if (isComplexQuestion(q)) {
+      stillNeed.push(q);
+      continue;
+    }
+    const match = await tryQaBankMatch(profileId, q.label, { threshold: 0.82 });
+    if (match?.record?.answer) {
+      resolved.push({ id: q.id, answer: match.record.answer, source: "bank" });
+      recordQaUsage(match.record.id).catch(() => {});
+      bankHits += 1;
+      continue;
     }
     stillNeed.push(q);
   }
 
-  queueUnbankedQuestions(profileId, stillNeed, site);
+  if (!stillNeed.length) {
+    resolved.bankHits = bankHits;
+    resolved.aiAnswers = 0;
+    return resolved;
+  }
 
-  if (stillNeed.length) {
-    const { apiKey, model } = await getOpenAiSettings();
+  // Pass 2 — understand each remaining field with the form model (mini).
+  const { apiKey, model: formModel } = await getOpenAiFormSettings();
+  let classified = new Map();
+  try {
+    await setStatus(`Understanding ${stillNeed.length} form field(s) with ${formModel}...`);
+    classified = await classifyApplicationQuestions({
+      apiKey,
+      model: formModel,
+      questions: stillNeed
+    });
+    if (classified._usage) {
+      await logLlmCall({
+        purpose: "autofill_classify",
+        model: formModel,
+        inputTokens: classified._usage.prompt_tokens,
+        outputTokens: classified._usage.completion_tokens
+      });
+    }
+  } catch {
+    classified = new Map();
+  }
+
+  const forAi = [];
+  for (const q of stillNeed) {
+    const meta = classified.get(q.id) || {};
+    const kind = meta.kind || (isComplexQuestion(q) ? "thinking" : "factual");
+    const bankQuery = meta.bankQuery || q.label;
+
+    if (kind === "skip" || kind === "identity") {
+      // Identity is owned by profile autofill; skip avoids wrong fills.
+      continue;
+    }
+
+    // Second bank try with cleaned classifier query (looser threshold).
+    if (kind !== "thinking") {
+      const rematch =
+        (await tryQaBankMatch(profileId, bankQuery, { threshold: 0.75 })) ||
+        (bankQuery !== q.label
+          ? await tryQaBankMatch(profileId, q.label, { threshold: 0.75 })
+          : null);
+      if (rematch?.record?.answer) {
+        resolved.push({ id: q.id, answer: rematch.record.answer, source: "bank" });
+        recordQaUsage(rematch.record.id).catch(() => {});
+        bankHits += 1;
+        continue;
+      }
+    }
+
+    forAi.push({ ...q, kind, label: q.label, bankQuery });
+  }
+
+  queueUnbankedQuestions(
+    profileId,
+    forAi.filter((q) => q.kind !== "thinking"),
+    site
+  );
+
+  if (forAi.length) {
+    const thinkingCount = forAi.filter((q) => q.kind === "thinking").length;
+    await setStatus(
+      thinkingCount
+        ? `Answering ${forAi.length} question(s) from Q&A gaps — ${thinkingCount} need JD/resume...`
+        : `Answering ${forAi.length} question(s) with ${formModel}...`
+    );
     const brief = applicationBrief || (await getApplicationBrief());
     const aiResult = await generateHumanizedApplicationAnswers({
       apiKey,
-      model,
-      questions: stillNeed,
+      model: formModel,
+      questions: forAi,
       applicantInfo,
       jobMeta,
       resumeText,
@@ -1282,7 +1373,7 @@ async function resolveTextAnswers({
     if (aiResult.usage) {
       await logLlmCall({
         purpose: "autofill_text",
-        model,
+        model: formModel,
         inputTokens: aiResult.usage.prompt_tokens,
         outputTokens: aiResult.usage.completion_tokens
       });
@@ -1290,14 +1381,14 @@ async function resolveTextAnswers({
     const byId = new Map(
       (aiResult.answers || []).map((a) => [a.id, String(a?.answer || "").trim()])
     );
-    for (const q of stillNeed) {
+    for (const q of forAi) {
       const answer = byId.get(q.id) || "";
       if (!answer) continue;
       resolved.push({ id: q.id, answer, source: "ai" });
       if (shouldBankAnswer(q, answer, q.fieldType || "text")) {
         await saveReusableQa({
           profileId,
-          question: q.label,
+          question: q.bankQuery || q.label,
           answer,
           fieldType: q.fieldType || "text",
           site
@@ -1312,8 +1403,8 @@ async function resolveTextAnswers({
 }
 
 /**
- * Resolve CHOICE questions: Q&A bank first, then AI constrained to options.
- * AI answers are written back to the bank.
+ * Resolve CHOICE questions: Q&A bank first, classify with mini, then AI
+ * constrained to options using profile + resume (+ JD when relevant).
  */
 async function resolveChoiceAnswers(
   profileId,
@@ -1329,14 +1420,26 @@ async function resolveChoiceAnswers(
   let bankHits = 0;
 
   for (const q of list) {
-    let match = null;
-    try {
-      match = await findQaMatch(profileId, q.label);
-    } catch {
-      match = null;
-    }
+    const match = await tryQaBankMatch(profileId, q.label, { threshold: 0.82 });
     if (match?.record?.answer) {
-      resolved.push({ id: q.id, answer: match.record.answer, source: "bank" });
+      // Prefer bank answer that exists in the option list when options are known.
+      let answer = match.record.answer;
+      if (Array.isArray(q.options) && q.options.length) {
+        const exact = q.options.find(
+          (o) => String(o).trim().toLowerCase() === String(answer).trim().toLowerCase()
+        );
+        const fuzzy = q.options.find((o) => {
+          const a = String(o).trim().toLowerCase();
+          const b = String(answer).trim().toLowerCase();
+          return a.includes(b) || b.includes(a);
+        });
+        answer = exact || fuzzy || answer;
+        if (!exact && !fuzzy) {
+          stillNeed.push(q);
+          continue;
+        }
+      }
+      resolved.push({ id: q.id, answer, source: "bank" });
       recordQaUsage(match.record.id).catch(() => {});
       bankHits += 1;
     } else {
@@ -1344,18 +1447,76 @@ async function resolveChoiceAnswers(
     }
   }
 
-  queueUnbankedQuestions(profileId, stillNeed, site);
+  if (!stillNeed.length) {
+    resolved.bankHits = bankHits;
+    resolved.aiAnswers = 0;
+    return resolved;
+  }
 
-  if (stillNeed.length) {
+  const { apiKey, model: formModel } = await getOpenAiFormSettings();
+  let classified = new Map();
+  try {
+    classified = await classifyApplicationQuestions({
+      apiKey,
+      model: formModel,
+      questions: stillNeed
+    });
+    if (classified._usage) {
+      await logLlmCall({
+        purpose: "autofill_classify",
+        model: formModel,
+        inputTokens: classified._usage.prompt_tokens,
+        outputTokens: classified._usage.completion_tokens
+      });
+    }
+  } catch {
+    classified = new Map();
+  }
+
+  const forAi = [];
+  for (const q of stillNeed) {
+    const meta = classified.get(q.id) || {};
+    const kind = meta.kind || "choice";
+    const bankQuery = meta.bankQuery || q.label;
+    if (kind === "skip" || kind === "identity") continue;
+
+    const rematch = await tryQaBankMatch(profileId, bankQuery, { threshold: 0.75 });
+    if (rematch?.record?.answer) {
+      let answer = rematch.record.answer;
+      if (Array.isArray(q.options) && q.options.length) {
+        const exact = q.options.find(
+          (o) => String(o).trim().toLowerCase() === String(answer).trim().toLowerCase()
+        );
+        const fuzzy = q.options.find((o) => {
+          const a = String(o).trim().toLowerCase();
+          const b = String(answer).trim().toLowerCase();
+          return a.includes(b) || b.includes(a);
+        });
+        if (!exact && !fuzzy) {
+          forAi.push({ ...q, kind: "choice", bankQuery });
+          continue;
+        }
+        answer = exact || fuzzy;
+      }
+      resolved.push({ id: q.id, answer, source: "bank" });
+      recordQaUsage(rematch.record.id).catch(() => {});
+      bankHits += 1;
+      continue;
+    }
+    forAi.push({ ...q, kind: "choice", bankQuery });
+  }
+
+  queueUnbankedQuestions(profileId, forAi, site);
+
+  if (forAi.length) {
     try {
-      const { apiKey, model } = await getOpenAiSettings();
-      const withOptions = stillNeed.filter((q) => Array.isArray(q.options) && q.options.length);
+      const withOptions = forAi.filter((q) => Array.isArray(q.options) && q.options.length);
       if (withOptions.length) {
         await setStatus(`Choosing answers for ${withOptions.length} dropdown/radio question(s)...`);
         const brief = applicationBrief || (await getApplicationBrief());
         const aiResult = await generateConstrainedChoiceAnswers({
           apiKey,
-          model,
+          model: formModel,
           questions: withOptions,
           applicantInfo,
           jobMeta,
@@ -1365,7 +1526,7 @@ async function resolveChoiceAnswers(
         if (aiResult.usage) {
           await logLlmCall({
             purpose: "autofill_choice",
-            model,
+            model: formModel,
             inputTokens: aiResult.usage.prompt_tokens,
             outputTokens: aiResult.usage.completion_tokens
           });
@@ -1378,7 +1539,7 @@ async function resolveChoiceAnswers(
           if (q?.label) {
             await saveReusableQa({
               profileId,
-              question: q.label,
+              question: q.bankQuery || q.label,
               answer: row.answer,
               fieldType: q.fieldType || "select",
               site
@@ -1541,7 +1702,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   const site = hostnameFromUrl(tab.url || "");
   await ensureCostSession(ctx.jobMeta.jdLink || ctx.jobMeta.jobTitle || tab.url || "");
 
-  // Q&A bank first for dropdown/checkbox/radio, then AI last resort (saved back).
+  // Q&A bank first → classify with mini → AI (JD/resume for thinking fields).
   if (unmatchedChoice.length) {
     try {
       const byFrame = new Map();
@@ -1575,11 +1736,8 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   }
 
   if (unmatched.length) {
-    const needAiCount = unmatched.filter((q) => isComplexQuestion(q)).length;
     await setStatus(
-      needAiCount
-        ? `Checking Q&A bank, then AI for ${unmatched.length} question(s)...`
-        : `Checking Q&A bank for ${unmatched.length} question(s)...`
+      `Form fill: Q&A bank first, then gpt-4o-mini for ${unmatched.length} remaining question(s)...`
     );
     try {
       const byFrame = new Map();

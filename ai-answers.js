@@ -1,9 +1,15 @@
 /**
  * Generate application answers with OpenAI (single pass).
  * Callers must try profile + Q&A bank first; this is last resort.
+ *
+ * Resume generation uses OPENAI_MODEL (e.g. gpt-4.1).
+ * Form understanding / autofill answers use OPENAI_FORM_MODEL (default gpt-4o-mini).
  */
 
 import { chatCompletion, DEFAULT_OPENAI_MODEL } from "./openai.js";
+
+/** Cheap, fast model for form classification + application answers. */
+export const DEFAULT_OPENAI_FORM_MODEL = "gpt-4o-mini";
 
 function parseJsonObject(text) {
   const raw = String(text || "").trim();
@@ -133,12 +139,114 @@ function isLongFormQuestion(q) {
   );
 }
 
+const FORM_KINDS = new Set(["identity", "factual", "choice", "thinking", "skip"]);
+
+/**
+ * Use gpt-4o-mini (or OPENAI_FORM_MODEL) to understand each field before answering.
+ * Returns a Map of question id → { kind, bankQuery, reason }.
+ *
+ * kinds:
+ * - identity: name/email/phone/address — profile autofill already owns these; skip AI
+ * - factual: reusable short facts — prefer Q&A bank, then short AI
+ * - choice: dropdown/radio/checkbox — bank then constrained AI
+ * - thinking: needs JD + resume reasoning (why this role, experience essays, etc.)
+ * - skip: captcha/search/password/file/unrelated — do not fill
+ */
+export async function classifyApplicationQuestions({
+  apiKey,
+  model = DEFAULT_OPENAI_FORM_MODEL,
+  questions = []
+}) {
+  const list = (questions || []).filter((q) => q?.id && q?.label).slice(0, 40);
+  const byId = new Map();
+  if (!list.length) return byId;
+
+  // Heuristic defaults so we still progress if the classifier fails.
+  for (const q of list) {
+    let kind = "factual";
+    if (isComplexQuestion(q) || isLongFormQuestion(q)) kind = "thinking";
+    else if (
+      ["select", "combobox", "checkbox", "radio"].includes(String(q.fieldType || "").toLowerCase()) ||
+      (Array.isArray(q.options) && q.options.length)
+    ) {
+      kind = "choice";
+    }
+    byId.set(q.id, { kind, bankQuery: String(q.label || "").trim(), reason: "heuristic" });
+  }
+
+  try {
+    const result = await chatCompletion({
+      apiKey,
+      model: model || DEFAULT_OPENAI_FORM_MODEL,
+      jsonMode: true,
+      temperature: 0.1,
+      maxTokens: 2000,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You classify US job-application form fields so an autofill bot answers the RIGHT question. " +
+            "Return ONLY JSON: {\"fields\":[{\"id\":\"...\",\"kind\":\"identity|factual|choice|thinking|skip\",\"bankQuery\":\"short canonical question\",\"reason\":\"...\"}]}. " +
+            "Include every id you were given.\n" +
+            "kind meanings:\n" +
+            "- identity: first/last name, email, phone, address, city, state, zip, LinkedIn, password, username login\n" +
+            "- factual: short reusable facts (work auth, sponsorship, years experience, degree, salary, start date, yes/no screening)\n" +
+            "- choice: must pick from provided options (dropdown/radio/checkbox/combobox)\n" +
+            "- thinking: needs reasoning from the job description + resume (why this company, describe experience, challenges, cover-letter style)\n" +
+            "- skip: captcha, OTP, search boxes, file upload, unrelated marketing, fields that must stay empty\n" +
+            "bankQuery: a short cleaned question text good for matching a Q&A bank (strip 'required', placeholders, ATS noise). " +
+            "Do NOT invent answers. Only classify."
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              fields: list.map((q) => ({
+                id: q.id,
+                question: q.label,
+                fieldType: q.fieldType || (isLongFormQuestion(q) ? "textarea" : "text"),
+                hasOptions: Array.isArray(q.options) && q.options.length > 0,
+                optionCount: Array.isArray(q.options) ? q.options.length : 0,
+                multiline: Boolean(q.multiline || q.richText)
+              }))
+            },
+            null,
+            2
+          )
+        }
+      ]
+    });
+    const obj = parseJsonObject(result.content);
+    const rows = Array.isArray(obj?.fields) ? obj.fields : [];
+    for (const row of rows) {
+      const id = String(row?.id || "").trim();
+      if (!id || !byId.has(id)) continue;
+      const kind = FORM_KINDS.has(String(row?.kind || "").toLowerCase())
+        ? String(row.kind).toLowerCase()
+        : byId.get(id).kind;
+      const bankQuery = String(row?.bankQuery || byId.get(id).bankQuery || "").trim();
+      byId.set(id, {
+        kind,
+        bankQuery: bankQuery || byId.get(id).bankQuery,
+        reason: String(row?.reason || "classifier").slice(0, 200),
+        usage: result.usage || null
+      });
+    }
+    // Attach usage once on a sentinel for the caller
+    byId._usage = result.usage || null;
+  } catch {
+    /* keep heuristic map */
+  }
+
+  return byId;
+}
+
 /**
  * @returns {Promise<{ answers: Array<{ id: string, answer: string }>, usage: object }>}
  */
 export async function generateHumanizedApplicationAnswers({
   apiKey,
-  model = DEFAULT_OPENAI_MODEL,
+  model = DEFAULT_OPENAI_FORM_MODEL,
   questions,
   applicantInfo,
   jobMeta = {},
@@ -148,8 +256,8 @@ export async function generateHumanizedApplicationAnswers({
   const list = (questions || []).filter((q) => q?.id && q?.label);
   if (!list.length) return { answers: [], usage: null };
 
-  const longForm = list.filter(isLongFormQuestion);
-  const short = list.filter((q) => !isLongFormQuestion(q));
+  const longForm = list.filter((q) => isLongFormQuestion(q) || q?.kind === "thinking");
+  const short = list.filter((q) => !longForm.includes(q));
   const chunks = [];
   for (let i = 0; i < longForm.length; i += 6) chunks.push(longForm.slice(i, i + 6));
   for (let i = 0; i < short.length; i += 10) chunks.push(short.slice(i, i + 10));
@@ -159,12 +267,12 @@ export async function generateHumanizedApplicationAnswers({
   let usage = null;
 
   for (const chunk of chunks) {
-    const hasLongForm = chunk.some(isLongFormQuestion);
+    const hasLongForm = chunk.some((q) => isLongFormQuestion(q) || q?.kind === "thinking");
     const result = await chatCompletion({
       apiKey,
-      model,
+      model: model || DEFAULT_OPENAI_FORM_MODEL,
       jsonMode: true,
-      temperature: 0.65,
+      temperature: hasLongForm ? 0.55 : 0.35,
       maxTokens: hasLongForm ? 3600 : 1800,
       messages: [
         {
@@ -172,17 +280,18 @@ export async function generateHumanizedApplicationAnswers({
           content:
             "You answer US job-application form questions for a real candidate. " +
             "Return ONLY valid JSON: {\"answers\":[{\"id\":\"...\",\"answer\":\"...\"}]}. " +
-            "Include an answer object for EVERY question id you were given. " +
-            "For short fields keep each answer to 1-2 sentences (a short phrase for tiny fields). " +
-            "If a question asks which certifications/credentials you hold, name them directly from the resume (or say you do not hold that specific cert). " +
-            "For questions marked preferLonger, write 2-4 short paragraphs (about 90-180 words) in first person, " +
-            "grounded in the resume — concrete tools, employers, and decisions, no buzzword padding. " +
-            "For yes/no style answers use Title Case exactly: \"Yes\" or \"No\" (never lowercase). " +
-            "If the question requires a specific opening phrase, begin the answer with that phrase exactly. " +
-            "Ground answers in the candidate resume/profile/brief; prefer real roles, employers, tools, and skills. " +
-            "Do not invent employers, degrees, visas, or tools that contradict the resume/profile. " +
-            "If the resume lacks a specific story the question asks for, give a cautious brief answer based on transferable experience — do not fabricate a detailed false project. " +
-            "Use plain text only (no markdown headings)."
+            "Include an answer object for EVERY question id you were given.\n" +
+            "CRITICAL — answer the exact question asked; do not put a JD essay into a yes/no or short factual field.\n" +
+            "Priority of evidence:\n" +
+            "1) candidateProfile facts when the question is factual/identity\n" +
+            "2) resumeExcerpt for experience, tools, employers, skills\n" +
+            "3) jobDescription / applicationBrief ONLY for thinking questions (why this role, fit, motivation)\n" +
+            "For kind=thinking or preferLonger: write 2-4 short first-person paragraphs grounded in resume + JD (90-180 words). " +
+            "For kind=factual / short fields: 1 sentence or a short phrase only.\n" +
+            "Yes/No → Title Case \"Yes\" or \"No\" only. " +
+            "Do not invent employers, degrees, visas, certifications, or tools absent from the resume/profile. " +
+            "If evidence is missing, give a cautious brief answer — never fabricate a detailed false project. " +
+            "Plain text only (no markdown)."
         },
         {
           role: "user",
@@ -193,7 +302,8 @@ export async function generateHumanizedApplicationAnswers({
               questions: chunk.map((q) => ({
                 id: q.id,
                 question: q.label,
-                preferLonger: isLongFormQuestion(q)
+                kind: q.kind || (isLongFormQuestion(q) ? "thinking" : "factual"),
+                preferLonger: isLongFormQuestion(q) || q?.kind === "thinking"
               }))
             },
             null,
@@ -245,7 +355,7 @@ function pickClosestOption(answer, options = []) {
  */
 export async function generateConstrainedChoiceAnswers({
   apiKey,
-  model = DEFAULT_OPENAI_MODEL,
+  model = DEFAULT_OPENAI_FORM_MODEL,
   questions,
   applicantInfo,
   jobMeta = {},
@@ -260,9 +370,9 @@ export async function generateConstrainedChoiceAnswers({
   const profile = compactApplicantContext(applicantInfo);
   const result = await chatCompletion({
     apiKey,
-    model,
+    model: model || DEFAULT_OPENAI_FORM_MODEL,
     jsonMode: true,
-    temperature: 0.2,
+    temperature: 0.15,
     maxTokens: 1200,
     messages: [
       {
@@ -271,10 +381,9 @@ export async function generateConstrainedChoiceAnswers({
           "You answer US job-application CHOICE questions for a real candidate. " +
           "Questions may be select dropdowns, radio groups, checkboxes, or comboboxes (fieldType). " +
           "Each question includes an options array — you MUST set answer to EXACTLY one string from that question's options (character-for-character). " +
-          "Never invent an option. For multi-select checkboxes, pick the single best matching option string from the list. " +
-          "Use the candidate profile, resume, and job description to choose the most appropriate option. " +
-          "For yes/no style questions prefer honest answers from the profile/resume. " +
-          "Default guidance when profile is silent: eligible to work in the US → Yes option; visa sponsorship needed → No; " +
+          "Never invent an option. Read the question carefully and pick the option that matches THAT question — do not reuse an answer meant for a different field.\n" +
+          "Evidence order: (1) Q&A-style facts already in candidateProfile, (2) resumeExcerpt, (3) job description only when the question is about role fit.\n" +
+          "Default guidance when profile is silent: eligible to work in the US → Yes; visa sponsorship needed → No; " +
           "employment restrictions with current/former employer → No; previously worked for this company → No; " +
           "related to current employee → No; government employee → No; ethics recusal → No. " +
           'Return ONLY JSON: {"answers":[{"id":"...","answer":"..."}]}.'
@@ -288,6 +397,7 @@ export async function generateConstrainedChoiceAnswers({
             questions: list.map((q) => ({
               id: q.id,
               question: q.label,
+              kind: q.kind || "choice",
               fieldType: q.fieldType || "select",
               options: q.options
             }))
