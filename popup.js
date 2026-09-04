@@ -27,6 +27,12 @@ import {
   buildCaptureSummary,
   normalizeJobLink
 } from "./capture-jobs.js";
+import {
+  readJobStatusMemory,
+  applyRememberedStatus,
+  rememberJobStatus,
+  rememberJobStatuses
+} from "./job-status-memory.js";
 import { getQaCount } from "./qa-store.js";
 import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
@@ -1281,6 +1287,8 @@ async function removeSelectedImportedJobs() {
   const now = Date.now();
   const removeSet = new Set(removable);
   const byId = { ...importedJobsById };
+  // Archive before dropping them, so re-importing these roles later shows their status.
+  await rememberJobStatuses(removable.map((id) => byId[id]).filter(Boolean)).catch(() => {});
   for (const id of removable) {
     delete byId[id];
     importedJobsChecked.delete(id);
@@ -1439,10 +1447,13 @@ async function checkSelectedJobsAvailability() {
 
 /**
  * Add CSV jobs to the persisted queue. Existing jobs keep their apply/resume
- * status so a later import (or Chrome restart) does not wipe progress.
+ * status so a later import (or Chrome restart) does not wipe progress, and jobs
+ * that were removed from the list earlier come back with their archived status
+ * instead of a fresh "imported".
  */
 async function mergeImportedJobs(jobs) {
   const now = Date.now();
+  const statusMemory = await readJobStatusMemory();
   const stored = await chrome.storage.local.get([
     "imported_jobs_by_id",
     "imported_jobs_order",
@@ -1482,14 +1493,17 @@ async function mergeImportedJobs(jobs) {
       continue;
     }
 
-    byId[id] = {
-      ...job,
-      status: "imported",
-      attempts: 0,
-      statusDetail: "",
-      createdAt: now,
-      updatedAt: now
-    };
+    byId[id] = applyRememberedStatus(
+      {
+        ...job,
+        status: "imported",
+        attempts: 0,
+        statusDetail: "",
+        createdAt: now,
+        updatedAt: now
+      },
+      statusMemory
+    );
     order.unshift(id);
     added += 1;
     importedJobsChecked.add(id);
@@ -1499,8 +1513,10 @@ async function mergeImportedJobs(jobs) {
     ? stored.imported_jobs_checked_ids.map(String)
     : [...importedJobsChecked];
   const checkedSet = new Set(checked);
+  // Don't re-check jobs whose archived outcome says there is nothing left to do.
+  const doneStatuses = new Set(["completed", "unavailable"]);
   for (const id of seenInFile) {
-    if (byId[id] && String(byId[id].status || "") !== "completed") checkedSet.add(id);
+    if (byId[id] && !doneStatuses.has(String(byId[id].status || ""))) checkedSet.add(id);
   }
 
   await chrome.storage.local.set({
@@ -1611,6 +1627,7 @@ async function patchImportedJobLocally(jobId, patch) {
     imported_jobs_by_id: byId,
     imported_jobs_version: now
   });
+  await rememberJobStatus(byId[jobId]).catch(() => {});
 
   importedJobsById = byId;
   importedJobsVersion = now;
@@ -1976,7 +1993,13 @@ async function upsertScrapedJobIntoList(d, { site = "", tabUrl = "" } = {}) {
   const id = jobIdFromLink(jdLink);
   if (!id) return "";
   const now = Date.now();
-  const existing = importedJobsById[id];
+  let existing = importedJobsById[id];
+  if (!existing) {
+    // Not in the list right now — fall back to what we remember about this job,
+    // so re-scraping a role you removed earlier shows its real status again.
+    const restored = applyRememberedStatus({ id, jdLink }, await readJobStatusMemory());
+    if (restored.status) existing = restored;
+  }
   const keepStatus = existing?.status === "completed" || existing?.status === "unavailable";
   const job = {
     ...(existing || {}),

@@ -66,12 +66,16 @@ export function normalizeCaptureJob(raw) {
 /**
  * Merge new jobs into the queue without wiping in-progress / existing entries.
  * Skips ids already queued and URLs already on the tracking sheet (already applied/tracked).
+ *
+ * `restoreStatus` (see job-status-memory.js) re-attaches the archived outcome to a
+ * job that was in the list before and removed, so its status is not lost.
  */
 export function mergeJobsIntoQueue({
   existingById = {},
   existingOrder = [],
   incoming = [],
-  sheetLinks = []
+  sheetLinks = [],
+  restoreStatus = null
 } = {}) {
   const byId = { ...existingById };
   const order = [...existingOrder];
@@ -123,7 +127,7 @@ export function mergeJobsIntoQueue({
       continue;
     }
 
-    byId[job.id] = {
+    const queued = {
       ...job,
       status: "imported",
       attempts: 0,
@@ -131,6 +135,7 @@ export function mergeJobsIntoQueue({
       createdAt: now,
       updatedAt: now
     };
+    byId[job.id] = typeof restoreStatus === "function" ? restoreStatus(queued) : queued;
     order.unshift(job.id);
     if (link) queuedLinks.add(link);
     added += 1;

@@ -20,6 +20,7 @@ import {
   mergeJobsIntoQueue
 } from "./capture-jobs.js";
 import { awaitTabComplete } from "./tab-utils.js";
+import { applyRememberedStatus, readJobStatusMemory } from "./job-status-memory.js";
 
 const IMPORTED_JOBS_BY_ID_KEY = "imported_jobs_by_id";
 const IMPORTED_JOBS_ORDER_KEY = "imported_jobs_order";
@@ -81,11 +82,13 @@ async function mergeIncomingJobs(incoming, sheetLinks) {
     IMPORTED_JOBS_BY_ID_KEY,
     IMPORTED_JOBS_ORDER_KEY
   ]);
+  const statusMemory = await readJobStatusMemory();
   const merged = mergeJobsIntoQueue({
     existingById: data[IMPORTED_JOBS_BY_ID_KEY] || {},
     existingOrder: data[IMPORTED_JOBS_ORDER_KEY] || [],
     incoming,
-    sheetLinks
+    sheetLinks,
+    restoreStatus: (job) => applyRememberedStatus(job, statusMemory)
   });
   if (merged.added > 0) {
     const checkedData = await chrome.storage.local.get("imported_jobs_checked_ids");

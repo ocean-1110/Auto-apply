@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-03.combobox-commit.1";
+  const SCRIPT_BUILD = "2026-09-03.combobox-wait.2";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -1487,6 +1487,42 @@
     return [];
   }
 
+  /** One patience round for an async suggestion list, and how many rounds we allow. */
+  const COMBO_LIST_ROUND_MS = 3000;
+  const COMBO_LIST_ROUNDS = 4;
+
+  /**
+   * Wait for a combobox's suggestion list after typing.
+   *
+   * Slow widgets (Workday, iCIMS, async React-Select) fetch their options and can
+   * blank the filter input while the request is in flight — if we press Enter/Tab
+   * before the list paints, the typed text is thrown away and nothing is selected.
+   * So: poll for a full round; if the list still is not up, retype the filter and
+   * wait another round, up to `rounds` rounds.
+   */
+  async function waitForComboOptions(
+    input,
+    { retypeText = "", rounds = COMBO_LIST_ROUNDS, roundMs = COMBO_LIST_ROUND_MS } = {}
+  ) {
+    for (let round = 0; round < rounds; round += 1) {
+      const deadline = Date.now() + roundMs;
+      while (Date.now() < deadline) {
+        const options = collectOptionsNearInput(input);
+        if (options.length) return options;
+        await sleep(150);
+      }
+
+      // Round elapsed with no list. Put the filter text back if the widget dropped
+      // it, so the next round has something to match against.
+      const wanted = String(retypeText || "").trim();
+      if (!wanted || input?.tagName !== "INPUT") continue;
+      if (normalize(input.value) === normalize(wanted)) continue;
+      if (round + 1 >= rounds) continue;
+      await typeIntoSelectFilter(input, wanted);
+    }
+    return [];
+  }
+
   function pickFilteredOption(options, candidates, typed) {
     const match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match) return match;
@@ -1518,6 +1554,11 @@
   async function pickFirstVisibleOption(input, el, candidates = [], typedFilter = "") {
     let options = collectOptionsNearInput(input);
     if (!options.length) options = await waitForOptions(12, 100);
+    // Still nothing: the list is probably still loading, so keep waiting rather
+    // than giving up and leaving the typed text to be discarded.
+    if (!options.length) {
+      options = await waitForComboOptions(input, { retypeText: typedFilter, rounds: 2 });
+    }
     if (!options.length) return false;
 
     const match =
@@ -1546,14 +1587,21 @@
     if (!input) return false;
     const typedFilter = String(input.value || candidates[0] || "").trim();
 
-    // Give async suggestion APIs time to render.
+    // Let the widget react to the last keystroke before we look for a list.
     await sleep(400);
-    let options = collectOptionsNearInput(input);
-    if (!options.length) options = await waitForOptions(18, 120);
+    let options = [];
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       options = collectOptionsNearInput(input);
       if (!options.length) options = collectVisibleOptions(document);
+      if (!options.length) {
+        // Never fall through to Enter/Tab while the list may still be loading —
+        // that is what wipes the typed text on slow comboboxes.
+        options = await waitForComboOptions(input, {
+          retypeText: typedFilter,
+          rounds: attempt === 0 ? COMBO_LIST_ROUNDS : 1
+        });
+      }
       if (options.length) {
         const match =
           options.find((n) => optionMatchesAny(n.textContent, candidates)) ||
@@ -1601,6 +1649,9 @@
 
     // Final force: click first visible option once more, then Enter, then blur.
     options = collectOptionsNearInput(input);
+    if (!options.length) {
+      options = await waitForComboOptions(input, { retypeText: typedFilter, rounds: 1 });
+    }
     if (options.length) {
       clickOptionNode(options[0]);
       await sleep(150);

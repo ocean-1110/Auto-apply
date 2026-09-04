@@ -75,12 +75,25 @@ import {
   logFillHits,
   getCostSummaryText
 } from "./cost-tracker.js";
+import { rememberJobStatus, rememberJobStatuses } from "./job-status-memory.js";
 
 // Service worker entry (v1.3.5)
 let isRunning = false;
 let generationCancelRequested = false;
 let generationAbortController = null;
 let keepAliveTimer = null;
+
+// Generation lock bookkeeping. `isRunning` alone used to wedge the extension:
+// after Stop (or a run that died inside a non-abortable await) it stayed true
+// until the service worker recycled, and every later Batch/Apply click was
+// rejected with "Generation already in progress."
+let generationProgressAt = 0;
+let generationCancelRequestedAt = 0;
+let generationRunToken = 0;
+/** After Stop, give the running loop this long to unwind before force-releasing. */
+const CANCEL_GRACE_MS = 20000;
+/** A run that has not touched the status line in this long is dead, not busy. */
+const GENERATION_STALL_MS = 15 * 60 * 1000;
 let panelWindowId = null;
 
 // The last real browser window the user looked at, so "scrape/autofill the
@@ -377,9 +390,7 @@ async function sendMessageToAllFrames(tabId, message, { attempts = 2 } = {}) {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  isRunning = false;
-  generationCancelRequested = false;
-  stopKeepAlive();
+  releaseGenerationLock();
   await chrome.storage.local.set({
     generation_running: false,
     generation_cancel_requested: false,
@@ -390,9 +401,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  isRunning = false;
-  generationCancelRequested = false;
-  stopKeepAlive();
+  releaseGenerationLock();
   await chrome.storage.local.set({
     generation_running: false,
     generation_cancel_requested: false,
@@ -405,11 +414,13 @@ chrome.runtime.onStartup.addListener(async () => {
 registerCaptureAlarmListener();
 
 async function setStatus(status) {
+  generationProgressAt = Date.now();
   await chrome.storage.local.set({ generation_status: status });
 }
 
 function clearGenerationCancel() {
   generationCancelRequested = false;
+  generationCancelRequestedAt = 0;
   generationAbortController = new AbortController();
   setChatAbortSignal(generationAbortController.signal);
   chrome.storage.local.set({ generation_cancel_requested: false }).catch(() => {});
@@ -417,6 +428,7 @@ function clearGenerationCancel() {
 
 function requestGenerationCancel() {
   generationCancelRequested = true;
+  generationCancelRequestedAt = Date.now();
   try {
     generationAbortController?.abort();
   } catch {
@@ -429,7 +441,95 @@ function finishGenerationCancelState() {
   setChatAbortSignal(null);
   generationAbortController = null;
   generationCancelRequested = false;
+  generationCancelRequestedAt = 0;
   chrome.storage.local.set({ generation_cancel_requested: false }).catch(() => {});
+}
+
+/**
+ * Take the generation lock and return this run's token.
+ *
+ * The token is what makes a broken lock safe: if the lock is force-released and a
+ * new run starts, the orphaned loop's token no longer matches, so it bails out at
+ * its next checkpoint instead of interleaving with the new run.
+ */
+function acquireGenerationLock() {
+  generationRunToken += 1;
+  isRunning = true;
+  generationProgressAt = Date.now();
+  clearGenerationCancel();
+  startKeepAlive();
+  chrome.storage.local.set({ generation_running: true }).catch(() => {});
+  return generationRunToken;
+}
+
+/** Throw if this run has been stopped or superseded by a newer one. */
+function assertRunActive(token) {
+  assertNotCancelled();
+  if (token != null && token !== generationRunToken) {
+    throw new Error("Cancelled by user.");
+  }
+}
+
+/**
+ * Drop the lock. Pass the run's token so a run that was already superseded does
+ * not clear the lock out from under the run that replaced it.
+ * Returns true when this call actually released the lock.
+ */
+function releaseGenerationLock(token = null) {
+  if (token != null && token !== generationRunToken) return false;
+  isRunning = false;
+  generationProgressAt = 0;
+  finishGenerationCancelState();
+  stopKeepAlive();
+  return true;
+}
+
+/**
+ * Release the lock at the end of a run.
+ * No-ops when the run never took the lock (`token == null`) or when a newer run
+ * already owns it, so a late-finishing orphan cannot stop the run that replaced it.
+ */
+async function finishGenerationRun(token) {
+  if (token == null) return;
+  if (!releaseGenerationLock(token)) return;
+  await chrome.storage.local.set({ generation_running: false });
+}
+
+function forceReleaseGenerationLock(reason) {
+  console.warn(`[generation-lock] force released: ${reason}`);
+  // Bump the token first so the orphaned run is superseded and cannot re-enter.
+  generationRunToken += 1;
+  releaseGenerationLock();
+  chrome.storage.local.set({ generation_running: false }).catch(() => {});
+}
+
+/**
+ * Reason a new run cannot start, or "" when the lock is free.
+ *
+ * A lock is only honoured while the run is demonstrably alive. If the user hit
+ * Stop and the old loop never released it, or the run has gone silent for
+ * `GENERATION_STALL_MS`, the lock is broken here so the next click works.
+ */
+function generationLockError(label = "Generation") {
+  if (!isRunning) return "";
+  const now = Date.now();
+
+  if (generationCancelRequestedAt && now - generationCancelRequestedAt > CANCEL_GRACE_MS) {
+    forceReleaseGenerationLock("stop requested but the previous run never finished unwinding");
+    return "";
+  }
+  if (generationProgressAt && now - generationProgressAt > GENERATION_STALL_MS) {
+    forceReleaseGenerationLock("previous run made no progress for 15 minutes");
+    return "";
+  }
+  if (generationCancelRequestedAt) {
+    const waitSec = Math.max(
+      1,
+      Math.ceil((CANCEL_GRACE_MS - (now - generationCancelRequestedAt)) / 1000)
+    );
+    return `Still stopping the previous run — try again in ${waitSec}s.`;
+  }
+  return `${label} already in progress.`;
 }
 
 function assertNotCancelled() {
@@ -452,7 +552,7 @@ function isCancelError(err) {
 async function markInProgressJobsStopped(detail = "Cancelled by user.") {
   const byId = await getImportedJobsById();
   const now = Date.now();
-  let changed = false;
+  const stopped = [];
   for (const [jobId, job] of Object.entries(byId)) {
     const s = String(job?.status || "");
     if (!["opening", "generating", "opening_form", "filling"].includes(s)) continue;
@@ -462,9 +562,12 @@ async function markInProgressJobsStopped(detail = "Cancelled by user.") {
       statusDetail: detail,
       updatedAt: now
     };
-    changed = true;
+    stopped.push(byId[jobId]);
   }
-  if (changed) await setImportedJobsById(byId, { bumpVersion: true });
+  if (stopped.length) {
+    await setImportedJobsById(byId, { bumpVersion: true });
+    await rememberJobStatuses(stopped).catch(() => {});
+  }
 }
 
 function isJobAlreadyOnSheetError(err) {
@@ -579,6 +682,8 @@ async function setImportedJobStatus(jobId, { status, statusDetail = "", markAtte
   };
 
   await setImportedJobsById(byId, { bumpVersion: true });
+  // Archive the outcome so it survives this job being removed from the queue.
+  await rememberJobStatus(byId[jobId]).catch(() => {});
 }
 
 /** Remove a job from the imported queue (used when the posting is closed). */
@@ -810,7 +915,7 @@ async function recoverInterruptedImportedJobs({ immediate = false } = {}) {
   const byId = data[IMPORTED_JOBS_BY_ID_KEY] || {};
   const now = Date.now();
 
-  let changed = false;
+  const interrupted = [];
 
   for (const [jobId, job] of Object.entries(byId)) {
     const s = String(job?.status || "");
@@ -830,11 +935,12 @@ async function recoverInterruptedImportedJobs({ immediate = false } = {}) {
         : "Interrupted (service worker restarted). Retry.",
       updatedAt: now
     };
-    changed = true;
+    interrupted.push(byId[jobId]);
   }
 
-  if (changed) {
+  if (interrupted.length) {
     await setImportedJobsById(byId, { bumpVersion: true });
+    await rememberJobStatuses(interrupted).catch(() => {});
   }
 }
 
@@ -5332,8 +5438,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await markInProgressJobsStopped("Cancelled by user.");
       await setStatus("Cancelled by user.");
       if (!wasRunning) {
-        finishGenerationCancelState();
-        stopKeepAlive();
+        releaseGenerationLock();
+      } else {
+        // Some steps (tab probes, PDF writes, downloads) cannot be aborted mid-flight.
+        // If the loop has not released the lock by the end of the grace period, break
+        // it here so the next Batch/Apply click is not rejected as "already in progress".
+        setTimeout(() => {
+          if (isRunning && generationCancelRequestedAt) {
+            forceReleaseGenerationLock("stop grace period elapsed");
+          }
+        }, CANCEL_GRACE_MS + 1000);
       }
       safeSendResponse(sendResponse, { ok: true, cancelling: wasRunning, cleared: !wasRunning });
     })().catch((err) => {
@@ -5345,9 +5459,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "reset_generation_state") {
     (async () => {
       try {
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        releaseGenerationLock();
         await chrome.storage.local.set({
           generation_status: "Reset complete. Ready for next run.",
           generation_running: false,
@@ -5357,8 +5469,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
         safeSendResponse(sendResponse, { ok: true });
       } catch (err) {
-        isRunning = false;
-        stopKeepAlive();
+        releaseGenerationLock();
         await chrome.storage.local.set({ generation_running: false });
         safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
       }
@@ -5573,23 +5684,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "autofill_current_page") {
     (async () => {
+      let panelApplyRunToken = null;
       try {
         const profileId = message.profileId;
         if (!profileId) {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        if (isRunning) {
-          safeSendResponse(sendResponse, {
-            ok: false,
-            error: "Ocean is already running. Wait for it to finish, or cancel."
-          });
+        const busy = generationLockError("Ocean");
+        if (busy) {
+          safeSendResponse(sendResponse, { ok: false, error: busy });
           return;
         }
-        isRunning = true;
-        clearGenerationCancel();
-        startKeepAlive();
-        await chrome.storage.local.set({ generation_running: true });
+        panelApplyRunToken = acquireGenerationLock();
         await setStatus("Apply: filling the form and continuing the application...");
         const result = await runPanelApply(profileId, {
           preferredAction: message.preferredAction || ""
@@ -5618,10 +5725,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error });
         }
       } finally {
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(panelApplyRunToken);
       }
     })();
     return true;
@@ -5742,23 +5846,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "easy_apply_current_page") {
     // Legacy shortcut — same as the panel Apply button (whole application).
     (async () => {
+      let panelApplyRunToken = null;
       try {
         const profileId = message.profileId;
         if (!profileId) {
           safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
           return;
         }
-        if (isRunning) {
-          safeSendResponse(sendResponse, {
-            ok: false,
-            error: "Ocean is already running. Wait for it to finish, or cancel."
-          });
+        const busy = generationLockError("Ocean");
+        if (busy) {
+          safeSendResponse(sendResponse, { ok: false, error: busy });
           return;
         }
-        isRunning = true;
-        clearGenerationCancel();
-        startKeepAlive();
-        await chrome.storage.local.set({ generation_running: true });
+        panelApplyRunToken = acquireGenerationLock();
         await setStatus("Apply: filling the form and continuing the application...");
         const result = await runPanelApply(profileId, { preferredAction: message.preferredAction || "" });
         if (result.skipped || !result.ok) {
@@ -5780,10 +5880,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error });
         }
       } finally {
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(panelApplyRunToken);
       }
     })();
     return true;
@@ -5802,15 +5899,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
       return false;
     }
-    if (isRunning) {
-      safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+    const applyBusy = generationLockError("Apply");
+    if (applyBusy) {
+      safeSendResponse(sendResponse, { ok: false, error: applyBusy });
       return false;
     }
 
-    isRunning = true;
-    clearGenerationCancel();
-    startKeepAlive();
-    chrome.storage.local.set({ generation_running: true });
+    const applyRunToken = acquireGenerationLock();
     safeSendResponse(sendResponse, { ok: true, started: true });
 
     (async () => {
@@ -5845,10 +5940,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           });
         }
       } finally {
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(applyRunToken);
       }
     })();
 
@@ -5871,15 +5963,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
       return false;
     }
-    if (isRunning) {
-      safeSendResponse(sendResponse, { ok: false, error: "Another job is already in progress." });
+    const batchApplyBusy = generationLockError("Batch apply");
+    if (batchApplyBusy) {
+      safeSendResponse(sendResponse, { ok: false, error: batchApplyBusy });
       return false;
     }
 
-    isRunning = true;
-    clearGenerationCancel();
-    startKeepAlive();
-    chrome.storage.local.set({ generation_running: true });
+    const batchApplyRunToken = acquireGenerationLock();
     safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
 
     (async () => {
@@ -5896,7 +5986,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         for (let i = 0; i < jobIds.length; i += 1) {
           let importedJobId = "";
           try {
-            assertNotCancelled();
+            assertRunActive(batchApplyRunToken);
             importedJobId = jobIds[i];
             const byId = await getImportedJobsById();
             const job = byId[importedJobId];
@@ -6021,10 +6111,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           await setStatus(`Batch apply failed: ${String(err?.message || err)}`);
         }
       } finally {
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(batchApplyRunToken);
       }
     })();
 
@@ -6068,15 +6155,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
       return false;
     }
-    if (isRunning) {
-      safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+    const batchBusy = generationLockError("Batch resume build");
+    if (batchBusy) {
+      safeSendResponse(sendResponse, { ok: false, error: batchBusy });
       return false;
     }
 
-    isRunning = true;
-    clearGenerationCancel();
-    startKeepAlive();
-    chrome.storage.local.set({ generation_running: true });
+    const batchRunToken = acquireGenerationLock();
     safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
 
     (async () => {
@@ -6108,7 +6193,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         for (let i = 0; i < jobIds.length; i += 1) {
           let importedJobId = "";
           try {
-            assertNotCancelled();
+            assertRunActive(batchRunToken);
 
             importedJobId = jobIds[i];
             byId = await getImportedJobsById();
@@ -6343,10 +6428,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (probeTabId && probeTabCreated) {
           await chrome.tabs.remove(probeTabId).catch(() => {});
         }
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(batchRunToken);
       }
     })();
 
@@ -6362,18 +6444,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       safeSendResponse(sendResponse, { ok: false, error: "Check one or more jobs first." });
       return false;
     }
-    if (isRunning) {
-      safeSendResponse(sendResponse, {
-        ok: false,
-        error: "Another job is already running. Stop it first, then check availability."
-      });
+    const checkBusy = generationLockError("Another job");
+    if (checkBusy) {
+      safeSendResponse(sendResponse, { ok: false, error: checkBusy });
       return false;
     }
 
-    isRunning = true;
-    clearGenerationCancel();
-    startKeepAlive();
-    chrome.storage.local.set({ generation_running: true });
+    const checkRunToken = acquireGenerationLock();
     safeSendResponse(sendResponse, { ok: true, started: true, total: jobIds.length });
 
     (async () => {
@@ -6386,7 +6463,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try {
         for (let i = 0; i < jobIds.length; i += 1) {
           try {
-            assertNotCancelled();
+            assertRunActive(checkRunToken);
           } catch {
             cancelled = true;
             break;
@@ -6517,10 +6594,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         if (probeTabId && probeTabCreated) {
           await chrome.tabs.remove(probeTabId).catch(() => {});
         }
-        await chrome.storage.local.set({ generation_running: false });
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(checkRunToken);
       }
     })();
 
@@ -6651,9 +6725,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "preview_save_documents") {
     (async () => {
+      let previewRunToken = null;
       try {
-        if (isRunning) {
-          safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+        const saveBusy = generationLockError("Generation");
+        if (saveBusy) {
+          safeSendResponse(sendResponse, { ok: false, error: saveBusy });
           return;
         }
         const stored = await chrome.storage.local.get([
@@ -6721,10 +6797,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }).catch(() => {});
         // #endregion
 
-        isRunning = true;
-        clearGenerationCancel();
-        startKeepAlive();
-        await chrome.storage.local.set({ generation_running: true });
+        previewRunToken = acquireGenerationLock();
         await setStatus("Preview: saving resume PDFs...");
 
         const { apiKey, model } = await getOpenAiSettings();
@@ -6791,9 +6864,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await setStatus(`Preview save failed: ${error}`);
         safeSendResponse(sendResponse, { ok: false, error });
       } finally {
-        isRunning = false;
-        finishGenerationCancelState();
-        stopKeepAlive();
+        await finishGenerationRun(previewRunToken);
       }
     })();
     return true;
@@ -6803,15 +6874,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return undefined;
   }
 
-  if (isRunning) {
-    safeSendResponse(sendResponse, { ok: false, error: "Generation already in progress." });
+  const generateBusy = generationLockError("Generation");
+  if (generateBusy) {
+    safeSendResponse(sendResponse, { ok: false, error: generateBusy });
     return undefined;
   }
 
-  isRunning = true;
-  clearGenerationCancel();
-  startKeepAlive();
-  chrome.storage.local.set({ generation_running: true });
+  const generateRunToken = acquireGenerationLock();
   setStatus("Starting OpenAI resume generation...");
 
   safeSendResponse(sendResponse, { ok: true, started: true });
@@ -6832,9 +6901,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         await setStatus(`Generation failed: ${String(err?.message || err)}`);
       }
     } finally {
-      isRunning = false;
-      finishGenerationCancelState();
-      stopKeepAlive();
+      await finishGenerationRun(generateRunToken);
     }
   })();
 
