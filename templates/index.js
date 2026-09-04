@@ -1,12 +1,19 @@
 import { classicBlueTemplate } from "./classic-blue.js";
 import { timesClassicTemplate } from "./times-classic.js";
 import { oceanBlueClassicTemplate } from "./ocean-blue-classic.js";
+import { navyTechnicalSerifTemplate } from "./navy-technical-serif.js";
 import { US_MARKET_TEMPLATES } from "./us-market.js";
-import { normalizeCerts, normalizeExperience, normalizeSkills } from "./shared.js";
+import {
+  normalizeCerts,
+  normalizeExperience,
+  normalizeSkills,
+  normalizeTechnicalSummary
+} from "./shared.js";
 
 /** Built-in resume PDF/HTML templates. Add new files here and register them. */
 export const BUILTIN_TEMPLATES = [
   oceanBlueClassicTemplate,
+  navyTechnicalSerifTemplate,
   classicBlueTemplate,
   timesClassicTemplate,
   ...US_MARKET_TEMPLATES
@@ -26,14 +33,27 @@ export function getTemplateById(templateId) {
   );
 }
 
+/**
+ * True when the selected template renders a Technical Summary section, so the
+ * generator should ask the model for `technical_summary`. Only opt-in templates
+ * declare this; every other template ignores the field entirely.
+ */
+export function templateRequiresTechnicalSummary(templateId) {
+  return getTemplateById(templateId)?.requiresTechnicalSummary === true;
+}
+
 /** Normalize resume JSON fields before rendering. */
 export function normalizeResumeData(data) {
   if (!data || typeof data !== "object") return data || {};
+  const technicalSummary = normalizeTechnicalSummary(
+    data.technical_summary ?? data.technicalSummary
+  );
   const normalized = {
     ...data,
     experience: normalizeExperience(data.experience),
     skills: normalizeSkills(data.skills),
-    certifications: normalizeCerts(data.certifications)
+    certifications: normalizeCerts(data.certifications),
+    technical_summary: technicalSummary
   };
   // #region agent log
   fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {

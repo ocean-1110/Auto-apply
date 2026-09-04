@@ -126,6 +126,36 @@ export function renderSkills(skills) {
     .join("\n");
 }
 
+/**
+ * Normalize the Technical Summary into a flat list of bullet strings.
+ * Accepts an array of strings/objects, or one newline/semicolon separated string.
+ * Only templates that opt in render this section.
+ */
+export function normalizeTechnicalSummary(value) {
+  const source =
+    value == null
+      ? []
+      : Array.isArray(value)
+        ? value
+        : typeof value === "string"
+          ? value.split(/\r?\n|;/)
+          : typeof value === "object"
+            ? Object.values(value)
+            : [];
+
+  return source
+    .map((item) => {
+      if (item == null) return "";
+      if (typeof item === "string") return item.trim();
+      if (typeof item === "object") {
+        return String(item.text || item.bullet || item.summary || item.item || item.value || "").trim();
+      }
+      return String(item).trim();
+    })
+    .map((text) => text.replace(/^[-•·*•]\s*/, "").trim())
+    .filter(Boolean);
+}
+
 export function normalizeCerts(certs) {
   const list = Array.isArray(certs)
     ? certs

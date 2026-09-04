@@ -15,7 +15,8 @@ import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeResumePayload, normalizeSkills } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
 import { ensureAtsReadyResume } from "./ats-rewrite.js";
-import { DEFAULT_TEMPLATE_ID } from "./templates/index.js";
+import { DEFAULT_TEMPLATE_ID, templateRequiresTechnicalSummary } from "./templates/index.js";
+import { TECHNICAL_SUMMARY_PROMPT } from "./prompts/technical-summary.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import {
   chatCompletion,
@@ -2422,6 +2423,15 @@ async function dismissPageOverlays(tabId, { rounds = 2 } = {}) {
   }
 }
 
+/**
+ * How long Auto Apply keeps looking for an Apply/Easy Apply entry point, and how
+ * long it waits for a click to visibly do something, before giving up and moving
+ * to the next job. A page that has an Apply button reveals it well inside this;
+ * anything longer was just a dead wait on a page that has none.
+ */
+const APPLY_ENTRY_WAIT_MS = 2000;
+const APPLY_NO_REACTION_MS = 2000;
+
 function probeHasApplyEntry(probe) {
   if (!probe) return false;
   if (probe.anyForm) return true;
@@ -2429,12 +2439,13 @@ function probeHasApplyEntry(probe) {
   return (probe.applyUrls || []).some((u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u));
 }
 
-async function waitBrieflyForApplyEntry(tabId, timeoutMs = 6000) {
+async function waitBrieflyForApplyEntry(tabId, timeoutMs = APPLY_ENTRY_WAIT_MS) {
   const start = Date.now();
   let probe = null;
-  while (Date.now() - start < timeoutMs) {
+  // Probe immediately, then keep re-checking until the deadline — a page that
+  // already has its Apply button returns on the first pass with no extra wait.
+  while (true) {
     await dismissPageOverlays(tabId, { rounds: 1 });
-    await sleepMs(250);
     probe = await getApplyActionFromTab(tabId).catch(() => probe);
     if (
       probe?.alreadyApplied ||
@@ -2444,7 +2455,8 @@ async function waitBrieflyForApplyEntry(tabId, timeoutMs = 6000) {
     ) {
       return probe;
     }
-    await sleepMs(350);
+    if (Date.now() - start >= timeoutMs) break;
+    await sleepMs(250);
   }
   return (
     probe || {
@@ -2904,6 +2916,10 @@ async function clickSubmitOnTab(tabId, { frameId, clickLabel = "Submit", settleM
 async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false, gateway = false } = {}) {
   const start = Date.now();
   const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
+  // A click that worked shows *some* reaction fast: a new tab, a navigation, or a
+  // loading spinner. If none of that has happened within the no-reaction deadline,
+  // the click did nothing — give up now instead of sitting on the full timeout.
+  const noReactionDeadline = start + APPLY_NO_REACTION_MS;
 
   while (Date.now() - start < timeoutMs) {
     await sleepMs(400);
@@ -2997,6 +3013,11 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
       }
     } catch {
       /* page may be mid-navigation */
+    }
+
+    // Nothing moved and the page isn't even loading — stop waiting on a dead click.
+    if (Date.now() > noReactionDeadline && tab.status !== "loading") {
+      return { advanced: false, tabId, reason: "no_reaction" };
     }
   }
   return { advanced: false, tabId, reason: "timeout" };
@@ -3611,7 +3632,7 @@ async function startMultiStepApplyOnTab(
       ) {
         if (!lookedForEntry) {
           await setStatus(`Auto Apply (${stepLabel}): waiting briefly for Apply...`);
-          probe = await waitBrieflyForApplyEntry(currentTabId, 6000);
+          probe = await waitBrieflyForApplyEntry(currentTabId, APPLY_ENTRY_WAIT_MS);
           lookedForEntry = true;
         }
         if (probe.alreadyApplied || probe.jobUnavailable || probe.anyForm) {
@@ -5115,10 +5136,17 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
 
   assertNotCancelled();
   await setStatus("Building resume prompt...");
-  const resumePrompt = await buildPrompt(profileId, meta.jdText || "", {
+  const basePrompt = await buildPrompt(profileId, meta.jdText || "", {
     jobTitle: meta.jobTitle || "",
     companyName: meta.companyName || ""
   });
+  // Only templates that render a Technical Summary ask the model to produce one.
+  const wantsTechnicalSummary = templateRequiresTechnicalSummary(
+    meta.templateId || DEFAULT_TEMPLATE_ID
+  );
+  const resumePrompt = wantsTechnicalSummary
+    ? `${basePrompt}\n\n${TECHNICAL_SUMMARY_PROMPT}`
+    : basePrompt;
 
   assertNotCancelled();
   await setStatus("Calling OpenAI for resume JSON...");
@@ -5130,8 +5158,14 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       { role: "user", content: resumePrompt },
       {
         role: "user",
-        content:
-          "Reminder: return the COMPLETE resume JSON now. Skills items must be long and dense. Experience must include all required jobs with full long-form bullet counts (each bullet ~170–240 characters). Do not shorten or omit sections."
+        content: [
+          "Reminder: return the COMPLETE resume JSON now. Skills items must be long and dense. Experience must include all required jobs with full long-form bullet counts (each bullet ~170–240 characters). Do not shorten or omit sections.",
+          wantsTechnicalSummary
+            ? 'Also include the "technical_summary" array (6–7 bullets) right after "profile", following the Technical Summary rules above.'
+            : ""
+        ]
+          .filter(Boolean)
+          .join(" ")
       }
     ],
     jsonMode: true,
@@ -6615,7 +6649,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           "last_job_title",
           "last_company_name",
           "preview_pending_meta",
-          "selected_profile_id"
+          "selected_profile_id",
+          "selected_template_id"
         ]);
         const current =
           stored.last_resume_json && typeof stored.last_resume_json === "object"
@@ -6633,12 +6668,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const jobTitle = String(pending.jobTitle || stored.last_job_title || "").trim();
         const companyName = String(pending.companyName || stored.last_company_name || "").trim();
 
+        const previewTemplateId =
+          pending.templateId || stored.selected_template_id || DEFAULT_TEMPLATE_ID;
+
         const { apiKey, model } = await getOpenAiSettings();
         await setStatus("Preview: regenerating resume from your prompt...");
         const userMsg = [
           "Update the resume JSON using the instructions below.",
           "Return ONLY one complete valid resume JSON object (same schema).",
           "Keep identity fields accurate. Apply the user's edits while staying ATS-friendly and realistic.",
+          templateRequiresTechnicalSummary(previewTemplateId)
+            ? 'Keep the "technical_summary" array (6–7 one-sentence senior-level bullets) in the output; refresh it if the edits change the resume.'
+            : "",
           "",
           `Job title: ${jobTitle || "(n/a)"}`,
           `Company: ${companyName || "(n/a)"}`,
