@@ -300,7 +300,15 @@ function rewriteStatusReason(atsReport) {
  */
 export async function ensureAtsReadyResume(
   data,
-  { apiKey, model, jdText = "", jobTitle = "", companyName = "", setStatus } = {}
+  {
+    apiKey,
+    model,
+    jdText = "",
+    jobTitle = "",
+    companyName = "",
+    setStatus,
+    rewriteEnabled = true
+  } = {}
 ) {
   const scoreOpts = { jdText, jobTitle, apiKey, model };
   let current = data;
@@ -310,6 +318,22 @@ export async function ensureAtsReadyResume(
   await status("Asking GPT for ATS score vs the job description...");
   let atsReport = await scoreResumeAgainstJd(current, scoreOpts);
   const previousScore = atsReport.score;
+
+  // Rewrite turned off in the panel: still report the score, but hand back the
+  // resume exactly as generated — no rewrite passes, no extra model calls.
+  if (!rewriteEnabled) {
+    await status(`ATS ${atsReport.score}% — rewrite is off, keeping the resume as generated.`);
+    return {
+      data: current,
+      atsReport: withAtsMeta(atsReport, {
+        rewritten: false,
+        rewriteAttempts: 0,
+        rewriteSkipped: "disabled",
+        previousScore,
+        finalScore: atsReport.score
+      })
+    };
+  }
 
   // Score already meets target — keep the resume (no rewrite for missing keywords alone).
   if (Number(atsReport.score) >= ATS_REWRITE_MIN_SCORE) {

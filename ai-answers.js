@@ -139,6 +139,122 @@ function isLongFormQuestion(q) {
   );
 }
 
+/* ------------------------------------------------------------------------- *
+ * Answer responsiveness
+ *
+ * The model used to drift: a textarea made every question "preferLonger", so
+ * "When can you start?" got a 60-word experience essay, and "describe your
+ * experience with Snowflake" got a generic "why I want to join <company>"
+ * paragraph that never mentioned Snowflake. The widget shape is a poor proxy
+ * for what a question actually wants, so the question text decides instead, and
+ * the answer is checked against it before it reaches the page.
+ * ------------------------------------------------------------------------- */
+
+/** Questions that want a date/number/phrase no matter how big the textarea is. */
+const SHORT_ANSWER_RE =
+  /\b(when (can|could|would) you|start date|starting date|earliest (start|available)|availability|notice period|timeline|how soon|how many|how much|years of|salary|compensation|rate|desired pay|expected pay|date of|what is your (current )?(location|city|address|title))\b/i;
+
+/** "If none, type N/A" — the form itself tells us what to do with no evidence. */
+const NA_FALLBACK_RE = /\b(if none|if not applicable|if no experience)\b[^.]*\bn\/?a\b/i;
+
+const SUBJECT_STOPWORDS = new Set([
+  "please", "briefly", "describe", "your", "experience", "with", "using", "the", "and",
+  "for", "you", "have", "any", "none", "type", "enter", "this", "that", "role", "about",
+  "what", "when", "how", "why", "are", "our", "their", "they", "from", "into", "within",
+  "working", "work", "worked", "tell", "share", "explain", "summarize", "detail", "details",
+  "required", "optional", "answer", "question", "field", "years", "year", "level",
+  "industry", "industries", "solutions", "solution", "products", "product", "tools", "tool"
+]);
+
+/**
+ * Distinctive nouns the answer is expected to actually mention — capitalized
+ * terms and acronyms like "Snowflake", "Health & Life Sciences", "FHIR".
+ */
+function questionSubjects(label) {
+  const text = String(label || "").replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  // Drop the trailing instruction so 'N/A' is not treated as a subject.
+  const core = text.replace(/\bif (none|not applicable|no experience)\b.*$/i, "");
+  const out = [];
+  const seen = new Set();
+  for (const raw of core.match(/[A-Za-z][A-Za-z0-9+#./-]*/g) || []) {
+    const token = raw.replace(/[./-]+$/, "");
+    const lower = token.toLowerCase();
+    if (seen.has(lower) || SUBJECT_STOPWORDS.has(lower) || token.length < 3) continue;
+    // Capitalized mid-sentence, or an all-caps acronym: a real subject term.
+    const distinctive = /^[A-Z]/.test(token) || /^[A-Z0-9]{2,}$/.test(token);
+    if (!distinctive) continue;
+    seen.add(lower);
+    out.push(token);
+  }
+  return out.slice(0, 6);
+}
+
+function wordCount(text) {
+  return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+/**
+ * What shape this question wants, from its wording first and the widget second.
+ * `kind` is the classifier's verdict, which outranks the textarea heuristic.
+ */
+export function questionAnswerShape(q) {
+  const label = String(q?.label || "");
+  const kind = String(q?.kind || "").toLowerCase();
+  const subjects = questionSubjects(label);
+  const allowsNa = NA_FALLBACK_RE.test(label);
+
+  if (kind === "factual" || SHORT_ANSWER_RE.test(label)) {
+    return { shape: "short", maxWords: 25, subjects, allowsNa };
+  }
+  if (isLongFormQuestion(q) || kind === "thinking") {
+    return { shape: "long", maxWords: 220, subjects, allowsNa };
+  }
+  return { shape: "short", maxWords: 40, subjects, allowsNa };
+}
+
+/**
+ * Reject an answer that does not actually answer this question.
+ * Returns "" when the answer is fine, or a short reason to feed back to the model.
+ */
+export function answerResponsivenessIssue(q, answer) {
+  const text = String(answer || "").trim();
+  if (!text) return "empty answer";
+
+  const { shape, maxWords, subjects } = questionAnswerShape(q);
+  const words = wordCount(text);
+
+  if (shape === "short" && words > maxWords) {
+    return `this question wants a short direct answer (max ~${maxWords} words), not a ${words}-word paragraph`;
+  }
+
+  // "Describe your experience with X" must mention X (or say it has none).
+  // Short answers are exempt: "Yes", "2 weeks" and "$150,000" are perfectly
+  // responsive without repeating the subject back.
+  if (shape === "long" && subjects.length) {
+    const lower = text.toLowerCase();
+    const mentions = subjects.some((s) => lower.includes(s.toLowerCase()));
+    const disclaims = /\bn\/?a\b|\bno (direct |hands-on |professional )?experience\b|\bhave not\b|\bnot worked\b/i.test(
+      text
+    );
+    if (!mentions && !disclaims) {
+      return `the answer never mentions ${subjects.slice(0, 3).join(", ")}, which is what the question asks about`;
+    }
+  }
+
+  // Generic motivation filler substituted for a real question.
+  if (
+    /\b(i am excited about the opportunity|i believe i would be a great fit|i am eager to contribute|thrive in collaborative environments)\b/i.test(
+      text
+    ) &&
+    !/\bwhy\b|\binterest|\bmotivat|\bfit\b/i.test(String(q?.label || ""))
+  ) {
+    return "this reads like a generic cover-letter paragraph instead of an answer to the question asked";
+  }
+
+  return "";
+}
+
 const FORM_KINDS = new Set(["identity", "factual", "choice", "thinking", "skip"]);
 
 /**
@@ -256,73 +372,148 @@ export async function generateHumanizedApplicationAnswers({
   const list = (questions || []).filter((q) => q?.id && q?.label);
   if (!list.length) return { answers: [], usage: null };
 
-  const longForm = list.filter((q) => isLongFormQuestion(q) || q?.kind === "thinking");
+  // Shape comes from the question wording, not the widget: a short factual
+  // question sitting in a textarea must still get a short factual answer.
+  const shapeById = new Map(list.map((q) => [q.id, questionAnswerShape(q)]));
+  const longForm = list.filter((q) => shapeById.get(q.id).shape === "long");
   const short = list.filter((q) => !longForm.includes(q));
   const chunks = [];
   for (let i = 0; i < longForm.length; i += 6) chunks.push(longForm.slice(i, i + 6));
   for (let i = 0; i < short.length; i += 10) chunks.push(short.slice(i, i + 10));
 
   const profile = compactApplicantContext(applicantInfo);
+  const context = buildAutofillContext({ jobMeta, resumeText, applicationBrief });
   const answers = [];
   let usage = null;
 
-  for (const chunk of chunks) {
-    const hasLongForm = chunk.some((q) => isLongFormQuestion(q) || q?.kind === "thinking");
+  const addUsage = (next) => {
+    if (!next) return;
+    usage = usage
+      ? {
+          prompt_tokens: Number(usage.prompt_tokens || 0) + Number(next.prompt_tokens || 0),
+          completion_tokens:
+            Number(usage.completion_tokens || 0) + Number(next.completion_tokens || 0),
+          total_tokens: Number(usage.total_tokens || 0) + Number(next.total_tokens || 0)
+        }
+      : next;
+  };
+
+  const describeQuestion = (q) => {
+    const shape = shapeById.get(q.id);
+    return {
+      id: q.id,
+      question: q.label,
+      kind: q.kind || (shape.shape === "long" ? "thinking" : "factual"),
+      answerShape: shape.shape,
+      maxWords: shape.maxWords,
+      // The exact terms this answer has to be about, so "experience with
+      // Snowflake" cannot come back as a paragraph about the company.
+      mustBeAbout: shape.subjects,
+      naAllowed: shape.allowsNa
+    };
+  };
+
+  const askChunk = async (chunk, correction = "") => {
+    const hasLongForm = chunk.some((q) => shapeById.get(q.id).shape === "long");
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You answer US job-application form questions for a real candidate. " +
+          'Return ONLY valid JSON: {"answers":[{"id":"...","answer":"..."}]}. ' +
+          "Include an answer object for EVERY question id you were given.\n" +
+          "CRITICAL — every answer must directly answer ITS OWN question. Never substitute a " +
+          "motivation or cover-letter paragraph for a question about a specific technology, " +
+          "industry, date, or number.\n" +
+          "Obey each question's answerShape:\n" +
+          '- answerShape="short": one short phrase or a single sentence, within maxWords. ' +
+          "Timelines, start dates, notice periods, salary, and years of experience are SHORT even " +
+          "when the field is a big textarea.\n" +
+          '- answerShape="long": 2-4 short first-person paragraphs grounded in the resume ' +
+          "(90-180 words).\n" +
+          "If mustBeAbout is non-empty, the answer must be about exactly those terms and should " +
+          "name them. If the resume has no evidence for them, say so briefly and honestly — and " +
+          'when naAllowed is true, answer exactly "N/A".\n' +
+          "Priority of evidence:\n" +
+          "1) candidateProfile facts when the question is factual/identity\n" +
+          "2) resumeExcerpt for experience, tools, employers, skills\n" +
+          "3) jobDescription / applicationBrief ONLY for motivation questions (why this role, why this company, fit)\n" +
+          'Yes/No → Title Case "Yes" or "No" only. ' +
+          "Do not invent employers, degrees, visas, certifications, or tools absent from the resume/profile. " +
+          "Plain text only (no markdown)."
+      },
+      {
+        role: "user",
+        content: JSON.stringify(
+          {
+            ...context,
+            candidateProfile: profile,
+            questions: chunk.map(describeQuestion)
+          },
+          null,
+          2
+        )
+      }
+    ];
+    if (correction) messages.push({ role: "user", content: correction });
+
     const result = await chatCompletion({
       apiKey,
       model: model || DEFAULT_OPENAI_FORM_MODEL,
       jsonMode: true,
       temperature: hasLongForm ? 0.55 : 0.35,
       maxTokens: hasLongForm ? 3600 : 1800,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You answer US job-application form questions for a real candidate. " +
-            "Return ONLY valid JSON: {\"answers\":[{\"id\":\"...\",\"answer\":\"...\"}]}. " +
-            "Include an answer object for EVERY question id you were given.\n" +
-            "CRITICAL — answer the exact question asked; do not put a JD essay into a yes/no or short factual field.\n" +
-            "Priority of evidence:\n" +
-            "1) candidateProfile facts when the question is factual/identity\n" +
-            "2) resumeExcerpt for experience, tools, employers, skills\n" +
-            "3) jobDescription / applicationBrief ONLY for thinking questions (why this role, fit, motivation)\n" +
-            "For kind=thinking or preferLonger: write 2-4 short first-person paragraphs grounded in resume + JD (90-180 words). " +
-            "For kind=factual / short fields: 1 sentence or a short phrase only.\n" +
-            "Yes/No → Title Case \"Yes\" or \"No\" only. " +
-            "Do not invent employers, degrees, visas, certifications, or tools absent from the resume/profile. " +
-            "If evidence is missing, give a cautious brief answer — never fabricate a detailed false project. " +
-            "Plain text only (no markdown)."
-        },
-        {
-          role: "user",
-          content: JSON.stringify(
-            {
-              ...buildAutofillContext({ jobMeta, resumeText, applicationBrief }),
-              candidateProfile: profile,
-              questions: chunk.map((q) => ({
-                id: q.id,
-                question: q.label,
-                kind: q.kind || (isLongFormQuestion(q) ? "thinking" : "factual"),
-                preferLonger: isLongFormQuestion(q) || q?.kind === "thinking"
-              }))
-            },
-            null,
-            2
-          )
-        }
-      ]
+      messages
     });
-    answers.push(...answersFromJson(result.content, chunk));
-    if (result.usage) {
-      usage = usage
-        ? {
-            prompt_tokens: Number(usage.prompt_tokens || 0) + Number(result.usage.prompt_tokens || 0),
-            completion_tokens:
-              Number(usage.completion_tokens || 0) + Number(result.usage.completion_tokens || 0),
-            total_tokens: Number(usage.total_tokens || 0) + Number(result.usage.total_tokens || 0)
-          }
-        : result.usage;
+    addUsage(result.usage);
+    return answersFromJson(result.content, chunk);
+  };
+
+  for (const chunk of chunks) {
+    const byId = new Map(chunk.map((q) => [q.id, q]));
+    let drafted = await askChunk(chunk);
+
+    // Re-ask only for answers that do not actually answer their question.
+    const rejects = [];
+    const kept = [];
+    for (const row of drafted) {
+      const issue = answerResponsivenessIssue(byId.get(row.id), row.answer);
+      if (issue) rejects.push({ row, issue });
+      else kept.push(row);
     }
+
+    if (rejects.length) {
+      const retryList = rejects.map(({ row }) => byId.get(row.id)).filter(Boolean);
+      const correction =
+        "Your previous answers to these ids were rejected. Rewrite ONLY these, answering the " +
+        "actual question this time:\n" +
+        rejects
+          .map(
+            ({ row, issue }) =>
+              `- id ${row.id} (question: ${byId.get(row.id)?.label || ""}) — ${issue}.`
+          )
+          .join("\n");
+      let retried = [];
+      try {
+        retried = await askChunk(retryList, correction);
+      } catch {
+        retried = [];
+      }
+      const retriedById = new Map(retried.map((r) => [r.id, r.answer]));
+      for (const { row } of rejects) {
+        const q = byId.get(row.id);
+        const second = retriedById.get(row.id) || "";
+        if (second && !answerResponsivenessIssue(q, second)) {
+          kept.push({ id: row.id, answer: second });
+          continue;
+        }
+        // Still off-topic. Prefer the form's own escape hatch over a wrong essay,
+        // otherwise leave the field blank for the user to fill.
+        if (shapeById.get(row.id)?.allowsNa) kept.push({ id: row.id, answer: "N/A" });
+      }
+    }
+
+    answers.push(...kept);
   }
 
   return { answers, usage };

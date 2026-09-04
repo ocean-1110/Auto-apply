@@ -78,6 +78,7 @@ const scrapePageBtn = document.getElementById("scrapePageBtn");
 const scrapeSiteSelectEl = document.getElementById("scrapeSiteSelect");
 const SCRAPE_SITE_KEY = "selected_scrape_site";
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
+const atsRewriteToggleEl = document.getElementById("atsRewriteToggle");
 const previewModeToggleEl = document.getElementById("previewModeToggle");
 const sidebarModeToggleEl = document.getElementById("sidebarModeToggle");
 const generateResumeBtn = document.getElementById("generateResume");
@@ -589,37 +590,100 @@ async function resolveResumeFolderPath() {
   return "";
 }
 
+/**
+ * Resolved clipboard text for the Copy path button, kept warm so the click
+ * handler can copy without awaiting anything first (see copyResumeFolderPath).
+ */
+let cachedResumeFolderPath = "";
+
+function isAbsoluteDiskPath(text) {
+  const raw = String(text || "");
+  return /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\");
+}
+
 async function refreshCopyResumePathBtn() {
   if (!copyResumePathBtn) return;
   const path = await resolveResumeFolderPath();
-  copyResumePathBtn.disabled = !path;
-  copyResumePathBtn.title = path
-    ? `Copy resume folder path: ${formatPathForClipboard(path)}`
+  cachedResumeFolderPath = path ? formatPathForClipboard(path) : "";
+  copyResumePathBtn.disabled = !cachedResumeFolderPath;
+  copyResumePathBtn.title = cachedResumeFolderPath
+    ? `Copy resume folder path: ${cachedResumeFolderPath}`
     : "Generate a resume first to copy its folder path";
 }
 
-async function copyResumeFolderPath() {
-  const absRoot = await getOutputDirectoryAbsolutePath();
-  if (!absRoot) {
-    setStatus(
-      "Set Absolute path under Scrape & save (e.g. D:\\Bid\\BR-AI\\09-01W), then Copy path again.",
-      "error"
-    );
-    outputDirAbsPathEl?.focus();
-    return;
-  }
-  const path = await resolveResumeFolderPath();
-  if (!path) {
-    setStatus("No resume folder yet — generate a resume first.", "error");
-    return;
-  }
-  const text = formatPathForClipboard(path);
+/**
+ * Copy synchronously via a hidden textarea.
+ *
+ * navigator.clipboard.writeText() needs the document focused AND a live user
+ * gesture; in the side panel the panel often is not the focused document, and
+ * any await before the call spends the gesture. execCommand has neither
+ * requirement as long as we run inside the click handler itself.
+ */
+function copyTextSync(text) {
   try {
-    await navigator.clipboard.writeText(text);
-    setStatus(`Copied path: ${text}`, "done");
-  } catch (err) {
-    setStatus(`Could not copy path: ${String(err.message || err)}`, "error");
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
   }
+}
+
+function reportCopiedPath(text) {
+  if (isAbsoluteDiskPath(text)) {
+    setStatus(`Copied path: ${text}`, "done");
+    return;
+  }
+  // Copied, but only the folder name — the absolute root was never configured.
+  setStatus(
+    `Copied "${text}", but that is not a full disk path. Set Absolute path under ` +
+      "Scrape & save (e.g. D:\\Bid\\US BId\\09-01W) so Copy path returns the full folder.",
+    "error"
+  );
+  outputDirAbsPathEl?.focus();
+}
+
+/**
+ * Runs synchronously from the click so the clipboard write keeps the user
+ * gesture. Falls back to resolving the path on demand when the cache is cold.
+ */
+function copyResumeFolderPath() {
+  const cached = cachedResumeFolderPath;
+  if (cached && copyTextSync(cached)) {
+    reportCopiedPath(cached);
+    refreshCopyResumePathBtn().catch(() => {});
+    return;
+  }
+
+  (async () => {
+    const path = cached || formatPathForClipboard(await resolveResumeFolderPath());
+    if (!path) {
+      setStatus("No resume folder yet — generate a resume first.", "error");
+      return;
+    }
+    if (copyTextSync(path)) {
+      reportCopiedPath(path);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(path);
+      reportCopiedPath(path);
+    } catch (err) {
+      setStatus(
+        `Could not copy path (${String(err.message || err)}). Copy it manually: ${path}`,
+        "error"
+      );
+    }
+  })().catch((err) => setStatus(String(err.message || err), "error"));
 }
 
 async function refreshSaveBannerForCurrentJob() {
@@ -1835,6 +1899,7 @@ async function loadSettings() {
     "scraped_job_meta",
     "generate_resume_only",
     "preview_mode_enabled",
+    "ats_rewrite_enabled",
     "ui_panel_mode",
     "last_ats_report",
     "selected_scrape_site"
@@ -1862,6 +1927,10 @@ async function loadSettings() {
   if (resumeOnlyToggleEl) {
     // Default unchecked (false) — only check when user previously enabled it.
     resumeOnlyToggleEl.checked = data.generate_resume_only === true;
+  }
+  if (atsRewriteToggleEl) {
+    // Default ON — rewriting to the 80% target is the long-standing behaviour.
+    atsRewriteToggleEl.checked = data.ats_rewrite_enabled !== false;
   }
   fillScrapeSiteSelect(data.selected_scrape_site || "auto");
   refreshScrapeSiteHint().catch(() => {});
@@ -2125,7 +2194,8 @@ async function collectBatchGenerateSettings() {
   await chrome.storage.local.set({
     selected_profile_id: profileId,
     selected_template_id: templateId,
-    generate_resume_only: isResumeOnlyEnabled()
+    generate_resume_only: isResumeOnlyEnabled(),
+    ats_rewrite_enabled: isAtsRewriteEnabled()
   });
 
   return {
@@ -2136,7 +2206,9 @@ async function collectBatchGenerateSettings() {
       sheetName: sheet.sheetName,
       sheetsWebAppUrl: sheet.sheetsWebAppUrl,
       templateId,
-      trackApplicationStatus: sheet.trackApplicationStatus
+      trackApplicationStatus: sheet.trackApplicationStatus,
+      // Pinned at click time so toggling mid-batch cannot change a running build.
+      atsRewriteEnabled: isAtsRewriteEnabled()
     }
   };
 }
@@ -2219,7 +2291,8 @@ async function collectJobMetaOrShowError() {
     last_company_name: companyName,
     last_jd_link: jdLink,
     last_jd_text: jd,
-    generate_resume_only: isResumeOnlyEnabled()
+    generate_resume_only: isResumeOnlyEnabled(),
+    ats_rewrite_enabled: isAtsRewriteEnabled()
   });
 
   return {
@@ -2242,7 +2315,8 @@ async function collectJobMetaOrShowError() {
       importedJobId: importedJobsSelectedId || "",
       resumeOnly: isResumeOnlyEnabled(),
       previewMode: isPreviewModeEnabled(),
-      trackApplicationStatus: sheet.trackApplicationStatus
+      trackApplicationStatus: sheet.trackApplicationStatus,
+      atsRewriteEnabled: isAtsRewriteEnabled()
     }
   };
 }
@@ -2279,6 +2353,21 @@ function updateGenerateButtonLabel() {
 async function persistResumeOnlySetting() {
   await chrome.storage.local.set({ generate_resume_only: isResumeOnlyEnabled() });
   updateGenerateButtonLabel();
+}
+
+/** Off = score the resume but never rewrite it. Default on. */
+function isAtsRewriteEnabled() {
+  return atsRewriteToggleEl ? Boolean(atsRewriteToggleEl.checked) : true;
+}
+
+async function persistAtsRewriteSetting() {
+  const enabled = isAtsRewriteEnabled();
+  await chrome.storage.local.set({ ats_rewrite_enabled: enabled });
+  setStatus(
+    enabled
+      ? "ATS rewrite on — resumes are rewritten until they score at least 80%."
+      : "ATS rewrite off — resumes are scored but kept exactly as generated."
+  );
 }
 
 function isPreviewModeEnabled() {
@@ -2929,7 +3018,8 @@ openSavedFolderBtn?.addEventListener("click", () => {
   openSavedFolder().catch((err) => setStatus(String(err.message || err)));
 });
 copyResumePathBtn?.addEventListener("click", () => {
-  copyResumeFolderPath().catch((err) => setStatus(String(err.message || err)));
+  // Call directly — no await before it, or Chrome rejects the clipboard write.
+  copyResumeFolderPath();
 });
 grantFolderAccessBtn?.addEventListener("click", () => {
   tryFlushPendingOutput({ interactive: true }).catch((err) =>
@@ -3077,6 +3167,9 @@ resumeOnlyToggleEl?.addEventListener("change", () => {
 });
 previewModeToggleEl?.addEventListener("change", () => {
   persistPreviewModeSetting().catch(() => {});
+});
+atsRewriteToggleEl?.addEventListener("change", () => {
+  persistAtsRewriteSetting().catch(() => {});
 });
 
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));

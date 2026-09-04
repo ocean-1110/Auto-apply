@@ -1665,8 +1665,15 @@ async function resolveChoiceAnswers(
 }
 
 async function formatUploadDocsLocation(docs) {
-  const save = (await getLastSaveMeta().catch(() => null)) || {};
-  const folder = String(docs?.pathLabel || save.pathLabel || docs?.folderName || save.folderName || "").trim();
+  // The docs' OWN labels always win. getLastSaveMeta() is global — it points at
+  // whichever job was saved most recently — so consulting it before the docs'
+  // own folderName used to label this job's PDFs with another job's folder.
+  const ownFolder = String(docs?.pathLabel || docs?.folderName || "").trim();
+  let folder = ownFolder;
+  if (!folder) {
+    const save = (await getLastSaveMeta().catch(() => null)) || {};
+    folder = String(save.pathLabel || save.folderName || "").trim();
+  }
   const resumeName = String(docs?.resume?.fileName || "").trim();
   const coverName = String(docs?.coverLetter?.fileName || "").trim();
   const joinPath = (name) => {
@@ -1684,6 +1691,90 @@ async function formatUploadDocsLocation(docs) {
     coverPath,
     summary: [resumePath, coverPath].filter(Boolean).join("  +  ") || folder
   };
+}
+
+function uploadDocsMismatchError(resolved) {
+  const mismatch = resolved?.mismatch || resolved || {};
+  if (resolved?.error) return resolved.error;
+  return (
+    `The only resume PDFs on hand were built for a different job (${mismatch.got}), ` +
+    `not "${mismatch.expected}". Generate a resume for this job first, then Apply — ` +
+    "uploading the other job's resume was stopped."
+  );
+}
+
+/** The queued job whose posting URL matches this page, if any. */
+async function findImportedJobByUrl(url) {
+  const target = normalizeUrlForMatch(url);
+  if (!target) return null;
+  const byId = await getImportedJobsById();
+  for (const [jobId, job] of Object.entries(byId)) {
+    const link = job?.jdLink || job?.url || "";
+    if (!link) continue;
+    if (normalizeUrlForMatch(link) === target) return { jobId, job };
+  }
+  return null;
+}
+
+/**
+ * Resume/cover letter PDFs to upload on THIS page.
+ *
+ * `getLastGeneratedDocs()` is a single global slot holding whatever was generated
+ * or activated most recently, so after a batch build it points at the last job in
+ * the batch. Applying to any other job from the panel would then upload that
+ * job's PDFs. Match the tab to its queued job first and load that job's files;
+ * only fall back to the global slot when the page is not a job we have queued,
+ * and never hand over files that are known to belong to a different job.
+ */
+async function resolveUploadDocsForTab(tabId, { explicitDocs = null } = {}) {
+  if (explicitDocs?.resume?.base64 || explicitDocs?.coverLetter?.base64) {
+    return { docs: explicitDocs, mismatch: null };
+  }
+
+  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
+  const url = tab?.url || "";
+  const match = url ? await findImportedJobByUrl(url) : null;
+
+  let jobLoadError = "";
+  if (match) {
+    let forJob = null;
+    try {
+      forJob = await ensureUploadDocsForImportedJob(match.jobId, match.job);
+    } catch (err) {
+      // e.g. "unlock the output folder" — more actionable than a generic message.
+      jobLoadError = String(err?.message || err);
+    }
+    if (forJob?.resume?.base64 || forJob?.coverLetter?.base64) {
+      return { docs: forJob, mismatch: null };
+    }
+  }
+
+  const last = await getLastGeneratedDocs();
+  if (!last?.resume?.base64 && !last?.coverLetter?.base64) {
+    return { docs: last, mismatch: null, error: jobLoadError };
+  }
+
+  // The global slot has files. Refuse them when they demonstrably belong to a
+  // different queued job than the one this page is showing.
+  const lastJobId = String(last.importedJobId || "").trim();
+  if (match && lastJobId && lastJobId !== match.jobId) {
+    const byId = await getImportedJobsById();
+    const otherJob = byId[lastJobId];
+    return {
+      docs: null,
+      error: jobLoadError,
+      mismatch: {
+        expected: match.job?.jobTitle || match.jobId,
+        got:
+          last.pathLabel ||
+          last.folderName ||
+          otherJob?.jobTitle ||
+          lastJobId
+      }
+    };
+  }
+
+  return { docs: last, mismatch: null };
 }
 
 async function stampDocsPath(docs, pathLabel, importedJobId = "") {
@@ -1737,7 +1828,32 @@ async function pauseAtSubmitForReview(tabId, summary, clickLabel = "Submit") {
 async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs = null } = {}) {
   const applicantInfo = await getApplicantInfo(profileId);
   const hasAnyValue = Object.values(applicantInfo).some((v) => String(v || "").trim());
-  const docs = uploadDocs || (await getLastGeneratedDocs());
+
+  // Resolve the tab before the documents: which PDFs to upload depends on which
+  // job this page is, not on whichever job was generated most recently.
+  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : await getCurrentApplicationTab();
+  if (!tab?.id) {
+    return {
+      ok: false,
+      error: "No application tab found. Open the job application page in a normal browser window first."
+    };
+  }
+
+  if (!/^https?:\/\//i.test(tab.url || "")) {
+    return {
+      ok: false,
+      error: "The current tab is not a web page. Open the application form, then click Apply."
+    };
+  }
+
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id, { explicitDocs: uploadDocs });
+  if (resolvedDocs.mismatch) {
+    return {
+      ok: false,
+      error: uploadDocsMismatchError(resolvedDocs)
+    };
+  }
+  const docs = resolvedDocs.docs;
   const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
   const ctx = await getAutofillAiContext();
   let history = { workHistory: [], educationHistory: [] };
@@ -1754,21 +1870,6 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
       skipped: true,
       error:
         "No applicant info, generated PDFs, or resume history found. Edit profile info and/or generate a resume first."
-    };
-  }
-
-  const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : await getCurrentApplicationTab();
-  if (!tab?.id) {
-    return {
-      ok: false,
-      error: "No application tab found. Open the job application page in a normal browser window first."
-    };
-  }
-
-  if (!/^https?:\/\//i.test(tab.url || "")) {
-    return {
-      ok: false,
-      error: "The current tab is not a web page. Open the application form, then click Apply."
     };
   }
 
@@ -1959,13 +2060,19 @@ async function runAutofillStep(
   { uploadDocs = null, clickAction = true, preferredAction = "" } = {}
 ) {
   let userWantsSubmit = String(preferredAction || "").toLowerCase() === "submit";
-  const docs = uploadDocs || (await getLastGeneratedDocs());
-  const loc = await formatUploadDocsLocation(docs);
 
   const tab = await getCurrentApplicationTab();
   if (!tab?.id) {
     return { ok: false, error: "No application tab found. Open the job application page first." };
   }
+
+  // Pick the PDFs for the job on screen, not the last job generated.
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id, { explicitDocs: uploadDocs });
+  if (resolvedDocs.mismatch) {
+    return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
+  }
+  const docs = resolvedDocs.docs;
+  const loc = await formatUploadDocsLocation(docs);
 
   let tabId = tab.id;
   let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
@@ -1978,7 +2085,9 @@ async function runAutofillStep(
     if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
       return {
         ok: false,
-        error: "Generate a resume first, then click Apply — or use Apply on the job card.",
+        error:
+          resolvedDocs.error ||
+          "Generate a resume first, then click Apply — or use Apply on the job card.",
         button: describeAutofillButton(probe)
       };
     }
@@ -2194,7 +2303,6 @@ async function runAutofillStep(
  * Other ATS pause on Submit so a second Apply click sends the form.
  */
 async function runPanelApply(profileId, { preferredAction = "" } = {}) {
-  const docs = await getLastGeneratedDocs();
   const tab = await getCurrentApplicationTab();
   if (!tab?.id) {
     return { ok: false, error: "No application tab found. Open the job application page first." };
@@ -2205,6 +2313,13 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
       error: "The current tab is not a web page. Open the job page, then click Apply."
     };
   }
+
+  // PDFs for the job on screen — not whatever the last batch build left behind.
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id);
+  if (resolvedDocs.mismatch) {
+    return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
+  }
+  const docs = resolvedDocs.docs;
 
   let probe = await getApplyActionFromTab(tab.id).catch(() => ({ best: null, anyForm: false }));
   const site = detectSiteFromUrl(tab.url || "");
@@ -2224,7 +2339,7 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
   if (!probe?.anyForm && !docs?.resume?.base64 && !docs?.coverLetter?.base64) {
     return {
       ok: false,
-      error: "Generate a resume first, then click Apply.",
+      error: resolvedDocs.error || "Generate a resume first, then click Apply.",
       button: describeAutofillButton(probe)
     };
   }
@@ -3425,7 +3540,11 @@ async function startMultiStepApplyOnTab(
   // Dice only: close the job + wizard tabs after Submit AND the success page.
   // Other sites never close the current tab.
   const mayCloseTabs = Boolean(closeOnSuccess && autoClickSubmit);
-  const loc = await formatUploadDocsLocation(uploadDocs || (await getLastGeneratedDocs()));
+  // Resolve the PDFs ONCE, against the job page we start on, and reuse them for
+  // every step. Later steps land on an ATS URL that no longer matches the job
+  // posting, so re-resolving mid-run could fall back to another job's files.
+  const runUploadDocs = uploadDocs || (await resolveUploadDocsForTab(tab.id)).docs;
+  const loc = await formatUploadDocsLocation(runUploadDocs);
   await ensureCostSession(tab.url || "");
   const summary = {
     ok: true,
@@ -3769,7 +3888,7 @@ async function startMultiStepApplyOnTab(
         ? `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — uploading ${loc.summary}...`
         : `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — filling form...`
     );
-    const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
+    const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
     if (fillRes?.skipped && step === 0) {
       return { ok: false, error: fillRes.error || "Autofill skipped.", ...summary, status: "failed" };
     }
@@ -3812,7 +3931,7 @@ async function startMultiStepApplyOnTab(
         await sleepMs(700);
         if (probe.needsFill && !probe.uploadsBusy) {
           await setStatus("Auto Apply: finishing remaining fields before Next...");
-          const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs });
+          const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
           summary.filled += Number(again?.filledCount || 0);
           summary.uploaded += Number(again?.uploadedCount || 0);
           summary.aiFilled += Number(again?.aiFilledCount || 0);
@@ -5223,7 +5342,17 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   });
 
   assertNotCancelled();
-  await setStatus("Scoring resume against the job description...");
+  // Panel toggle: off = score the resume but never rewrite it. jobMeta can
+  // override per run; otherwise the stored setting applies (default on).
+  const atsRewriteEnabled =
+    meta.atsRewriteEnabled != null
+      ? meta.atsRewriteEnabled === true
+      : (await chrome.storage.local.get("ats_rewrite_enabled")).ats_rewrite_enabled !== false;
+  await setStatus(
+    atsRewriteEnabled
+      ? "Scoring resume against the job description..."
+      : "Scoring resume against the job description (rewrite off)..."
+  );
   let improved;
   try {
     improved = await ensureAtsReadyResume(data, {
@@ -5232,7 +5361,8 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       jdText: meta.jdText || "",
       jobTitle: meta.jobTitle || "",
       companyName: meta.companyName || "",
-      setStatus
+      setStatus,
+      rewriteEnabled: atsRewriteEnabled
     });
     data = improved.data || data;
   } catch (rewriteErr) {
@@ -5287,25 +5417,31 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   });
 
   let scoredFinal = improved?.atsReport;
-  try {
-    await setStatus("Asking GPT for the final ATS score...");
-    scoredFinal = await scoreResumeAgainstJd(data, {
-      jdText: meta.jdText || "",
-      jobTitle: meta.jobTitle || "",
-      apiKey,
-      model
-    });
-  } catch (scoreErr) {
-    if (isCancelError(scoreErr)) throw scoreErr;
-    await setStatus(
-      `GPT ATS score failed (${String(scoreErr?.message || scoreErr)}). Using the last score if available.`
-    );
-    if (!scoredFinal) scoredFinal = {};
+  // With rewrite off the resume is unchanged since it was scored a moment ago,
+  // so re-scoring it would just burn another model call for the same number.
+  const needsFinalScore = atsRewriteEnabled || !Number(scoredFinal?.score);
+  if (needsFinalScore) {
+    try {
+      await setStatus("Asking GPT for the final ATS score...");
+      scoredFinal = await scoreResumeAgainstJd(data, {
+        jdText: meta.jdText || "",
+        jobTitle: meta.jobTitle || "",
+        apiKey,
+        model
+      });
+    } catch (scoreErr) {
+      if (isCancelError(scoreErr)) throw scoreErr;
+      await setStatus(
+        `GPT ATS score failed (${String(scoreErr?.message || scoreErr)}). Using the last score if available.`
+      );
+      if (!scoredFinal) scoredFinal = {};
+    }
   }
   const atsReport = {
     ...scoredFinal,
     rewritten: Boolean(improved?.atsReport?.rewritten),
     rewriteAttempts: Number(improved?.atsReport?.rewriteAttempts || 0),
+    rewriteSkipped: improved?.atsReport?.rewriteSkipped || "",
     previousScore: improved?.atsReport?.previousScore ?? scoredFinal.score,
     finalScore: scoredFinal.score,
     rewriteIssues: improved?.atsReport?.rewriteIssues || []
@@ -5316,7 +5452,9 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const finalPct = Math.round(Number(atsReport.finalScore ?? atsReport.score) || 0);
   const rewriteNote = atsReport.rewritten
     ? ` Final ATS ${finalPct}% (was ${Math.round(Number(atsReport.previousScore))}%).`
-    : ` Final ATS ${finalPct}%.`;
+    : atsReport.rewriteSkipped === "disabled"
+      ? ` ATS ${finalPct}% (rewrite off — resume kept as generated).`
+      : ` Final ATS ${finalPct}%.`;
 
   const previewStored = meta.previewMode === true;
 
@@ -6067,6 +6205,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               datePosted: job.datePosted || "",
               trackApplicationStatus:
                 shared.trackApplicationStatus === true || trackStored,
+              atsRewriteEnabled: shared.atsRewriteEnabled,
               importedJobId
             };
 
@@ -6328,6 +6467,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               resumeOnly: resumeOnlyStored,
               trackApplicationStatus:
                 shared.trackApplicationStatus === true || trackStored,
+              // Pinned when the batch started, so the whole run uses one setting.
+              atsRewriteEnabled: shared.atsRewriteEnabled,
               importedJobId,
               previewMode: false,
               _sheetLinksCache: sheetLinksCache,
