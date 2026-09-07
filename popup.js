@@ -51,6 +51,16 @@ if (UI_MODE === "sidebar") {
   }
 }
 
+// A glanceable build stamp so a stale panel/window is obvious rather than
+// silently showing old markup after a reload (recurring source of "the
+// checkbox/template isn't there" reports that were actually a stale document).
+try {
+  const buildVersionEl = document.getElementById("buildVersion");
+  if (buildVersionEl) buildVersionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+} catch {
+  /* not running as an extension (e.g. static preview) */
+}
+
 const statusEl = document.getElementById("status");
 const atsScoreBadgeEl = document.getElementById("atsScoreBadge");
 const atsScoreValueEl = document.getElementById("atsScoreValue");
@@ -79,6 +89,7 @@ const scrapeSiteSelectEl = document.getElementById("scrapeSiteSelect");
 const SCRAPE_SITE_KEY = "selected_scrape_site";
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const atsRewriteToggleEl = document.getElementById("atsRewriteToggle");
+const atsRewriteToggleLabelEl = document.getElementById("atsRewriteToggleLabel");
 const previewModeToggleEl = document.getElementById("previewModeToggle");
 const sidebarModeToggleEl = document.getElementById("sidebarModeToggle");
 const generateResumeBtn = document.getElementById("generateResume");
@@ -1929,8 +1940,9 @@ async function loadSettings() {
     resumeOnlyToggleEl.checked = data.generate_resume_only === true;
   }
   if (atsRewriteToggleEl) {
-    // Default ON — rewriting to the 80% target is the long-standing behaviour.
-    atsRewriteToggleEl.checked = data.ats_rewrite_enabled !== false;
+    // Default OFF — never rewrite in the background unless asked.
+    atsRewriteToggleEl.checked = data.ats_rewrite_enabled === true;
+    updateAtsRewriteToggleLabel();
   }
   fillScrapeSiteSelect(data.selected_scrape_site || "auto");
   refreshScrapeSiteHint().catch(() => {});
@@ -2355,18 +2367,24 @@ async function persistResumeOnlySetting() {
   updateGenerateButtonLabel();
 }
 
-/** Off = score the resume but never rewrite it. Default on. */
+/** Off (default) = score the resume but never rewrite it. */
 function isAtsRewriteEnabled() {
-  return atsRewriteToggleEl ? Boolean(atsRewriteToggleEl.checked) : true;
+  return atsRewriteToggleEl ? Boolean(atsRewriteToggleEl.checked) : false;
+}
+
+function updateAtsRewriteToggleLabel() {
+  if (!atsRewriteToggleLabelEl) return;
+  atsRewriteToggleLabelEl.textContent = isAtsRewriteEnabled() ? "Rewrite for ATS (80%)" : "Standard mode";
 }
 
 async function persistAtsRewriteSetting() {
   const enabled = isAtsRewriteEnabled();
   await chrome.storage.local.set({ ats_rewrite_enabled: enabled });
+  updateAtsRewriteToggleLabel();
   setStatus(
     enabled
-      ? "ATS rewrite on — resumes are rewritten until they score at least 80%."
-      : "ATS rewrite off — resumes are scored but kept exactly as generated."
+      ? "Rewrite for ATS on — resumes are rewritten until they score at least 80%."
+      : "Rewrite for ATS off — resumes are scored but kept exactly as generated."
   );
 }
 

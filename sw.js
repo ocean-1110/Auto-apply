@@ -158,10 +158,62 @@ async function findExistingPanelWindow() {
   return null;
 }
 
+/**
+ * Panel mode kept in memory as well as storage.
+ *
+ * chrome.sidePanel.open() only works while the user gesture that triggered it is
+ * still live, and a gesture does not survive an `await`. Reading the mode from
+ * storage before opening spent the gesture and Chrome rejected the call with
+ * "may only be called in response to a user gesture", so click paths read this
+ * cache instead and never await before open().
+ */
+let preferredPanelMode = "window";
+/** True once Chrome owns the icon-click behaviour, so open() is never needed. */
+let panelBehaviorApplied = false;
+
 async function getPreferredPanelMode() {
   const data = await chrome.storage.local.get(PANEL_MODE_KEY);
-  return data[PANEL_MODE_KEY] === "sidebar" ? "sidebar" : "window";
+  preferredPanelMode = data[PANEL_MODE_KEY] === "sidebar" ? "sidebar" : "window";
+  return preferredPanelMode;
 }
+
+/**
+ * In sidebar mode, let Chrome open the panel itself on toolbar-icon / Alt+J.
+ * That path has no gesture problem at all because the extension never calls
+ * open() — Chrome does. action.onClicked then only fires in window mode.
+ */
+async function applyPanelBehavior(mode) {
+  const sidebar = mode === "sidebar";
+  try {
+    await chrome.sidePanel.setOptions({ path: "popup.html?mode=sidebar", enabled: true });
+  } catch (err) {
+    console.warn("[panel] sidePanel.setOptions unavailable:", err);
+  }
+  try {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: sidebar });
+    panelBehaviorApplied = true;
+  } catch (err) {
+    // Without this, sidebar mode falls back to the manual open() path, which
+    // Chrome blocks unless the gesture is still live.
+    console.warn("[panel] sidePanel.setPanelBehavior unavailable:", err);
+  }
+}
+
+async function syncPanelModeCache() {
+  const mode = await getPreferredPanelMode().catch(() => "window");
+  await applyPanelBehavior(mode);
+  return mode;
+}
+
+// Keep the cache and Chrome's own behaviour in step when the panel mode changes.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes[PANEL_MODE_KEY]) return;
+  const next = changes[PANEL_MODE_KEY].newValue === "sidebar" ? "sidebar" : "window";
+  preferredPanelMode = next;
+  applyPanelBehavior(next).catch(() => {});
+});
+
+syncPanelModeCache().catch(() => {});
 
 async function closePanelWindow() {
   const existing = await findExistingPanelWindow();
@@ -181,8 +233,8 @@ async function resolveSidebarHostWindowId() {
   return all[0]?.id ?? null;
 }
 
-async function openSidePanelForBrowser() {
-  const windowId = await resolveSidebarHostWindowId();
+async function openSidePanelForBrowser(knownWindowId = null) {
+  const windowId = knownWindowId ?? (await resolveSidebarHostWindowId());
   if (windowId == null) {
     throw new Error("No browser window available for the sidebar.");
   }
@@ -277,15 +329,61 @@ chrome.tabs.onActivated.addListener(({ windowId }) => {
   }
 })();
 
-async function handleOpenPanel() {
+/**
+ * Open the panel from a user gesture.
+ *
+ * MUST stay synchronous up to chrome.sidePanel.open(): any await before it
+ * consumes the gesture and Chrome rejects the call. `tab` comes straight from
+ * the listener, so its windowId needs no lookup.
+ */
+function handleOpenPanel(tab = null) {
+  const windowId = tab?.windowId;
+
+  // Once Chrome owns the icon click, this listener only fires in window mode —
+  // so there is nothing to decide and no sidebar attempt to make.
+  if (panelBehaviorApplied && preferredPanelMode !== "sidebar") {
+    return openPanelWindow().catch((err) => console.error("Failed to open panel:", err));
+  }
+
+  if (preferredPanelMode === "sidebar" && windowId != null) {
+    // No await before this line, or the gesture is gone.
+    let opening = null;
+    try {
+      opening = chrome.sidePanel.open({ windowId });
+    } catch (sideErr) {
+      console.warn("[panel] sidebar open threw, using a window instead:", sideErr);
+    }
+    if (opening) {
+      opening.catch((sideErr) => {
+        console.warn("[panel] sidebar open rejected, using a window instead:", sideErr);
+        openPanelWindow().catch((err) => console.error("Failed to open panel:", err));
+      });
+      return Promise.resolve();
+    }
+  }
+
+  return openPanelWindowForMode(windowId);
+}
+
+/**
+ * Slow path, used when the mode was not yet known at click time (service worker
+ * cold start). The gesture is already spent by the storage read, so a sidebar
+ * open here is expected to fail — fall back to a window rather than nothing.
+ */
+async function openPanelWindowForMode(windowId = null) {
   try {
     const mode = await getPreferredPanelMode();
     if (mode === "sidebar") {
+      // Re-assert so Chrome handles the next icon click natively.
+      applyPanelBehavior(mode).catch(() => {});
       try {
-        await openSidePanelForBrowser();
+        await openSidePanelForBrowser(windowId);
         return;
-      } catch (sideErr) {
-        console.error("Failed to open sidebar, falling back to window:", sideErr);
+      } catch {
+        console.warn(
+          "[panel] sidebar needs a fresh click (service worker had just woken). " +
+            "Opening a window this time; the next icon click will open the sidebar."
+        );
       }
     }
     await openPanelWindow();
@@ -294,15 +392,19 @@ async function handleOpenPanel() {
   }
 }
 
-// Icon click / Alt+J opens the single panel.
-chrome.action.onClicked.addListener(() => {
-  handleOpenPanel();
+// Icon click / Alt+J opens the single panel. In sidebar mode Chrome opens the
+// side panel itself (openPanelOnActionClick) and this listener never fires.
+chrome.action.onClicked.addListener((tab) => {
+  handleOpenPanel(tab);
 });
 
-chrome.commands.onCommand.addListener((command) => {
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === "scrape_and_apply" || command === "generate_docs" || command === "easy_apply") {
+    // Fire this first, synchronously, while the shortcut's gesture is still live.
+    handleOpenPanel(tab);
+  }
   (async () => {
     if (command === "scrape_and_apply" || command === "generate_docs" || command === "easy_apply") {
-      await handleOpenPanel();
       // Give the panel a moment to load listeners, then relay the command.
       await new Promise((r) => setTimeout(r, 350));
       try {
@@ -397,6 +499,10 @@ chrome.runtime.onInstalled.addListener(async () => {
     generation_cancel_requested: false,
     generation_status: "Ready."
   });
+  // Re-assert on every reload/update: this is what lets Chrome open the side
+  // panel on an icon click, so the extension never calls the gesture-gated
+  // sidePanel.open() itself.
+  syncPanelModeCache().catch(() => {});
   recoverInterruptedImportedJobs().catch(() => {});
   ensureCaptureAlarm().catch(() => {});
 });
@@ -408,6 +514,10 @@ chrome.runtime.onStartup.addListener(async () => {
     generation_cancel_requested: false,
     generation_status: "Ready."
   });
+  // Re-assert on every reload/update: this is what lets Chrome open the side
+  // panel on an icon click, so the extension never calls the gesture-gated
+  // sidePanel.open() itself.
+  syncPanelModeCache().catch(() => {});
   recoverInterruptedImportedJobs().catch(() => {});
   ensureCaptureAlarm().catch(() => {});
 });
@@ -5342,12 +5452,12 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   });
 
   assertNotCancelled();
-  // Panel toggle: off = score the resume but never rewrite it. jobMeta can
-  // override per run; otherwise the stored setting applies (default on).
+  // Panel toggle "Rewrite for ATS", off by default: score the resume but never
+  // rewrite it. jobMeta can override per run; otherwise the stored setting applies.
   const atsRewriteEnabled =
     meta.atsRewriteEnabled != null
       ? meta.atsRewriteEnabled === true
-      : (await chrome.storage.local.get("ats_rewrite_enabled")).ats_rewrite_enabled !== false;
+      : (await chrome.storage.local.get("ats_rewrite_enabled")).ats_rewrite_enabled === true;
   await setStatus(
     atsRewriteEnabled
       ? "Scoring resume against the job description..."
@@ -5453,7 +5563,7 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const rewriteNote = atsReport.rewritten
     ? ` Final ATS ${finalPct}% (was ${Math.round(Number(atsReport.previousScore))}%).`
     : atsReport.rewriteSkipped === "disabled"
-      ? ` ATS ${finalPct}% (rewrite off — resume kept as generated).`
+      ? ` ATS ${finalPct}% (Rewrite for ATS is off — resume kept as generated).`
       : ` Final ATS ${finalPct}%.`;
 
   const previewStored = meta.previewMode === true;

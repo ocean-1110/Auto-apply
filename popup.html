@@ -89,6 +89,11 @@
         <div class="brand-copy">
           <p class="hype">Ocean</p>
           <h1 class="brand-name">Auto Application</h1>
+          <p
+            id="buildVersion"
+            class="build-version"
+            title="If you just reloaded the extension and something is still missing, close every Ocean panel/window first, then reload again — this number confirms which build you're looking at."
+          ></p>
         </div>
         <label
           class="neo-switch"
@@ -322,11 +327,12 @@
                     <span>Preview before save</span>
                   </label>
                   <label
-                    class="inline-check"
-                    title="Rewrite the resume until it scores at least 80% against the job description. Turn off to keep the first draft — it is still scored, just never rewritten."
+                    class="neo-switch neo-switch-sm neo-switch-accent ats-rewrite-toggle"
+                    title="Off (Standard): the resume is scored but kept exactly as generated. On (Rewrite for ATS): it is rewritten until it scores at least 80% against the job description (slower, more OpenAI calls)."
                   >
-                    <input type="checkbox" id="atsRewriteToggle" checked />
-                    <span>Improve ATS to 80%</span>
+                    <input type="checkbox" id="atsRewriteToggle" />
+                    <span class="neo-switch-track" aria-hidden="true"></span>
+                    <span class="neo-switch-label" id="atsRewriteToggleLabel">Standard mode</span>
                   </label>
                 </div>
                 <div class="primary-action-btns">

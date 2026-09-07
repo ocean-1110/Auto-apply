@@ -307,7 +307,8 @@ export async function ensureAtsReadyResume(
     jobTitle = "",
     companyName = "",
     setStatus,
-    rewriteEnabled = true
+    // Off unless the caller opts in — no background rewriting by default.
+    rewriteEnabled = false
   } = {}
 ) {
   const scoreOpts = { jdText, jobTitle, apiKey, model };
@@ -319,10 +320,12 @@ export async function ensureAtsReadyResume(
   let atsReport = await scoreResumeAgainstJd(current, scoreOpts);
   const previousScore = atsReport.score;
 
-  // Rewrite turned off in the panel: still report the score, but hand back the
-  // resume exactly as generated — no rewrite passes, no extra model calls.
+  // "Rewrite for ATS" off (the default): still report the score, but hand back
+  // the resume exactly as generated — no rewrite passes, no extra model calls.
   if (!rewriteEnabled) {
-    await status(`ATS ${atsReport.score}% — rewrite is off, keeping the resume as generated.`);
+    await status(
+      `ATS ${atsReport.score}% — "Rewrite for ATS" is off, keeping the resume as generated.`
+    );
     return {
       data: current,
       atsReport: withAtsMeta(atsReport, {

@@ -173,6 +173,14 @@ html.ocean-in-panel #cancelBtnBottom {
   color: var(--ink);
 }
 
+.build-version {
+  margin: 1px 0 0;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--muted);
+  opacity: 0.7;
+}
+
 .close-btn {
   margin-left: 0;
   flex: 0 0 auto;
@@ -238,6 +246,42 @@ html.ocean-in-panel #cancelBtnBottom {
 .panel-mode-toggle {
   margin-left: auto;
   white-space: nowrap;
+}
+
+.neo-switch-sm {
+  gap: 8px;
+  font-size: 12px;
+}
+
+.neo-switch-sm .neo-switch-track {
+  width: 40px;
+  height: 22px;
+}
+
+.neo-switch-sm .neo-switch-track::after {
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+}
+
+.neo-switch-sm input:checked + .neo-switch-track::after {
+  transform: translateX(18px);
+}
+
+.neo-switch-accent input:checked + .neo-switch-track {
+  background: var(--accent);
+  box-shadow: inset 3px 3px 6px rgba(20, 60, 120, 0.25), inset -2px -2px 5px rgba(180, 210, 255, 0.35);
+}
+
+.ats-rewrite-toggle {
+  margin-left: 0;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  box-shadow: var(--inset-sm);
+  font-weight: 600;
 }
 
 /* ——— Cards ——— */
@@ -1769,6 +1813,10 @@ body.ui-sidebar .gen-options-row {
   grid-template-columns: 1fr 1fr;
   gap: 6px;
   width: 100%;
+}
+
+body.ui-sidebar .gen-options-row .ats-rewrite-toggle {
+  grid-column: 1 / -1;
 }
 
 body.ui-sidebar .content {
