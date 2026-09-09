@@ -22,6 +22,7 @@ import {
 } from "./applicant-info.js";
 import { closeHostWindow } from "./close-host.js";
 import { initIntegrationsSettings } from "./integrations-settings.js";
+import { parseProjectManifest } from "./project-manifest.js";
 
 const APPLICANT_FIELD_IDS = Object.keys(createEmptyApplicantInfo());
 
@@ -52,6 +53,10 @@ const els = {
   builtinHint: document.getElementById("builtinHint"),
   kindHint: document.getElementById("kindHint"),
   promptTemplate: document.getElementById("promptTemplate"),
+  candidateInfo: document.getElementById("candidateInfo"),
+  candidateInfoNote: document.getElementById("candidateInfoNote"),
+  projectManifest: document.getElementById("projectManifest"),
+  projectManifestNote: document.getElementById("projectManifestNote"),
   resetBuiltinPrompt: document.getElementById("resetBuiltinPrompt"),
   saveBtn: document.getElementById("saveBtn"),
   saveBtnBottom: document.getElementById("saveBtnBottom"),
@@ -101,6 +106,35 @@ function writeApplicantToForm(info) {
     if (!el) continue;
     el.value = data[key] ?? "";
   }
+  syncProjectManifestNote();
+  syncCandidateInfoNote();
+}
+
+/** Confirm the field is filled and whether the prompt routes it to a placeholder. */
+function syncCandidateInfoNote() {
+  if (!els.candidateInfo || !els.candidateInfoNote) return;
+  const chars = els.candidateInfo.value.trim().length;
+  if (!chars) {
+    els.candidateInfoNote.textContent =
+      "Not set. Without it the model has only the prompt's own resume text to work from.";
+    return;
+  }
+  const template = els.promptTemplate?.value || "";
+  const placed = /\{CANDIDATE_INFO(RMATION)?\}/.test(template);
+  els.candidateInfoNote.textContent = `${chars.toLocaleString()} characters. ${
+    placed
+      ? "Inserted at {CANDIDATE_INFORMATION} in the prompt."
+      : "Appended to the end of the prompt (no {CANDIDATE_INFORMATION} placeholder found)."
+  }`;
+}
+
+/** Show how many projects the manifest parses into, so the format is obvious while typing. */
+function syncProjectManifestNote() {
+  if (!els.projectManifest || !els.projectManifestNote) return;
+  const count = parseProjectManifest(els.projectManifest.value).length;
+  els.projectManifestNote.textContent = count
+    ? `${count} project${count === 1 ? "" : "s"} detected. The ones matching each job description are used automatically.`
+    : "No projects yet. Separate each project with a blank line.";
 }
 
 function parseQuery() {
@@ -238,6 +272,9 @@ els.saveBtnBottom.addEventListener("click", () => {
   saveEditor().catch(() => {});
 });
 els.profileKind.addEventListener("change", syncKindHint);
+els.projectManifest?.addEventListener("input", syncProjectManifestNote);
+els.candidateInfo?.addEventListener("input", syncCandidateInfoNote);
+els.promptTemplate?.addEventListener("input", syncCandidateInfoNote);
 els.cancelBtn.addEventListener("click", closeEditor);
 els.cancelBtnBottom.addEventListener("click", closeEditor);
 els.resetBuiltinPrompt.addEventListener("click", () => {

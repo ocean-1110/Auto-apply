@@ -7,6 +7,7 @@
  */
 
 import { chatCompletion, DEFAULT_OPENAI_MODEL } from "./openai.js";
+import { selectRelevantProjects, buildProjectAnswerContext } from "./project-manifest.js";
 
 /** Cheap, fast model for form classification + application answers. */
 export const DEFAULT_OPENAI_FORM_MODEL = "gpt-4o-mini";
@@ -95,26 +96,51 @@ export function shouldBankAnswer(q, answer, fieldType = "") {
   return true;
 }
 
-function buildAutofillContext({ jobMeta = {}, resumeText = "", applicationBrief = null }) {
-  if (applicationBrief && typeof applicationBrief === "object") {
-    return {
-      jobTitle: jobMeta.jobTitle || applicationBrief.jobTitle || "",
-      companyName: jobMeta.companyName || applicationBrief.companyName || "",
-      applicationBrief: {
-        roleSummary: applicationBrief.roleSummary || "",
-        topSkills: applicationBrief.topSkills || [],
-        keyExperiences: applicationBrief.keyExperiences || [],
-        workAuth: applicationBrief.workAuth || "",
-        location: applicationBrief.location || ""
-      }
-    };
+function buildAutofillContext({
+  jobMeta = {},
+  resumeText = "",
+  applicationBrief = null,
+  applicantInfo = {}
+}) {
+  const base =
+    applicationBrief && typeof applicationBrief === "object"
+      ? {
+          jobTitle: jobMeta.jobTitle || applicationBrief.jobTitle || "",
+          companyName: jobMeta.companyName || applicationBrief.companyName || "",
+          applicationBrief: {
+            roleSummary: applicationBrief.roleSummary || "",
+            topSkills: applicationBrief.topSkills || [],
+            keyExperiences: applicationBrief.keyExperiences || [],
+            workAuth: applicationBrief.workAuth || "",
+            location: applicationBrief.location || ""
+          }
+        }
+      : {
+          jobTitle: jobMeta.jobTitle || "",
+          companyName: jobMeta.companyName || "",
+          jobDescriptionExcerpt: String(jobMeta.jdText || "").trim().slice(0, 3500),
+          resumeExcerpt: String(resumeText || "").trim().slice(0, 4000)
+        };
+
+  // Real projects from the profile's manifest, ranked against this job. When a
+  // brief replaced the JD text above, its summary/skills still carry the signal.
+  const relevanceText = [
+    jobMeta.jdText || "",
+    applicationBrief?.roleSummary || "",
+    (applicationBrief?.topSkills || []).join(", ")
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const projects = selectRelevantProjects(applicantInfo?.projectManifest, {
+    jdText: relevanceText,
+    jobTitle: base.jobTitle,
+    limit: 5,
+    maxChars: 2500
+  });
+  if (projects.length) {
+    base.candidateProjects = buildProjectAnswerContext(projects);
   }
-  return {
-    jobTitle: jobMeta.jobTitle || "",
-    companyName: jobMeta.companyName || "",
-    jobDescriptionExcerpt: String(jobMeta.jdText || "").trim().slice(0, 3500),
-    resumeExcerpt: String(resumeText || "").trim().slice(0, 4000)
-  };
+  return base;
 }
 
 function answersFromJson(raw, list) {
@@ -207,8 +233,14 @@ export function questionAnswerShape(q) {
   if (kind === "factual" || SHORT_ANSWER_RE.test(label)) {
     return { shape: "short", maxWords: 25, subjects, allowsNa };
   }
-  if (isLongFormQuestion(q) || kind === "thinking") {
+  // A one-line <input> physically cannot show a paragraph, so its answer stays
+  // brief even when the classifier calls the question "thinking". Only a
+  // textarea / rich-text editor earns a long-form answer.
+  if (isLongFormQuestion(q)) {
     return { shape: "long", maxWords: 220, subjects, allowsNa };
+  }
+  if (kind === "thinking") {
+    return { shape: "short", maxWords: 45, subjects, allowsNa };
   }
   return { shape: "short", maxWords: 40, subjects, allowsNa };
 }
@@ -382,7 +414,7 @@ export async function generateHumanizedApplicationAnswers({
   for (let i = 0; i < short.length; i += 10) chunks.push(short.slice(i, i + 10));
 
   const profile = compactApplicantContext(applicantInfo);
-  const context = buildAutofillContext({ jobMeta, resumeText, applicationBrief });
+  const context = buildAutofillContext({ jobMeta, resumeText, applicationBrief, applicantInfo });
   const answers = [];
   let usage = null;
 
@@ -436,10 +468,13 @@ export async function generateHumanizedApplicationAnswers({
           'when naAllowed is true, answer exactly "N/A".\n' +
           "Priority of evidence:\n" +
           "1) candidateProfile facts when the question is factual/identity\n" +
-          "2) resumeExcerpt for experience, tools, employers, skills\n" +
-          "3) jobDescription / applicationBrief ONLY for motivation questions (why this role, why this company, fit)\n" +
+          "2) candidateProjects — real projects this candidate delivered; cite the matching one by what it " +
+          "did (stack, scale, outcome) when a question asks about experience with a technology or domain\n" +
+          "3) resumeExcerpt for experience, tools, employers, skills\n" +
+          "4) jobDescription / applicationBrief ONLY for motivation questions (why this role, why this company, fit)\n" +
           'Yes/No → Title Case "Yes" or "No" only. ' +
-          "Do not invent employers, degrees, visas, certifications, or tools absent from the resume/profile. " +
+          "Do not invent employers, degrees, visas, certifications, tools, or projects absent from the " +
+          "resume/profile/candidateProjects. " +
           "Plain text only (no markdown)."
       },
       {
@@ -526,8 +561,20 @@ function pickClosestOption(answer, options = []) {
   for (const opt of options) {
     if (String(opt).trim().toLowerCase() === wantNorm) return opt;
   }
+  // Substring matching alone flips meaning: "No, I do not have a disability"
+  // is a substring-ish neighbour of the "Yes, I have a disability" option. When
+  // both sides lead with Yes/No, that prefix has to agree.
+  const lead = (text) => {
+    const t = String(text).trim().toLowerCase();
+    if (/^y(es)?\b/.test(t)) return "yes";
+    if (/^n(o)?\b/.test(t)) return "no";
+    return "";
+  };
+  const wantLead = lead(want);
   for (const opt of options) {
     const optNorm = String(opt).trim().toLowerCase();
+    const optLead = lead(opt);
+    if (wantLead && optLead && wantLead !== optLead) continue;
     if (optNorm.includes(wantNorm) || wantNorm.includes(optNorm)) return opt;
   }
   if (/^yes\b/i.test(want)) {
@@ -573,7 +620,11 @@ export async function generateConstrainedChoiceAnswers({
           "Questions may be select dropdowns, radio groups, checkboxes, or comboboxes (fieldType). " +
           "Each question includes an options array — you MUST set answer to EXACTLY one string from that question's options (character-for-character). " +
           "Never invent an option. Read the question carefully and pick the option that matches THAT question — do not reuse an answer meant for a different field.\n" +
-          "Evidence order: (1) Q&A-style facts already in candidateProfile, (2) resumeExcerpt, (3) job description only when the question is about role fit.\n" +
+          "Some questions carry previousAnswer: what this candidate answered the same question before, on a form that worded its options differently. " +
+          "Treat it as the candidate's real position and map it to the option that means the SAME thing. " +
+          "Watch negation — 'No, I do not have a disability' and 'Yes, I have a disability' are opposites even though they share most words. " +
+          "If no option carries that meaning, omit the question rather than guessing.\n" +
+          "Evidence order: (1) Q&A-style facts already in candidateProfile, (2) candidateProjects — real projects the candidate delivered, which settle questions about hands-on experience with a technology or domain, (3) resumeExcerpt, (4) job description only when the question is about role fit.\n" +
           "Default guidance when profile is silent: eligible to work in the US → Yes; visa sponsorship needed → No; " +
           "employment restrictions with current/former employer → No; previously worked for this company → No; " +
           "related to current employee → No; government employee → No; ethics recusal → No. " +
@@ -583,13 +634,16 @@ export async function generateConstrainedChoiceAnswers({
         role: "user",
         content: JSON.stringify(
           {
-            ...buildAutofillContext({ jobMeta, resumeText, applicationBrief }),
+            ...buildAutofillContext({ jobMeta, resumeText, applicationBrief, applicantInfo }),
             candidateProfile: profile,
             questions: list.map((q) => ({
               id: q.id,
               question: q.label,
               kind: q.kind || "choice",
               fieldType: q.fieldType || "select",
+              // The Q&A bank's answer for this question when it did not appear
+              // verbatim in this form's option list.
+              ...(q.bankAnswer ? { previousAnswer: q.bankAnswer } : null),
               options: q.options
             }))
           },

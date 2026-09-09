@@ -112,10 +112,9 @@ h1 {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-width: 56px;
-  min-height: 56px;
-  padding: 6px;
-  border-radius: 50%;
+  min-width: 74px;
+  padding: 8px 12px;
+  border-radius: 14px;
   background: var(--neo);
   box-shadow: var(--inset);
   text-align: center;

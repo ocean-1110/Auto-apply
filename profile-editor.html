@@ -186,6 +186,62 @@
       </section>
 
       <section class="card">
+        <h2 class="section-title">Candidate information</h2>
+        <p class="hint">
+          The source of truth about this candidate — verified background, employers, dates, titles,
+          technologies, prior resume text, real metrics. The resume prompt is told not to contradict
+          it and not to claim anything it does not support.
+        </p>
+        <p class="hint">
+          Put <code>{CANDIDATE_INFORMATION}</code> in the resume prompt below to control exactly
+          where this lands. Without that placeholder it is appended to the end of the prompt under
+          its own heading.
+        </p>
+        <label class="field">
+          <span>Candidate information</span>
+          <textarea
+            id="candidateInfo"
+            class="prompt-input"
+            rows="14"
+            spellcheck="false"
+            placeholder="Name, location, contact, education, employment history with exact dates and titles, verified technologies, real metrics, prior resume text..."
+          ></textarea>
+        </label>
+        <p id="candidateInfoNote" class="hint">Not set.</p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Project manifest</h2>
+        <p class="hint">
+          Real projects you delivered in the roles on your resume. When a resume is generated,
+          updated, or an answer is written, the projects that match the job description are picked
+          automatically and used as the factual basis — the rest are left out.
+        </p>
+        <p class="hint">
+          One project per paragraph (blank line between them), or one per line as a
+          <code>-</code> list. Put the employer, the stack, and the outcome in the text so the
+          project stays attached to the right job, e.g.
+          <code>Uniqcli (2023) — Rebuilt order pipeline: Node.js, Kafka, Postgres; cut latency 40%.</code>
+        </p>
+        <p class="hint">
+          Put <code>{PROJECT_MANIFESTS}</code> in the resume prompt below to control where the
+          matched projects land. Without it they are appended to the end of the prompt with usage
+          rules.
+        </p>
+        <label class="field">
+          <span>Projects</span>
+          <textarea
+            id="projectManifest"
+            class="prompt-input"
+            rows="14"
+            spellcheck="false"
+            placeholder="Uniqcli (2023) — Migrated the checkout service to event-driven Node.js on GCP Pub/Sub, cutting peak order latency 40%.&#10;&#10;Golabs Tech (2020) — Built the HubSpot ↔ internal CRM sync (OAuth, webhooks, retry queue) covering 120k contacts."
+          ></textarea>
+        </label>
+        <p id="projectManifestNote" class="hint">No projects yet.</p>
+      </section>
+
+      <section class="card">
         <h2 class="section-title">Education</h2>
         <div class="grid-2">
           <label class="field">
@@ -362,7 +418,11 @@
 
       <section class="card">
         <h2 class="section-title">Resume prompt</h2>
-        <p class="hint">Must include <code>{JD}</code>. Optional: <code>{JOB_TITLE}</code>, <code>{COMPANY}</code>.</p>
+        <p class="hint">
+          Must include <code>{JD}</code>. Optional: <code>{JOB_TITLE}</code>,
+          <code>{COMPANY}</code>, <code>{CANDIDATE_INFORMATION}</code>,
+          <code>{PROJECT_MANIFESTS}</code>.
+        </p>
         <label class="field">
           <span>Prompt template</span>
           <textarea id="promptTemplate" class="prompt-input" rows="16" spellcheck="false"></textarea>

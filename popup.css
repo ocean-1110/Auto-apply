@@ -748,6 +748,7 @@ textarea:focus {
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 
 .footer-actions {
@@ -1271,7 +1272,7 @@ textarea:focus {
 .status-dock-row .ats-badge {
   flex: 0 0 auto;
   margin: 0 0 0 auto;
-  align-self: stretch;
+  align-self: center;
 }
 
 .ats-badge {
@@ -1281,11 +1282,10 @@ textarea:focus {
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-width: 56px;
-  min-height: 56px;
-  padding: 8px;
+  min-width: 74px;
+  padding: 10px 12px;
   border: 0;
-  border-radius: 50%;
+  border-radius: 14px;
   background: var(--neo);
   box-shadow: var(--inset);
   cursor: default;
@@ -1461,6 +1461,7 @@ textarea:focus {
 
 .save-banner {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin: 0 0 10px;
@@ -1476,11 +1477,20 @@ textarea:focus {
 }
 
 .save-banner-text {
-  flex: 1;
+  flex: 1 1 150px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.save-banner-text strong,
+.save-banner-text span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .save-banner-text strong {
@@ -1491,7 +1501,6 @@ textarea:focus {
 .save-banner-text span {
   color: #047857;
   font-size: 13px;
-  word-break: break-all;
 }
 
 .perm-banner .save-banner-text strong {

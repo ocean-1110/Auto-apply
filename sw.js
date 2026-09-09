@@ -11,7 +11,7 @@ import {
   runUnifiedJobCapture,
   isCaptureRunning as isJobCaptureRunning
 } from "./capture-runner.js";
-import { buildPrompt, buildCoverLetterPrompt } from "./profiles.js";
+import { buildPrompt, buildCoverLetterPrompt, getCandidateInfoText } from "./profiles.js";
 import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeResumePayload, normalizeSkills } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
 import { ensureAtsReadyResume } from "./ats-rewrite.js";
@@ -26,6 +26,7 @@ import {
 } from "./openai.js";
 import { getEnv } from "./env.js";
 import { getApplicantInfo, saveApplicantInfo } from "./applicant-info.js";
+import { getProfileProjectContext } from "./project-manifest.js";
 import {
   buildWorkHistory,
   buildEducationHistory,
@@ -720,6 +721,7 @@ async function assertJobNotAlreadyOnSheet(jobMeta = {}, sheetLinksCache = null) 
 
 function isRetryableGenerationError(err) {
   if (isCancelError(err) || isJobAlreadyOnSheetError(err)) return false;
+  if (isJobUnavailableError(err)) return false;
   const msg = String(err?.message || err || "");
   if (/api key is (missing|invalid)|401\b/i.test(msg)) return false;
   if (/missing job description/i.test(msg)) return false;
@@ -833,6 +835,53 @@ async function removeImportedJobFromStorage(jobId) {
   return true;
 }
 
+/**
+ * A closed posting is not a failure — it is a skip. Callers tag the error so the
+ * job card reads "No longer available" instead of a red "Failed".
+ */
+function jobUnavailableError(detail) {
+  const text = String(detail || "This job is no longer available.").trim();
+  const err = new Error(`Job no longer available — skipped.\n${text}`);
+  err.jobUnavailable = text;
+  return err;
+}
+
+function isJobUnavailableError(err) {
+  return Boolean(err?.jobUnavailable);
+}
+
+/**
+ * Mark a closed posting on its job card and leave it in the list.
+ * The card is kept (red "No longer available" badge carrying the reason) instead
+ * of being deleted, so a skipped job stays visible and the user decides when to
+ * remove it.
+ */
+async function markImportedJobUnavailable(importedJobId, detail, { profileId, notify = true } = {}) {
+  const text = String(detail || "This job is no longer available.").trim();
+  const id = String(importedJobId || "").trim();
+  if (id) {
+    await setImportedJobStatus(id, {
+      status: "unavailable",
+      statusDetail: `No longer available — ${text}`,
+      profileId
+    }).catch(() => {});
+  }
+  if (notify) {
+    try {
+      await chrome.notifications.create(`job-unavailable-${Date.now()}`, {
+        type: "basic",
+        iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
+        title: "Job no longer available",
+        message: text.slice(0, 240),
+        priority: 1
+      });
+    } catch {
+      /* notifications may be blocked */
+    }
+  }
+  return text;
+}
+
 function isUnusableJobTabUrl(url) {
   const raw = String(url || "");
   if (!raw || raw === "about:blank") return true;
@@ -841,23 +890,31 @@ function isUnusableJobTabUrl(url) {
   return !isHttpUrl(raw);
 }
 
-function isDiceJobUrl(url) {
+/**
+ * Boards that render the job page client-side, so a "closed"/"expired" banner
+ * can appear a beat after the first paint. Probing these only once lets an
+ * expired posting read as open and a resume gets generated for a dead job.
+ */
+function isLateBannerJobUrl(url) {
+  const raw = String(url || "");
   try {
-    return /(^|\.)dice\.com$/i.test(new URL(String(url || "")).hostname);
+    const host = new URL(raw).hostname;
+    return /(^|\.)dice\.com$/i.test(host) || /(^|\.)jobright\.ai$/i.test(host);
   } catch {
-    return /dice\.com/i.test(String(url || ""));
+    return /dice\.com|jobright\.ai/i.test(raw);
   }
 }
 
 /**
- * Probe a loaded tab for closed-job banners. Dice SPAs may paint the alert after
- * the first body paint, so poll briefly on dice.com job-detail URLs.
+ * Probe a loaded tab for closed-job banners. Client-rendered boards (Dice,
+ * Jobright) may paint the alert after the first body paint, so poll briefly on
+ * those job-detail URLs. The poll exits as soon as a banner is found.
  */
 async function probeJobUnavailableOnTab(tabId, { url = "", pollMs = 0 } = {}) {
   await ensureAutofillScript(tabId);
-  const dice = isDiceJobUrl(url);
-  const totalMs = dice ? Math.max(Number(pollMs) || 0, 4500) : 0;
-  const attempts = dice ? Math.max(4, Math.ceil(totalMs / 500)) : 1;
+  const lateBanner = isLateBannerJobUrl(url);
+  const totalMs = lateBanner ? Math.max(Number(pollMs) || 0, 4500) : 0;
+  const attempts = lateBanner ? Math.max(4, Math.ceil(totalMs / 500)) : 1;
 
   let lastProbe = null;
   for (let i = 0; i < attempts; i += 1) {
@@ -930,7 +987,7 @@ async function openAndProbeJobAvailability(url, { active = false, reuseTabId = n
 
     const { closed, error } = await probeJobUnavailableOnTab(tabId, {
       url: target,
-      pollMs: isDiceJobUrl(target) ? 4500 : 0
+      pollMs: isLateBannerJobUrl(target) ? 4500 : 0
     });
     if (error) {
       return { tabId, closed: "", error, url: target, createdTab };
@@ -993,26 +1050,10 @@ async function assertJobUrlStillAvailable(jobMeta = {}) {
   }
 
   if (probe.closed) {
-    const detail = String(probe.closed || "This job is no longer available.").trim();
-    const importedJobId = String(jobMeta.importedJobId || "").trim();
-    if (importedJobId) {
-      await setImportedJobStatus(importedJobId, {
-        status: "unavailable",
-        statusDetail: `No longer available — ${detail}`
-      });
-    }
-    try {
-      await chrome.notifications.create(`job-unavailable-${Date.now()}`, {
-        type: "basic",
-        iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
-        title: "Job no longer available",
-        message: detail,
-        priority: 1
-      });
-    } catch {
-      /* notifications may be blocked */
-    }
-    throw new Error(`Job no longer available — generation skipped.\n${detail}`);
+    const detail = await markImportedJobUnavailable(jobMeta.importedJobId, probe.closed, {
+      profileId: jobMeta.profileId
+    });
+    throw jobUnavailableError(detail);
   }
   if (probe.error) {
     throw new Error(`Could not verify job is still open: ${probe.error}`);
@@ -1620,6 +1661,40 @@ async function resolveTextAnswers({
 }
 
 /**
+ * The option that carries the same meaning as a Q&A bank answer, or "".
+ *
+ * Plain substring matching flips answers: a bank answer of "No" happily matches
+ * a "None of the above" option, and long disability/veteran phrasings differ
+ * only by their leading Yes/No. So the lead word must agree before any looser
+ * comparison is allowed.
+ */
+function matchAnswerToOption(answer, options = []) {
+  const want = String(answer || "").trim().toLowerCase();
+  if (!want || !options.length) return "";
+
+  const exact = options.find((o) => String(o).trim().toLowerCase() === want);
+  if (exact) return exact;
+
+  const lead = (text) => {
+    const t = String(text).trim().toLowerCase();
+    if (/^y(es)?\b/.test(t)) return "yes";
+    if (/^n(o)?\b/.test(t)) return "no";
+    return "";
+  };
+  const wantLead = lead(want);
+
+  return (
+    options.find((o) => {
+      const opt = String(o).trim().toLowerCase();
+      const optLead = lead(opt);
+      if (wantLead && optLead) return wantLead === optLead;
+      if (wantLead || optLead) return false;
+      return opt.includes(want) || want.includes(opt);
+    }) || ""
+  );
+}
+
+/**
  * Resolve CHOICE questions: Q&A bank first, classify with mini, then AI
  * constrained to options using profile + resume (+ JD when relevant).
  */
@@ -1642,19 +1717,15 @@ async function resolveChoiceAnswers(
       // Prefer bank answer that exists in the option list when options are known.
       let answer = match.record.answer;
       if (Array.isArray(q.options) && q.options.length) {
-        const exact = q.options.find(
-          (o) => String(o).trim().toLowerCase() === String(answer).trim().toLowerCase()
-        );
-        const fuzzy = q.options.find((o) => {
-          const a = String(o).trim().toLowerCase();
-          const b = String(answer).trim().toLowerCase();
-          return a.includes(b) || b.includes(a);
-        });
-        answer = exact || fuzzy || answer;
-        if (!exact && !fuzzy) {
-          stillNeed.push(q);
+        const onList = matchAnswerToOption(answer, q.options);
+        if (!onList) {
+          // The bank knows this candidate's position but this form words its
+          // options differently. Hand the bank answer to the AI pass so it maps
+          // the meaning onto a real option instead of inventing text.
+          stillNeed.push({ ...q, bankAnswer: answer });
           continue;
         }
+        answer = onList;
       }
       resolved.push({ id: q.id, answer, source: "bank" });
       recordQaUsage(match.record.id).catch(() => {});
@@ -1701,19 +1772,12 @@ async function resolveChoiceAnswers(
     if (rematch?.record?.answer) {
       let answer = rematch.record.answer;
       if (Array.isArray(q.options) && q.options.length) {
-        const exact = q.options.find(
-          (o) => String(o).trim().toLowerCase() === String(answer).trim().toLowerCase()
-        );
-        const fuzzy = q.options.find((o) => {
-          const a = String(o).trim().toLowerCase();
-          const b = String(answer).trim().toLowerCase();
-          return a.includes(b) || b.includes(a);
-        });
-        if (!exact && !fuzzy) {
-          forAi.push({ ...q, kind: "choice", bankQuery });
+        const onList = matchAnswerToOption(answer, q.options);
+        if (!onList) {
+          forAi.push({ ...q, kind: "choice", bankQuery, bankAnswer: answer });
           continue;
         }
-        answer = exact || fuzzy;
+        answer = onList;
       }
       resolved.push({ id: q.id, answer, source: "bank" });
       recordQaUsage(rematch.record.id).catch(() => {});
@@ -3364,16 +3428,13 @@ async function runApplyImportedJobCore(
   await dismissPageOverlays(tabId);
 
   try {
-    await ensureAutofillScript(tabId);
-    const availProbe = await sendMessageToTab(
-      tabId,
-      { type: "probe_application_form" },
-      { attempts: 2 }
-    );
-    if (availProbe?.jobUnavailable) {
-      await removeImportedJobFromStorage(importedJobId);
-      await setStatus(`${prefix}Job closed — removed from list: ${availProbe.jobUnavailable}`);
-      return { ok: true, status: "unavailable", detail: availProbe.jobUnavailable, site: "" };
+    // Poll on client-rendered boards — a closed/expired banner can land after the
+    // first paint, and this is the last gate before a resume is generated.
+    const { closed, probe: availProbe } = await probeJobUnavailableOnTab(tabId, { url });
+    if (closed) {
+      const detail = await markImportedJobUnavailable(importedJobId, closed, { profileId });
+      await setStatus(`${prefix}Job closed — skipped, marked on the job card: ${detail}`);
+      return { ok: true, status: "unavailable", detail, site: "" };
     }
     if (availProbe?.alreadyApplied) {
       const site = detectSiteFromUrl(url);
@@ -3473,9 +3534,11 @@ async function runApplyImportedJobCore(
     await ensureAutofillScript(tabId);
     const probe = await sendMessageToTab(tabId, { type: "probe_application_form" }, { attempts: 2 });
     if (probe?.jobUnavailable) {
-      await removeImportedJobFromStorage(importedJobId);
-      await setStatus(`${prefix}Job closed — removed from list: ${probe.jobUnavailable}`);
-      return { ok: true, status: "unavailable", detail: probe.jobUnavailable, site };
+      const detail = await markImportedJobUnavailable(importedJobId, probe.jobUnavailable, {
+        profileId
+      });
+      await setStatus(`${prefix}Job closed — skipped, marked on the job card: ${detail}`);
+      return { ok: true, status: "unavailable", detail, site };
     }
   } catch {
     /* best-effort */
@@ -3514,9 +3577,11 @@ async function runApplyImportedJobCore(
   if (!ea.ok && ea.error) throw new Error(ea.error);
 
   if (ea.status === "unavailable") {
-    await removeImportedJobFromStorage(importedJobId);
-    await setStatus(`${prefix}Job closed — removed from list: ${ea.detail || "unavailable"}`);
-    return { ok: true, status: "unavailable", detail: ea.detail || "unavailable", site };
+    const detail = await markImportedJobUnavailable(importedJobId, ea.detail || "unavailable", {
+      profileId
+    });
+    await setStatus(`${prefix}Job closed — skipped, marked on the job card: ${detail}`);
+    return { ok: true, status: "unavailable", detail, site };
   }
 
   if (ea.status === "already_applied") {
@@ -5186,7 +5251,12 @@ async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}
   );
 }
 
-async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, model, runCoverLetter = true } = {}) {
+async function saveResumeAndCoverLetter(
+  output,
+  resumeData,
+  jobMeta,
+  { apiKey, model, runCoverLetter = true, profileId = "" } = {}
+) {
   assertNotCancelled();
   await setStatus("Rendering resume from JSON...");
   const bundle = await buildResumeFileBundle(output, resumeData, jobMeta);
@@ -5200,7 +5270,9 @@ async function saveResumeAndCoverLetter(output, resumeData, jobMeta, { apiKey, m
       const coverPrompt = await buildCoverLetterPrompt({
         jdText: jobMeta.jdText || "",
         jobTitle: jobMeta.jobTitle || "",
-        companyName: jobMeta.companyName || ""
+        companyName: jobMeta.companyName || "",
+        // Candidate info lives on the resume profile, not the CoverLetter one.
+        profileId
       });
       const coverResult = await chatCompletion({
         apiKey,
@@ -5365,9 +5437,24 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
 
   assertNotCancelled();
   await setStatus("Building resume prompt...");
+  // Real past projects that match this JD, so the tailored experience is built
+  // on work that happened instead of invented for the posting.
+  const projectContext = await getProfileProjectContext(profileId, {
+    jdText: meta.jdText || "",
+    jobTitle: meta.jobTitle || ""
+  });
+  if (projectContext.total) {
+    await setStatus(
+      `Project manifest: ${projectContext.matched} of ${projectContext.total} project(s) match this JD; sending ${projectContext.projects.length}...`
+    );
+  }
+  // buildPrompt fills the template's {CANDIDATE_INFORMATION} / {PROJECT_MANIFESTS}
+  // slots, or appends both sections when the template has no placeholders.
   const basePrompt = await buildPrompt(profileId, meta.jdText || "", {
     jobTitle: meta.jobTitle || "",
-    companyName: meta.companyName || ""
+    companyName: meta.companyName || "",
+    projectManifests: projectContext.list,
+    projectManifestBlock: projectContext.block
   });
   // Only templates that render a Technical Summary ask the model to produce one.
   const wantsTechnicalSummary = templateRequiresTechnicalSummary(
@@ -5389,6 +5476,9 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
         role: "user",
         content: [
           "Reminder: return the COMPLETE resume JSON now. Skills items must be long and dense. Experience must include all required jobs with full long-form bullet counts (each bullet ~170–240 characters). Do not shorten or omit sections.",
+          projectContext.projects.length
+            ? "Build the experience bullets on the candidate project manifest entries that fit this JD, keeping each project with its own employer. Paraphrase them into normal work history."
+            : "",
           wantsTechnicalSummary
             ? 'Also include the "technical_summary" array (6–7 bullets) right after "profile", following the Technical Summary rules above.'
             : ""
@@ -5471,6 +5561,8 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       jdText: meta.jdText || "",
       jobTitle: meta.jobTitle || "",
       companyName: meta.companyName || "",
+      projects: projectContext.projects,
+      candidateInfo: await getCandidateInfoText(profileId),
       setStatus,
       rewriteEnabled: atsRewriteEnabled
     });
@@ -5644,7 +5736,8 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   const saved = await saveResumeAndCoverLetter(rawText, data, meta, {
     apiKey,
     model,
-    runCoverLetter: !resumeOnly
+    runCoverLetter: !resumeOnly,
+    profileId
   });
 
   if (meta?.importedJobId) {
@@ -6204,6 +6297,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             statusDetail: "Cancelled by user.",
             profileId
           });
+        } else if (isJobUnavailableError(err)) {
+          await setStatus(
+            `Job no longer available — skipped, marked on the job card: ${err.jobUnavailable}`
+          );
         } else {
           await setStatus(`Imported job failed: ${error}`);
           await setImportedJobStatus(importedJobId, {
@@ -6350,8 +6447,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               await setStatus("Batch apply cancelled by user.");
               break;
             }
-            failCount += 1;
             const error = String(err?.message || err);
+            if (isJobUnavailableError(err)) {
+              skippedCount += 1;
+              await setStatus(
+                `Batch apply ${i + 1}/${jobIds.length}: job closed — skipped, marked on the job card. Continuing...`
+              );
+              continue;
+            }
+            failCount += 1;
             if (importedJobId) {
               await setImportedJobStatus(importedJobId, {
                 status: "failed",
@@ -6514,25 +6618,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               probeTabCreated = probe.tabId ? Boolean(probe.createdTab) : false;
               if (probe.closed) {
                 closedCount += 1;
-                await setImportedJobStatus(importedJobId, {
-                  status: "unavailable",
-                  statusDetail: `No longer available — ${probe.closed}`,
+                const detail = await markImportedJobUnavailable(importedJobId, probe.closed, {
                   profileId
                 });
-                await removeImportedJobFromStorage(importedJobId);
-                try {
-                  await chrome.notifications.create(`job-unavailable-${Date.now()}`, {
-                    type: "basic",
-                    iconUrl: chrome.runtime.getURL("icons/ocean-icon.svg"),
-                    title: "Job no longer available",
-                    message: String(probe.closed || "").slice(0, 240),
-                    priority: 1
-                  });
-                } catch {
-                  /* notifications may be blocked */
-                }
                 await setStatus(
-                  `Closed — skipped: ${job.jobTitle || importedJobId} (${probe.closed})`
+                  `Closed — skipped, marked on the job card: ${job.jobTitle || importedJobId} (${detail})`
                 );
                 continue;
               }
@@ -6664,6 +6754,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               break;
             }
             const error = String(err?.message || err);
+            if (isJobUnavailableError(err)) {
+              closedCount += 1;
+              await setStatus(
+                `Batch ${i + 1}/${jobIds.length}: job closed — skipped, marked on the job card. Continuing...`
+              );
+              continue;
+            }
             if (isJobAlreadyOnSheetError(err)) {
               skipCount += 1;
               if (importedJobId) {
@@ -6922,6 +7019,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const previewTemplateId =
           pending.templateId || stored.selected_template_id || DEFAULT_TEMPLATE_ID;
 
+        // Same candidate information and JD-matched project manifest the first
+        // generation used, so an update stays anchored instead of drifting.
+        const previewProfileId = pending.profileId || stored.selected_profile_id || "";
+        const previewProjects = await getProfileProjectContext(previewProfileId, {
+          jdText,
+          jobTitle
+        });
+        const previewCandidateInfo = await getCandidateInfoText(previewProfileId);
+
         const { apiKey, model } = await getOpenAiSettings();
         await setStatus("Preview: regenerating resume from your prompt...");
         const userMsg = [
@@ -6931,12 +7037,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           templateRequiresTechnicalSummary(previewTemplateId)
             ? 'Keep the "technical_summary" array (6–7 one-sentence senior-level bullets) in the output; refresh it if the edits change the resume.'
             : "",
+          previewCandidateInfo
+            ? "Candidate information below is the source of truth for employers, dates, titles, technologies, and metrics; do not contradict it."
+            : "",
+          previewProjects.block
+            ? "Keep the experience grounded in the candidate project manifest below; prefer its JD-matched projects when the instructions ask for stronger or different experience."
+            : "",
           "",
           `Job title: ${jobTitle || "(n/a)"}`,
           `Company: ${companyName || "(n/a)"}`,
           "",
           "=== JOB DESCRIPTION ===",
           jdText || "(no JD on file)",
+          ...(previewCandidateInfo
+            ? ["", "=== CANDIDATE INFORMATION — SOURCE OF TRUTH ===", previewCandidateInfo]
+            : []),
+          ...(previewProjects.block ? ["", previewProjects.block] : []),
           "",
           "=== CURRENT RESUME JSON ===",
           JSON.stringify(current, null, 2),
@@ -7098,7 +7214,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         const saved = await saveResumeAndCoverLetter(rawText, resumeData, jobMeta, {
           apiKey,
           model,
-          runCoverLetter: !resumeOnly
+          runCoverLetter: !resumeOnly,
+          profileId
         });
 
         if (jobMeta.importedJobId) {
@@ -7189,6 +7306,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await chrome.storage.local.set({ generation_running: false });
       if (isCancelError(err)) {
         await setStatus("Cancelled by user.");
+      } else if (isJobUnavailableError(err)) {
+        await setStatus(
+          `Job no longer available — resume skipped: ${err.jobUnavailable}`
+        );
       } else {
         await setStatus(`Generation failed: ${String(err?.message || err)}`);
       }

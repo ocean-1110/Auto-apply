@@ -37,8 +37,18 @@ RULES:
 - Profile: 5–7 sentences, professional, not a paraphrase of the JD. Named products may appear once in the profile.
 - Do not invent employers, dates, education, certifications, or contact details.
 - If certifications are empty, keep them empty.
+- When candidateProjects is present, those are real projects the candidate delivered: rebuild bullets around the ones that fit the JD, keep each project with the employer it belongs to, paraphrase it, and never invent a project that is not there.
+- When candidateInformation is present it is the source of truth for employers, dates, titles, technologies, and metrics: never contradict it, and never state a number it does not supply.
 - Return ONLY valid JSON in the same schema as the input resume.
 `.trim();
+
+/** Manifest projects (see project-manifest.js) flattened for the rewrite payload. */
+function projectTexts(projects) {
+  return (projects || [])
+    .map((project) => String(project?.text || project || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 8);
+}
 
 function normalizeName(value) {
   return String(value || "")
@@ -221,7 +231,17 @@ async function judgeResumeRealism(data, { apiKey, model, jdText, jobTitle, atsRe
   };
 }
 
-async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, companyName, atsReport, issues }) {
+async function rewriteResumeJson(data, {
+  apiKey,
+  model,
+  jdText,
+  jobTitle,
+  companyName,
+  atsReport,
+  issues,
+  projects = [],
+  candidateInfo = ""
+}) {
   const locked = {
     name: data?.name,
     location: data?.location,
@@ -259,6 +279,8 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
             missingKeywords: atsReport?.missing || [],
             plantTheseExactTermsInSkills: atsReport?.plantableMissing || atsReport?.criticalMissing || atsReport?.missing || [],
             issuesToFix: issues || [],
+            candidateProjects: projectTexts(projects),
+            candidateInformation: String(candidateInfo || "").trim().slice(0, 6000),
             lockedIdentity: locked,
             currentResume: data,
             jobDescription: String(jdText || "").slice(0, 8000)
@@ -269,8 +291,14 @@ async function rewriteResumeJson(data, { apiKey, model, jdText, jobTitle, compan
       },
       {
         role: "user",
-        content:
-          "Return the COMPLETE rewritten resume JSON now. Keep lockedIdentity employers, dates, education, contact, and certification list. Align the latest title with the target job title; earlier titles should show career growth. Put every plantTheseExactTermsInSkills value into skills items with that exact spelling. Mention each missing product in at most one SFA Solutions or Amazon bullet."
+        content: [
+          "Return the COMPLETE rewritten resume JSON now. Keep lockedIdentity employers, dates, education, contact, and certification list. Align the latest title with the target job title; earlier titles should show career growth. Put every plantTheseExactTermsInSkills value into skills items with that exact spelling. Mention each missing product in at most one SFA Solutions or Amazon bullet.",
+          projects.length
+            ? "Rewrite the bullets around the candidateProjects that match this JD, each staying with its own employer. Do not invent projects beyond that list."
+            : ""
+        ]
+          .filter(Boolean)
+          .join(" ")
       }
     ]
   });
@@ -306,6 +334,10 @@ export async function ensureAtsReadyResume(
     jdText = "",
     jobTitle = "",
     companyName = "",
+    // JD-matched projects from the profile's project manifest, when it has any.
+    projects = [],
+    // Free-form candidate source of truth from the profile, when it has any.
+    candidateInfo = "",
     setStatus,
     // Off unless the caller opts in — no background rewriting by default.
     rewriteEnabled = false
@@ -379,7 +411,9 @@ export async function ensureAtsReadyResume(
       jobTitle,
       companyName,
       atsReport,
-      issues: collectedIssues
+      issues: collectedIssues,
+      projects,
+      candidateInfo
     });
     if (!rewritten) break;
     current = rewritten;

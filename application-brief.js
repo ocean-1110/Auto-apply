@@ -5,6 +5,7 @@
 
 import { chatCompletion } from "./openai.js";
 import { logLlmCall } from "./cost-tracker.js";
+import { selectRelevantProjects, buildProjectAnswerContext } from "./project-manifest.js";
 
 const BRIEF_KEY = "last_application_brief";
 
@@ -62,6 +63,17 @@ export async function generateApplicationBrief({
       : []
   });
 
+  // Real projects from this profile's manifest, ranked against the posting, so
+  // keyExperiences point at work that happened. Empty when no manifest is set.
+  const candidateProjects = buildProjectAnswerContext(
+    selectRelevantProjects(applicantInfo.projectManifest, {
+      jdText: jobMeta.jdText || "",
+      jobTitle: jobMeta.jobTitle || "",
+      limit: 4,
+      maxChars: 1600
+    })
+  );
+
   const result = await chatCompletion({
     apiKey,
     model,
@@ -74,9 +86,11 @@ export async function generateApplicationBrief({
         content:
           "Summarize a candidate for US job-application form filling. " +
           'Return ONLY JSON: {"roleSummary":"","topSkills":[],"keyExperiences":[],"workAuth":"","location":""}. ' +
-          "roleSummary: 2-3 sentences. topSkills: 8-12 strings. keyExperiences: 2-3 short bullets. " +
+          "roleSummary: 2-3 sentences. topSkills: 8-12 strings. keyExperiences: 2-3 short bullets — " +
+          "draw these from candidateProjects (real delivered work) when it is present, favouring the ones " +
+          "closest to this job. " +
           "workAuth: one short phrase from the profile (sponsorship, eligibility). " +
-          "Do not invent employers, visas, or degrees."
+          "Do not invent employers, visas, degrees, or projects."
       },
       {
         role: "user",
@@ -92,6 +106,7 @@ export async function generateApplicationBrief({
             needsSponsorship: applicantInfo.needsSponsorship || "",
             yearsExperience: applicantInfo.yearsExperience || ""
           },
+          ...(candidateProjects.length ? { candidateProjects } : null),
           resume: resumeSlice
         })
       }

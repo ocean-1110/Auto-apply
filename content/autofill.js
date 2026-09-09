@@ -70,7 +70,21 @@
     middleName: ["middle name", "middle initial", "mi"],
     preferredName: ["preferred name", "preferred first name", "nickname", "what should we call you"],
     email: ["email", "e-mail", "email address", "work email"],
-    phone: ["phone number", "mobile phone", "cell phone", "telephone number", "primary phone"],
+    // Bare "phone" / "mobile" matter: forms that pair a Country dropdown with a
+    // plain "Phone" text box matched nothing and were left empty.
+    phone: [
+      "phone",
+      "phone number",
+      "mobile",
+      "mobile number",
+      "mobile phone",
+      "cell",
+      "cell phone",
+      "telephone",
+      "telephone number",
+      "primary phone",
+      "contact number"
+    ],
     phoneDeviceType: ["phone device type", "device type"],
     phoneCountryCode: ["country phone code", "phone country code", "country code"],
     country: ["country", "country/region"],
@@ -511,6 +525,20 @@
         }
       }
     }
+    // Country pickers spell the US half a dozen ways, and the one sitting beside
+    // a phone box often carries the dial code too.
+    if (key === "country" && /united states|usa|^us$|^u\.s\.?a?\.?$/i.test(raw)) {
+      for (const label of [
+        "United States",
+        "United States of America",
+        "USA",
+        "US",
+        "United States (+1)",
+        "United States of America (+1)"
+      ]) {
+        if (!out.includes(label)) out.push(label);
+      }
+    }
     if (/^(yes|no)$/i.test(raw)) {
       const titled = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
       if (!out.includes(titled)) out.push(titled);
@@ -945,6 +973,14 @@
     return YES_VALUES.has(v) || NO_VALUES.has(v);
   }
 
+  /** "yes" / "no" when a label opens with one, else "" — negation must not be lost. */
+  function leadingYesNo(text) {
+    const t = normalize(text);
+    if (/^y(es)?\b/.test(t)) return "yes";
+    if (/^n(o)?\b/.test(t)) return "no";
+    return "";
+  }
+
   /**
    * Match a dropdown option against a desired answer.
    * For yes/no, prefer options that start with Yes/No — never use naive substring
@@ -962,6 +998,20 @@
         return opt === "yes" || opt === "y" || opt.startsWith("yes ") || opt.startsWith("yes,");
       }
       return opt === "no" || opt === "n" || opt.startsWith("no ") || opt.startsWith("no,");
+    }
+
+    // "Yes, I have a disability" and "No, I do not have a disability" share almost
+    // every word, so token overlap used to treat them as the same option. When both
+    // sides open with Yes/No, that prefix decides and nothing below may override it.
+    const optLead = leadingYesNo(opt);
+    const wantLead = leadingYesNo(want);
+    if (optLead && wantLead && optLead !== wantLead) return false;
+
+    // A one-word value has to land on a whole word: plain substring matching
+    // selects "White / Caucasian" for "Asian", and "database" for a "BA" degree.
+    if (!want.includes(" ")) {
+      const escaped = want.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`(^| )${escaped}( |$)`).test(opt);
     }
 
     if (opt.includes(want) || want.includes(opt)) return true;
@@ -1407,6 +1457,66 @@
     }
   }
 
+  /**
+   * True for widgets that accept several values at once (React-Select multi,
+   * `<select multiple>`, aria-multiselectable listboxes).
+   *
+   * These keep their menu open after a pick, so the retry loops below used to
+   * read "not committed yet" and click again — which is how one question ended
+   * up holding "Yes, I have a disability", "No, I do not have a disability" and
+   * "I don't wish to answer" at the same time.
+   */
+  function isMultiSelectWidget(el) {
+    if (!el) return false;
+    if (el.tagName === "SELECT") return Boolean(el.multiple);
+    const root =
+      getReactSelectRoot(el) ||
+      el.closest?.("[class*='select__control'], [role='combobox'], [aria-haspopup='listbox']") ||
+      el.parentElement;
+    if (root?.querySelector?.("[class*='multi-value'], [class*='multiValue']")) return true;
+    const combo = el.closest?.('[role="combobox"], [aria-haspopup="listbox"]') || el;
+    if (String(combo?.getAttribute?.("aria-multiselectable") || "").toLowerCase() === "true") {
+      return true;
+    }
+    const listId = combo?.getAttribute?.("aria-controls") || "";
+    if (listId) {
+      const list = document.getElementById(listId);
+      if (String(list?.getAttribute?.("aria-multiselectable") || "").toLowerCase() === "true") {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Text of the chips a multi-select is already holding. */
+  function selectedChipTexts(el) {
+    if (!el) return [];
+    if (el.tagName === "SELECT" && el.multiple) {
+      return [...el.selectedOptions].map((o) => cleanLabelText(o.textContent || o.value)).filter(Boolean);
+    }
+    const root =
+      getReactSelectRoot(el) ||
+      el.closest?.("[class*='select__control'], [role='combobox'], [aria-haspopup='listbox']") ||
+      el.parentElement;
+    // Prefer the label node: the chip wrapper also contains the "remove" button,
+    // so its textContent carries a stray × alongside the option text.
+    const chips =
+      root?.querySelectorAll?.("[class*='multi-value__label'], [class*='multiValue__label']") ||
+      [];
+    const wrappers = chips.length
+      ? chips
+      : root?.querySelectorAll?.("[class*='multi-value'], [class*='multiValue']") || [];
+    const out = [];
+    const seen = new Set();
+    for (const chip of wrappers) {
+      const text = cleanLabelText(chip.textContent).replace(/\s*[×✕✖x]\s*$/i, "").trim();
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      out.push(text);
+    }
+    return out;
+  }
+
   function selectWidgetDisplayValue(el) {
     const root =
       getReactSelectRoot(el) ||
@@ -1422,6 +1532,8 @@
   }
 
   function selectLooksCommitted(el, candidates) {
+    const chips = selectedChipTexts(el);
+    if (chips.length) return chips.some((chip) => optionMatchesAny(chip, candidates));
     const shown = selectWidgetDisplayValue(el);
     if (!shown || isSelectPlaceholderText(shown)) return false;
     return optionMatchesAny(shown, candidates);
@@ -1432,6 +1544,10 @@
    * text is still sitting in an open combobox input.
    */
   function hasCommittedSelectValue(el, typedFilter = "") {
+    // A multi-select holds its menu open after a pick, so the chip is the only
+    // reliable signal that the value landed. Checking it first stops the caller
+    // from "retrying" and stacking a second, contradictory choice.
+    if (selectedChipTexts(el).length) return true;
     if (isDropdownMenuOpen(el)) return false;
     const shown = selectWidgetDisplayValue(el);
     const typed = normalize(typedFilter);
@@ -1583,9 +1699,14 @@
    * ArrowDown+Enter until the menu closes. Never treat typed filter text alone
    * as a successful selection while the list is still open.
    */
-  async function commitTypedDropdown(input, el, candidates) {
+  async function commitTypedDropdown(input, el, candidates, { strict = false } = {}) {
     if (!input) return false;
     const typedFilter = String(input.value || candidates[0] || "").trim();
+    // strict = the widget offers a fixed list of answers (demographics, Yes/No,
+    // country…). There, an option that does not match what we meant to say is
+    // simply the wrong answer, so we leave the field empty for the AI choice
+    // pass rather than committing whatever happens to be first in the menu.
+    const mustMatch = strict && candidates.length > 0;
 
     // Let the widget react to the last keystroke before we look for a list.
     await sleep(400);
@@ -1602,24 +1723,32 @@
           rounds: attempt === 0 ? COMBO_LIST_ROUNDS : 1
         });
       }
+      const exact = options.find((n) => optionMatchesAny(n.textContent, candidates));
+      if (mustMatch && options.length && !exact) return false;
       if (options.length) {
-        const match =
-          options.find((n) => optionMatchesAny(n.textContent, candidates)) ||
-          pickFilteredOption(options, candidates, typedFilter) ||
-          options[0];
+        const match = exact || pickFilteredOption(options, candidates, typedFilter) || options[0];
         clickOptionNode(match);
         await sleep(180);
-        if (!isDropdownMenuOpen(el) && (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter))) {
+        // On a multi-select the menu stays open by design — the chip, not the
+        // closed menu, says the answer landed. Return before clicking anything else.
+        if (selectLooksCommitted(el, candidates)) return true;
+        if (isMultiSelectWidget(el) && selectedChipTexts(el).length) return true;
+        if (!isDropdownMenuOpen(el) && hasCommittedSelectValue(el, typedFilter)) {
           return true;
         }
         // Some widgets need a second click on the same option.
         clickOptionNode(match);
         await sleep(120);
-        if (!isDropdownMenuOpen(el)) {
-          if (selectLooksCommitted(el, candidates) || hasCommittedSelectValue(el, typedFilter)) {
-            return true;
-          }
+        if (selectLooksCommitted(el, candidates)) return true;
+        if (!isDropdownMenuOpen(el) && hasCommittedSelectValue(el, typedFilter)) {
+          return true;
         }
+      }
+      if (mustMatch) {
+        // No usable list yet — wait another round rather than blind-committing
+        // whatever the keyboard path would highlight.
+        if (!options.length && attempt < 2) continue;
+        return false;
       }
 
       // Keyboard path: highlight first suggestion then commit.
@@ -1732,12 +1861,18 @@
       return true;
     }
 
+    const multi = isMultiSelectWidget(el);
+    const committed = () =>
+      selectLooksCommitted(el, candidates) ||
+      (multi && selectedChipTexts(el).length > 0) ||
+      !isDropdownMenuOpen(el);
+
     let options = collectVisibleOptions(document);
     let match = options.find((n) => optionMatchesAny(n.textContent, candidates));
     if (match) {
       clickOptionNode(match);
       await sleep(120);
-      if (!isDropdownMenuOpen(el)) return true;
+      if (committed()) return true;
     }
 
     const input = openReactSelect(el);
@@ -1746,19 +1881,14 @@
     if (match) {
       clickOptionNode(match);
       await sleep(150);
-      if (!isDropdownMenuOpen(el)) {
+      if (committed()) {
         if (reactSelect) clearReactSelectFilter(input);
         return true;
       }
     }
-    if (options.length) {
-      clickOptionNode(options[0]);
-      await sleep(150);
-      if (!isDropdownMenuOpen(el)) {
-        if (reactSelect) clearReactSelectFilter(input);
-        return true;
-      }
-    }
+    // Deliberately no "click the first option" fallback here. This widget has a
+    // fixed answer list; if nothing matches, the honest outcome is an empty field
+    // that the AI choice pass then answers from the real options.
 
     const filterText = isYesNoValue(candidates[0])
       ? YES_VALUES.has(normalize(candidates[0]))
@@ -1770,14 +1900,16 @@
 
     if (input && input.tagName === "INPUT" && filterText) {
       await typeIntoSelectFilter(input, filterText);
-      const ok = await commitTypedDropdown(input, el, candidates);
+      const ok = await commitTypedDropdown(input, el, candidates, { strict: true });
       if (ok) {
         if (reactSelect && !isDropdownMenuOpen(el)) clearReactSelectFilter(input);
         return true;
       }
+      // Nothing in the list said what we meant. Clear the typed filter so the
+      // field is left genuinely empty instead of holding free text no option matches.
+      if (reactSelect) clearReactSelectFilter(input);
     } else if (input) {
-      // No filter text — still force first option / Enter on an open list.
-      const ok = await commitTypedDropdown(input, el, candidates);
+      const ok = await commitTypedDropdown(input, el, candidates, { strict: true });
       if (ok) return true;
     }
 
@@ -2674,8 +2806,10 @@
       if (isHistoryFilled(el)) continue;
       if (isReactSelectInput(el)) continue;
 
-      // Known profile / rule fields are handled by the deterministic autofill loop.
-      if (matchApplicantKeyFromControl(el)) continue;
+      // Emptiness, not "is this a known field", decides. The deterministic pass
+      // runs first, so a mapped control that is STILL empty means the profile
+      // answer matched none of this form's options — exactly the case the AI
+      // choice pass exists for.
       if (!isChoiceControlEmpty(el)) continue;
 
       const label = captureQuestionText(el);
@@ -2722,8 +2856,11 @@
       if (style.display === "none" || style.visibility === "hidden") continue;
       if (el.disabled) continue;
       if (isHistoryFilled(el)) continue;
-      if (matchApplicantKeyFromControl(el)) continue;
+      // Same rule as above: only skip a mapped combobox once it actually holds a value.
+      if (selectedChipTexts(el).length) continue;
       if (String(el.value || "").trim() && !isPlaceholderChoiceValue(el.value)) continue;
+      const shownValue = selectWidgetDisplayValue(el);
+      if (shownValue && !isSelectPlaceholderText(shownValue)) continue;
 
       const label = captureQuestionText(el);
       if (!label || LEARN_SENSITIVE_RE.test(label)) continue;
@@ -2988,8 +3125,13 @@
     if (key === "phoneDeviceType") return "mobile";
     if (key === "phoneCountryCode") {
       const country = String(applicantInfo?.country || "").trim();
-      if (/united states|usa|\bus\b/i.test(country)) return "United States of America (+1)";
+      if (!country || /united states|usa|\bus\b/i.test(country)) {
+        return "United States of America (+1)";
+      }
     }
+    // A required Country selector left blank blocks the whole form. These are US
+    // applications, so fall back to the US rather than skipping the field.
+    if (key === "country") return "United States";
     if (key === "cityCountryOfResidence") {
       const city = String(applicantInfo?.city || "").trim();
       const state = String(applicantInfo?.state || "").trim();

@@ -1,7 +1,7 @@
 import { PROMPT as charlytonPrompt } from "./prompts/charlyton.js";
 import { PROMPT as stevenAvonPrompt } from "./prompts/steven-avon.js";
 import { PROMPT as coverLetterPrompt } from "./prompts/cover-letter.js";
-import { deleteApplicantInfo } from "./applicant-info.js";
+import { deleteApplicantInfo, getApplicantInfo } from "./applicant-info.js";
 
 export const COVER_LETTER_PROFILE_ID = "cover-letter";
 
@@ -48,11 +48,48 @@ function slugify(name) {
   return base || "profile";
 }
 
-function applyPlaceholders(template, { jdText = "", jobTitle = "", companyName = "" } = {}) {
-  return template
+/**
+ * Placeholders a prompt template may use: {JD} (required), {JOB_TITLE},
+ * {COMPANY}, {CANDIDATE_INFORMATION}, {PROJECT_MANIFESTS}. The shorter
+ * *_INFO / *_MANIFEST spellings are accepted aliases.
+ */
+const CANDIDATE_INFO_TOKENS = ["{CANDIDATE_INFORMATION}", "{CANDIDATE_INFO}"];
+const PROJECT_MANIFEST_TOKENS = ["{PROJECT_MANIFESTS}", "{PROJECT_MANIFEST}"];
+
+function hasAnyToken(template, tokens) {
+  return tokens.some((token) => template.includes(token));
+}
+
+function applyPlaceholders(
+  template,
+  {
+    jdText = "",
+    jobTitle = "",
+    companyName = "",
+    candidateInfo = "",
+    projectManifests = ""
+  } = {}
+) {
+  let out = template
     .replaceAll("{JD}", jdText)
     .replaceAll("{JOB_TITLE}", jobTitle)
     .replaceAll("{COMPANY}", companyName);
+  // An empty slot becomes an explicit "none" so the template's own heading is
+  // not left dangling above nothing.
+  for (const token of CANDIDATE_INFO_TOKENS) {
+    out = out.replaceAll(token, candidateInfo || "(none provided)");
+  }
+  for (const token of PROJECT_MANIFEST_TOKENS) {
+    out = out.replaceAll(token, projectManifests || "(none provided)");
+  }
+  return out;
+}
+
+/** Free-form candidate source-of-truth text saved on a profile. */
+export async function getCandidateInfoText(profileId) {
+  if (!profileId) return "";
+  const info = await getApplicantInfo(profileId);
+  return String(info?.candidateInfo || "").trim();
 }
 
 export async function getCustomProfiles() {
@@ -99,6 +136,20 @@ export async function getCoverLetterProfile() {
   );
 }
 
+/**
+ * Fill a profile's prompt template for one job.
+ *
+ * Candidate information and the JD-matched project manifest go into the
+ * template's own {CANDIDATE_INFORMATION} / {PROJECT_MANIFESTS} slots when it
+ * has them. Templates written before those placeholders existed still get the
+ * content — appended at the end with its own heading — so nothing is silently
+ * dropped.
+ *
+ * @param {object} extras
+ * @param {string} [extras.candidateInfo] override; defaults to the profile's saved text
+ * @param {string} [extras.projectManifests] ranked project list for the placeholder
+ * @param {string} [extras.projectManifestBlock] projects + usage rules, for the append fallback
+ */
 export async function buildPrompt(profileId, jdText, extras = {}) {
   const profile = await getProfileById(profileId);
   const promptTemplate = await getEffectivePromptTemplate(profile);
@@ -108,14 +159,48 @@ export async function buildPrompt(profileId, jdText, extras = {}) {
   if (!promptTemplate.includes("{JD}")) {
     throw new Error('Prompt must include the {JD} placeholder.');
   }
-  return applyPlaceholders(promptTemplate, {
+
+  const candidateInfo =
+    extras.candidateInfo !== undefined
+      ? String(extras.candidateInfo || "").trim()
+      : await getCandidateInfoText(profileId);
+  const projectManifests = String(extras.projectManifests || "").trim();
+
+  const prompt = applyPlaceholders(promptTemplate, {
     jdText,
     jobTitle: extras.jobTitle || "",
-    companyName: extras.companyName || ""
+    companyName: extras.companyName || "",
+    candidateInfo,
+    projectManifests
   });
+
+  const tail = [];
+  if (candidateInfo && !hasAnyToken(promptTemplate, CANDIDATE_INFO_TOKENS)) {
+    tail.push(
+      [
+        "=== CANDIDATE INFORMATION — SOURCE OF TRUTH ===",
+        "",
+        "Employers, dates, titles, technologies, and metrics below are verified. Do not contradict them, and do not claim anything this section cannot support.",
+        "",
+        candidateInfo
+      ].join("\n")
+    );
+  }
+  const manifestBlock = String(extras.projectManifestBlock || "").trim();
+  if (manifestBlock && !hasAnyToken(promptTemplate, PROJECT_MANIFEST_TOKENS)) {
+    tail.push(manifestBlock);
+  }
+
+  return tail.length ? [prompt, ...tail].join("\n\n") : prompt;
 }
 
-export async function buildCoverLetterPrompt({ jdText, jobTitle, companyName }) {
+export async function buildCoverLetterPrompt({
+  jdText,
+  jobTitle,
+  companyName,
+  profileId = "",
+  projectManifests = ""
+}) {
   const profile = await getCoverLetterProfile();
   const promptTemplate = await getEffectivePromptTemplate(profile);
   if (!promptTemplate) {
@@ -124,7 +209,16 @@ export async function buildCoverLetterPrompt({ jdText, jobTitle, companyName }) 
   if (!promptTemplate.includes("{JD}")) {
     throw new Error("CoverLetter prompt must include the {JD} placeholder.");
   }
-  return applyPlaceholders(promptTemplate, { jdText, jobTitle, companyName });
+  // Candidate info comes from the resume profile being generated, not the
+  // CoverLetter profile, which usually holds only a prompt.
+  const candidateInfo = await getCandidateInfoText(profileId);
+  return applyPlaceholders(promptTemplate, {
+    jdText,
+    jobTitle,
+    companyName,
+    candidateInfo,
+    projectManifests
+  });
 }
 
 function resolveProfileKind(kind, name) {

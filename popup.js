@@ -518,7 +518,9 @@ async function selectOutputDirectory() {
 
 function showSaveBanner(pathLabel) {
   if (!saveBannerEl || !saveBannerPathEl) return;
-  saveBannerPathEl.textContent = pathLabel || "Files saved successfully.";
+  const label = pathLabel || "Files saved successfully.";
+  saveBannerPathEl.textContent = label;
+  saveBannerPathEl.title = label;
   saveBannerEl.hidden = false;
 }
 
@@ -1246,9 +1248,13 @@ function renderImportedJobs() {
     details.appendChild(actions);
 
     const err = shortError(job);
-    if ((job.status === "failed" || job.status === "check_failed") && err) {
+    if (
+      (job.status === "failed" || job.status === "check_failed" || isUnavailable) &&
+      err
+    ) {
       const errP = document.createElement("p");
-      errP.className = job.status === "check_failed" ? "job-error is-warn" : "job-error";
+      errP.className =
+        job.status === "check_failed" || isUnavailable ? "job-error is-warn" : "job-error";
       errP.textContent = err;
       details.appendChild(errP);
     }
@@ -3225,6 +3231,7 @@ panelPollTimer = setInterval(async () => {
     const statusText =
       typeof data.generation_status === "string" ? data.generation_status : "";
     const cancelled = /\bcancel/i.test(statusText);
+    const generationBusy = !cancelled && (running || generationStartPending);
 
     if (running && !cancelled) {
       generationStartPending = false;
@@ -3249,7 +3256,6 @@ panelPollTimer = setInterval(async () => {
         clearIdleStatus: true
       });
       setBusy(false);
-      renderAtsForCurrentJob(data.last_ats_report);
     } else if (autofillInProgress) {
       updateJobsWorkStatus({
         running: true,
@@ -3263,9 +3269,14 @@ panelPollTimer = setInterval(async () => {
         clearIdleStatus: true
       });
       setBusy(false);
-      renderAtsForCurrentJob(data.last_ats_report);
     } else {
       setBusy(false);
+    }
+
+    // The badge is hidden while a run is in flight. Re-render it in every other
+    // state — including Apply, which generates a resume mid-run and used to
+    // leave the score hidden until the panel was reopened.
+    if (!generationBusy) {
       renderAtsForCurrentJob(data.last_ats_report);
     }
 

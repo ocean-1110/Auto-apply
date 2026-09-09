@@ -237,6 +237,12 @@ export function createEmptyApplicantInfo() {
     // Experience / links
     yearsExperience: "",
     relevantExperience: "",
+    // Free-form source of truth about the candidate (verified background, prior
+    // resume, technologies, metrics). Fills {CANDIDATE_INFORMATION} in the prompt.
+    candidateInfo: "",
+    // Real projects delivered in past roles. Never autofilled into a form —
+    // it feeds resume generation, ATS rewrite, and AI answers. See project-manifest.js.
+    projectManifest: "",
     englishLevel: "",
     linkedinUrl: "",
     portfolioUrl: "",
