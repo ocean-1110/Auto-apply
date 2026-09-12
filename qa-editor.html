@@ -38,6 +38,9 @@
       <symbol id="i-next" viewBox="0 0 24 24">
         <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M9.5 6.5 15.5 12l-6 5.5"/>
       </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19 12a7 7 0 1 1-2.05-4.95M19 5v4h-4"/>
+      </symbol>
     </svg>
 
     <main class="editor qa-editor">
@@ -68,6 +71,32 @@
           These form fields are not in the bank yet. Register each one, then it will autofill next time.
         </p>
         <div id="pendingList" class="pending-list"></div>
+      </section>
+
+      <section class="neo-card" id="kbCard">
+        <div class="qa-list-header">
+          <h2 class="section-title">Knowledge base</h2>
+          <div class="qa-toolbar">
+            <span class="count-chip" id="kbCount" title="Facts learned">0</span>
+            <button
+              type="button"
+              id="kbRebuildBtn"
+              class="icon-btn"
+              title="Re-learn this profile's facts from its Q&amp;A bank and profile info"
+            >
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span class="btn-label">Re-learn</span>
+            </button>
+          </div>
+        </div>
+        <p class="hint">
+          AI distills this profile's Q&amp;A answers and profile info into one fact per topic. Apply
+          reads the whole form and answers every field from these facts, the job description, and the
+          resume. It re-learns on its own whenever the bank or profile changes.
+        </p>
+        <p class="kb-meta" id="kbMeta"></p>
+        <p class="kb-summary" id="kbSummary" hidden></p>
+        <div class="kb-facts" id="kbFacts"></div>
       </section>
 
       <section class="neo-card">

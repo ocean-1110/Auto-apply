@@ -310,19 +310,35 @@ ${bullets}
     .join("\n");
 }
 
-/** School on one line; degree and year on one ATS-friendly line. */
-export function renderEducationBlock(edu = {}) {
-  const school = escapeHtml(edu.school || "");
-  const degree = String(edu.degree || "").trim();
-  const year = String(edu.year || "").trim();
-  const degreeYear = [degree, year].filter(Boolean).join(" - ");
+/**
+ * Education as a list. A resume may need two universities, so the JSON carries
+ * either one `{ school, degree, year }` object or an array of them; both come
+ * back here as an array. Alternate key spellings the model sometimes emits are
+ * accepted so a real entry is never silently dropped.
+ */
+export function normalizeEducation(education) {
+  const list = Array.isArray(education) ? education : [education];
+  return list
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry) => ({
+      school: String(entry.school || entry.university || entry.institution || "").trim(),
+      degree: String(entry.degree || entry.qualification || "").trim(),
+      year: String(entry.year || entry.years || entry.dates || "").trim()
+    }))
+    .filter((entry) => entry.school || entry.degree || entry.year);
+}
 
-  if (!school && !degreeYear) return "";
-
-  const lines = [];
-  if (school) lines.push(`<strong>${school}</strong>`);
-  if (degreeYear) lines.push(escapeHtml(degreeYear));
-  return `<p class="education">${lines.join("<br>\n")}</p>`;
+/** School on one line; degree and year on one ATS-friendly line, per school. */
+export function renderEducationBlock(education) {
+  return normalizeEducation(education)
+    .map((edu) => {
+      const degreeYear = [edu.degree, edu.year].filter(Boolean).join(" - ");
+      const lines = [];
+      if (edu.school) lines.push(`<strong>${escapeHtml(edu.school)}</strong>`);
+      if (degreeYear) lines.push(escapeHtml(degreeYear));
+      return `<p class="education">${lines.join("<br>\n")}</p>`;
+    })
+    .join("\n");
 }
 
 export function wrapHtmlDocument({

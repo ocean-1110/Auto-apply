@@ -25,7 +25,7 @@ import {
   RESUME_JSON_SYSTEM_PROMPT
 } from "./openai.js";
 import { getEnv } from "./env.js";
-import { getApplicantInfo, saveApplicantInfo } from "./applicant-info.js";
+import { getApplicantInfo, saveApplicantInfo, APPLICANT_INFO_KEY } from "./applicant-info.js";
 import { getProfileProjectContext } from "./project-manifest.js";
 import {
   buildWorkHistory,
@@ -55,8 +55,10 @@ import {
   clearGeneratedDocsForJob
 } from "./upload-assets.js";
 import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, classifyApplicationQuestions, isComplexQuestion, shouldBankAnswer, generateRoleSummaries, DEFAULT_OPENAI_FORM_MODEL } from "./ai-answers.js";
-import { findQaMatch, saveQa, recordQaUsage } from "./qa-store.js";
+import { findQaMatch, findQaMatchesBatch, saveQa, recordQaUsage } from "./qa-store.js";
 import { upsertPendingQa, dismissPendingMatchingQuestion } from "./pending-qa.js";
+import { getKbStatus, getStoredKb, rebuildProfileKb, buildFallbackKb } from "./profile-kb.js";
+import { planFormAnswers, pickApplicationButton, isChoiceKind } from "./form-planner.js";
 import {
   generateApplicationBrief,
   getApplicationBrief,
@@ -1151,7 +1153,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-03.combobox-commit.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-12.ai-form-plan.3";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1626,7 +1628,8 @@ async function resolveTextAnswers({
       applicantInfo,
       jobMeta,
       resumeText,
-      applicationBrief: brief
+      applicationBrief: brief,
+      knowledgeBase: await getStoredKb(profileId).catch(() => null)
     });
     if (aiResult.usage) {
       await logLlmCall({
@@ -1802,7 +1805,8 @@ async function resolveChoiceAnswers(
           applicantInfo,
           jobMeta,
           resumeText,
-          applicationBrief: brief
+          applicationBrief: brief,
+          knowledgeBase: await getStoredKb(profileId).catch(() => null)
         });
         if (aiResult.usage) {
           await logLlmCall({
@@ -2058,9 +2062,29 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     await setStatus(`Uploading from ${loc.summary}...`);
   }
 
+  // Auto Apply always uses gpt-4o-mini whole-form planning when a key is present.
+  const planMode = await isAiFormPlanEnabled();
+  let formModel = DEFAULT_OPENAI_FORM_MODEL;
+  if (planMode) {
+    try {
+      const formSettings = await getOpenAiFormSettings();
+      formModel = formSettings.model || DEFAULT_OPENAI_FORM_MODEL;
+      // Learn QA bank + profile into the knowledge base before any page scan.
+      await setStatus(`${formModel}: preparing QA bank and profile for this apply...`);
+      await ensureProfileKbForApply(profileId, {
+        apiKey: formSettings.apiKey,
+        model: formModel
+      });
+    } catch (err) {
+      if (isCancelError(err)) throw err;
+      /* KB failure must not block the fill — plan still runs with fallback facts. */
+    }
+  }
+
   await ensureAutofillScript(tab.id);
   const frameResults = await sendMessageToAllFrames(tab.id, {
     type: "autofill_application",
+    mode: planMode ? "plan" : "legacy",
     applicantInfo,
     credentials,
     workHistory: history.workHistory,
@@ -2072,6 +2096,48 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   });
   const result = mergeAutofillFrameResults(frameResults);
 
+  const site = hostnameFromUrl(tab.url || "");
+  await ensureCostSession(ctx.jobMeta.jdLink || ctx.jobMeta.jobTitle || tab.url || "");
+
+  // Read the whole step and let gpt-4o-mini answer every field from the knowledge base,
+  // Q&A bank, resume and JD. The per-question path below is emergency fallback only.
+  if (planMode) {
+    try {
+      const plan = await runAiFormPlan({ tabId: tab.id, profileId, applicantInfo, ctx, site });
+      await logFillHits({
+        profileHits: Number(result?.filledCount || 0) + plan.fallbackFilled,
+        bankHits: plan.bankHits,
+        aiAnswers: plan.aiAnswers
+      });
+      return {
+        ok: Boolean(result?.ok) || plan.filledCount > 0,
+        tabId: tab.id,
+        tabUrl: tab.url || "",
+        ...result,
+        filledCount: Number(result?.filledCount || 0) + plan.fallbackFilled,
+        aiFilledCount: plan.textFilled,
+        choiceFilledCount: plan.choiceFilled,
+        bankHits: plan.bankHits,
+        planFilledCount: plan.filledCount,
+        planSkippedCount: plan.skipped,
+        planFailedCount: plan.failed
+      };
+    } catch (err) {
+      if (isCancelError(err)) throw err;
+      await setStatus(
+        `${formModel} form reader failed (${String(err?.message || err).slice(0, 160)}) — using the Q&A bank, then AI per question...`
+      );
+      // Plan mode skipped the per-question collection, so gather it now.
+      const legacy = mergeAutofillFrameResults(
+        await sendMessageToAllFrames(tab.id, { type: "collect_unmatched_questions", applicantInfo })
+      );
+      result.filledCount = Number(result.filledCount || 0) + legacy.filledCount;
+      result.filled.push(...legacy.filled);
+      result.unmatchedQuestions = legacy.unmatchedQuestions;
+      result.unmatchedChoiceQuestions = legacy.unmatchedChoiceQuestions;
+    }
+  }
+
   let aiFilledCount = 0;
   let choiceFilledCount = 0;
   let bankHits = 0;
@@ -2080,9 +2146,6 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   const unmatchedChoice = Array.isArray(result?.unmatchedChoiceQuestions)
     ? result.unmatchedChoiceQuestions
     : [];
-
-  const site = hostnameFromUrl(tab.url || "");
-  await ensureCostSession(ctx.jobMeta.jdLink || ctx.jobMeta.jobTitle || tab.url || "");
 
   // Q&A bank first → classify with mini → AI (JD/resume for thinking fields).
   if (unmatchedChoice.length) {
@@ -2183,6 +2246,426 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     choiceFilledCount,
     bankHits
   };
+}
+
+// ---- AI form plan -------------------------------------------------------------
+//
+// Apply reads the whole step (content scan_application_form), answers every
+// empty field in one model pass from the profile knowledge base, the Q&A bank,
+// the resume and the JD (form-planner.js), then fills the answers
+// (apply_form_plan). The knowledge base is re-learned whenever the Q&A bank or
+// profile changes (profile-kb.js).
+
+const MAX_PLAN_ROUNDS = 3;
+const KB_REFRESH_DEBOUNCE_MS = 8000;
+let kbRefreshTimer = null;
+
+/**
+ * Auto Apply always uses the whole-form GPT plan when an API key exists.
+ * The panel toggle is ignored — legacy per-question fill is emergency fallback only.
+ */
+async function isAiFormPlanEnabled() {
+  return Boolean(await getEnv("OPENAI_API_KEY"));
+}
+
+/** A scanned field's identity across re-scans — field ids are minted fresh on every scan. */
+function planFieldSignature(field) {
+  const norm = (text) =>
+    String(text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  return `${field.frameId}|${field.kind}|${norm(field.section)}|${norm(field.label).slice(0, 200)}`;
+}
+
+function bankFieldType(kind) {
+  if (kind === "checkbox_group") return "checkbox";
+  if (kind === "richtext") return "textarea";
+  return ["select", "radio", "checkbox", "combobox", "textarea"].includes(kind) ? kind : "text";
+}
+
+function logKbUsage(model, usage) {
+  if (!usage) return Promise.resolve();
+  return logLlmCall({
+    purpose: "profile_kb",
+    model,
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens
+  });
+}
+
+/**
+ * The profile's knowledge base, re-learned first when the Q&A bank or profile
+ * changed since it was built. Called at the start of every Apply so gpt-4o-mini
+ * has learned the QA bank and personal profile before it reads the form.
+ * A failure never blocks Apply: a stale or raw knowledge base is still better
+ * evidence than none.
+ */
+async function ensureProfileKbForApply(profileId, { apiKey, model }) {
+  const modelLabel = model || DEFAULT_OPENAI_FORM_MODEL;
+  let status;
+  try {
+    status = await getKbStatus(profileId);
+  } catch {
+    return getStoredKb(profileId).catch(() => null);
+  }
+  if (!status.stale) {
+    return status.kb;
+  }
+  await setStatus(
+    status.kb
+      ? `${modelLabel}: updating knowledge base from new Q&A answers and profile...`
+      : `${modelLabel}: learning QA bank and personal profile...`
+  );
+  try {
+    const { kb, usage } = await rebuildProfileKb({
+      profileId,
+      apiKey,
+      model,
+      sources: status.sources
+    });
+    await logKbUsage(model, usage);
+    return kb;
+  } catch (err) {
+    if (isCancelError(err)) throw err;
+    return status.kb || buildFallbackKb(status.sources);
+  }
+}
+
+/** Background re-learn for the selected profile after the bank or profile changes. */
+async function refreshSelectedProfileKb() {
+  const { selected_profile_id } = await chrome.storage.local.get("selected_profile_id");
+  const profileId = String(selected_profile_id || "").trim();
+  if (!profileId || !(await isAiFormPlanEnabled())) return;
+  const status = await getKbStatus(profileId);
+  if (!status.stale) return;
+  const { apiKey, model } = await getOpenAiFormSettings();
+  const { usage } = await rebuildProfileKb({ profileId, apiKey, model, sources: status.sources });
+  await logKbUsage(model, usage);
+}
+
+// AI answers saved into the bank do not change the knowledge base's sources, so
+// this only re-learns when the user's own answers or profile actually moved.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (!changes.qa_bank_version && !changes[APPLICANT_INFO_KEY]) return;
+  clearTimeout(kbRefreshTimer);
+  kbRefreshTimer = setTimeout(() => {
+    refreshSelectedProfileKb().catch(() => {});
+  }, KB_REFRESH_DEBOUNCE_MS);
+});
+
+/**
+ * Grow the bank from a plan the way a person would. Answers the knowledge base
+ * or bank already backed need no new entry; answers drawn from the resume are
+ * stored for reuse; guesses go to "Needs answers" for the user to confirm — and
+ * a confirmed answer becomes a knowledge-base fact. Essays are never banked.
+ */
+async function learnFromPlan({ profileId, fieldById, answers = [], bankMatches = new Map(), site = "" }) {
+  const toConfirm = [];
+  for (const answer of answers) {
+    const field = fieldById.get(answer.id);
+    if (!field) continue;
+    if (answer.source === "qa") {
+      const top = bankMatches.get(answer.id)?.[0]?.record;
+      if (top?.id) recordQaUsage(top.id).catch(() => {});
+      continue;
+    }
+    if (answer.source === "kb" || answer.source === "profile") continue;
+    // Consent boxes are per-site boilerplate, not facts about the candidate.
+    if (field.kind === "checkbox") continue;
+    const fieldType = bankFieldType(field.kind);
+    const q = {
+      label: field.label,
+      fieldType,
+      multiline: fieldType === "textarea",
+      richText: field.kind === "richtext"
+    };
+    if (isComplexQuestion(q)) continue;
+    const value = answer.values?.length ? answer.values.join(", ") : answer.value;
+    if (answer.source === "resume" && answer.confidence >= 0.7 && shouldBankAnswer(q, value, fieldType)) {
+      await saveReusableQa({ profileId, question: field.label, answer: value, fieldType, site });
+      continue;
+    }
+    toConfirm.push({ label: field.label, fieldType, options: field.options || [] });
+  }
+  if (toConfirm.length) queueUnbankedQuestions(profileId, toConfirm, site);
+}
+
+/**
+ * Read the whole step, let the form model answer every empty field at once, and
+ * fill the answers. Repeats while answering reveals follow-up fields ("If yes,
+ * please explain"), up to MAX_PLAN_ROUNDS.
+ */
+async function runAiFormPlan({ tabId, profileId, applicantInfo, ctx, site }) {
+  const { apiKey, model } = await getOpenAiFormSettings();
+  const knowledgeBase = await ensureProfileKbForApply(profileId, { apiKey, model });
+  const totals = {
+    filledCount: 0,
+    choiceFilled: 0,
+    textFilled: 0,
+    bankHits: 0,
+    aiAnswers: 0,
+    skipped: 0,
+    failed: 0,
+    fallbackFilled: 0
+  };
+  const attempted = new Set();
+
+  for (let round = 0; round < MAX_PLAN_ROUNDS; round += 1) {
+    assertNotCancelled();
+    const frames = await sendMessageToAllFrames(tabId, { type: "scan_application_form", applicantInfo });
+    const fields = [];
+    const alreadyFilled = [];
+    let page = null;
+    for (const fr of frames) {
+      if (!fr || fr.ok === false) continue;
+      if (!page) {
+        page = fr.page || null;
+      } else if (fr.page?.formText) {
+        // Merge visible form text from additional frames (ATS iframes).
+        const extra = String(fr.page.formText || "").trim();
+        if (extra) {
+          const combined = `${page.formText || ""}\n${extra}`.trim().slice(0, 3500);
+          page = { ...page, formText: combined };
+        }
+      }
+      alreadyFilled.push(...(fr.filled || []));
+      const seen = new Map();
+      for (const field of fr.fields || []) {
+        const base = planFieldSignature({ ...field, frameId: fr.frameId });
+        const ordinal = seen.get(base) || 0;
+        seen.set(base, ordinal + 1);
+        const sig = `${base}#${ordinal}`;
+        if (!attempted.has(sig)) fields.push({ ...field, frameId: fr.frameId, sig });
+      }
+    }
+    if (!fields.length) break;
+
+    await setStatus(
+      round === 0
+        ? `${model} is reading ${fields.length} field(s) on this page...`
+        : `${model} is answering ${fields.length} follow-up field(s)...`
+    );
+    const bankMatches = await findQaMatchesBatch(
+      profileId,
+      fields.map((f) => ({ id: f.id, text: f.label })),
+      { limit: 3, threshold: 0.5 }
+    ).catch(() => new Map());
+
+    const buttons = [];
+    for (const fr of frames) {
+      if (!fr || fr.ok === false) continue;
+      for (const b of fr.buttons || []) {
+        buttons.push({
+          text: b.text,
+          hint: b.hint || "",
+          inForm: Boolean(b.inForm)
+        });
+      }
+    }
+
+    const plan = await planFormAnswers({
+      apiKey,
+      model,
+      fields,
+      knowledgeBase,
+      applicantInfo,
+      jobMeta: ctx.jobMeta,
+      resumeText: ctx.resumeText,
+      applicationBrief: ctx.applicationBrief,
+      bankMatches,
+      alreadyFilled,
+      page,
+      buttons
+    });
+    if (plan.usage) {
+      await logLlmCall({
+        purpose: "autofill_plan",
+        model,
+        inputTokens: plan.usage.prompt_tokens,
+        outputTokens: plan.usage.completion_tokens
+      });
+    }
+
+    const fieldById = new Map(fields.map((f) => [f.id, f]));
+    const byFrame = new Map();
+    for (const answer of plan.answers) {
+      const field = fieldById.get(answer.id);
+      if (!field) continue;
+      if (!byFrame.has(field.frameId)) byFrame.set(field.frameId, []);
+      byFrame.get(field.frameId).push(answer);
+    }
+
+    let filledThisRound = 0;
+    for (const [frameId, answers] of byFrame) {
+      assertNotCancelled();
+      await setStatus(`${model}: filling ${answers.length} answer(s)...`);
+      const res = await sendMessageToTab(
+        tabId,
+        { type: "apply_form_plan", answers },
+        { attempts: 2, frameId }
+      ).catch(() => null);
+      const filledIds = new Set((res?.filled || []).map((row) => row.id));
+      for (const answer of answers) {
+        if (!filledIds.has(answer.id)) {
+          totals.failed += 1;
+          continue;
+        }
+        filledThisRound += 1;
+        totals.filledCount += 1;
+        if (isChoiceKind(answer.kind)) totals.choiceFilled += 1;
+        else totals.textFilled += 1;
+        if (["kb", "qa", "profile"].includes(answer.source)) totals.bankHits += 1;
+        else totals.aiAnswers += 1;
+      }
+    }
+    totals.skipped += plan.skipped.length;
+
+    // Each field is asked once per page: skipped or unfillable fields are not
+    // re-asked next round. Fields a failed model call never answered get one more try.
+    const unanswered = new Set(plan.unanswered);
+    for (const f of fields) if (!unanswered.has(f.id)) attempted.add(f.sig);
+
+    await learnFromPlan({
+      profileId,
+      fieldById,
+      answers: plan.answers,
+      bankMatches,
+      site
+    }).catch(() => {});
+
+    // Nothing landed, so nothing new can have appeared.
+    if (!filledThisRound) break;
+  }
+
+  // Safety net: explicit profile values for mapped dropdowns the plan left empty.
+  const fallback = mergeAutofillFrameResults(
+    await sendMessageToAllFrames(tabId, { type: "autofill_fallback_choices", applicantInfo }).catch(
+      () => []
+    )
+  );
+  totals.fallbackFilled = Number(fallback.filledCount || 0);
+  return totals;
+}
+
+/**
+ * Last resort when the rule-based finder recognises no Apply / Next button: show
+ * the model the page's buttons and let it name the one that moves the
+ * application forward. Never clicks Submit — a submit pick comes back as
+ * `submitCandidate` so the caller can stop for review.
+ * @returns {Promise<{ advanced: boolean, tabId: number, text?: string, submitCandidate?: boolean }>}
+ */
+async function tryAiApplyButton(
+  tabId,
+  { stage = "entry", preferNewTab = false, gateway = false, tried = new Set() } = {}
+) {
+  const none = { advanced: false, tabId };
+  if (!(await isAiFormPlanEnabled().catch(() => false))) return none;
+  let settings;
+  try {
+    settings = await getOpenAiFormSettings();
+  } catch {
+    return none;
+  }
+
+  const frames = await sendMessageToAllFrames(tabId, {
+    type: "scan_application_form",
+    buttonsOnly: true
+  }).catch(() => []);
+  const buttons = [];
+  let page = null;
+  for (const fr of frames) {
+    if (!fr || fr.ok === false) continue;
+    page = page || fr.page || null;
+    for (const b of fr.buttons || []) {
+      if (tried.has(`${fr.frameId}|${b.text}`)) continue;
+      const href = String(b.href || "").trim();
+      if (href && (isMarketingOrCorporateUrl(href) || !isPlausibleApplyDestination(href))) {
+        // Keep same-page / hash / relative empties; only skip clear off-site marketing links.
+        if (/^https?:/i.test(href)) continue;
+      }
+      const text = String(b.text || "");
+      if (
+        /\b(explore|get in touch|talk with|contact us|about us|corporate|governance|investors?|privacy|terms|sustainability|media hub|learn more|careers home|company overview)\b/i.test(
+          text
+        )
+      ) {
+        continue;
+      }
+      buttons.push({ ...b, frameId: fr.frameId });
+    }
+  }
+  if (!buttons.length) return none;
+
+  await setStatus(
+    stage === "entry"
+      ? `${settings.model} is looking for the Apply button...`
+      : `${settings.model} is looking for the button that continues the application...`
+  );
+  const ctx = await getAutofillAiContext();
+  let pick;
+  try {
+    pick = await pickApplicationButton({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      buttons,
+      page,
+      stage,
+      job: ctx.jobMeta
+    });
+  } catch (err) {
+    if (isCancelError(err)) throw err;
+    return none;
+  }
+  if (pick.usage) {
+    await logLlmCall({
+      purpose: "apply_button_pick",
+      model: settings.model,
+      inputTokens: pick.usage.prompt_tokens,
+      outputTokens: pick.usage.completion_tokens
+    });
+  }
+  const button = pick.id ? buttons.find((b) => b.id === pick.id) : null;
+  if (!button) return none;
+  tried.add(`${button.frameId}|${button.text}`);
+  if (pick.type === "submit") return { ...none, submitCandidate: true, text: button.text };
+
+  const before = await chrome.tabs.get(tabId).catch(() => null);
+  const prevUrl = before?.url || "";
+  const prevSig = (await getApplyActionFromTab(tabId).catch(() => null))?.signature || "";
+  await setStatus(`AI: clicking "${button.text}"...`);
+  const clickRes = await sendMessageToTab(
+    tabId,
+    { type: "click_scanned_button", id: button.id, preferNewTab, allowSubmit: false },
+    { attempts: 2, frameId: button.frameId }
+  ).catch(() => null);
+  if (clickRes?.refusedSubmit) return { ...none, submitCandidate: true, text: button.text };
+  if (!clickRes?.ok) return none;
+
+  if (clickRes.navigateUrl) {
+    if (
+      !isPlausibleApplyDestination(clickRes.navigateUrl) ||
+      isDiceProfileUrl(clickRes.navigateUrl) ||
+      isMarketingOrCorporateUrl(clickRes.navigateUrl)
+    ) {
+      return none;
+    }
+    if (preferNewTab || clickRes.openInNewTab) {
+      const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, tabId);
+      if (newId) return { advanced: true, tabId: newId, text: button.text };
+    }
+    await navigateTabToUrl(tabId, clickRes.navigateUrl);
+  }
+  const wait = await waitForApplyAdvance(tabId, prevSig, prevUrl, 10000, { preferNewTab, gateway });
+  if (wait?.advanced) {
+    const landed = (await chrome.tabs.get(wait.tabId || tabId).catch(() => null))?.url || "";
+    if (landed && (isMarketingOrCorporateUrl(landed) || isDiceProfileUrl(landed))) {
+      if (prevUrl) await navigateTabToUrl(wait.tabId || tabId, prevUrl).catch(() => {});
+      return none;
+    }
+  }
+  return { advanced: Boolean(wait?.advanced), tabId: wait?.tabId || tabId, text: button.text };
 }
 
 function describeAutofillButton(probe = {}, { readyToSubmit = false } = {}) {
@@ -2313,7 +2796,9 @@ async function runAutofillStep(
   }
 
   if (userWantsSubmit) {
-    if (probe.needsFill && !ready) {
+    // Submit is the last step, not the only one: anything the page still needs
+    // gets filled first, even when a previous pass already paused for review.
+    if (probe.needsFill) {
       if (loc.summary) await setStatus(`Uploading from ${loc.summary}...`);
       const fillRes = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
       if (fillRes?.skipped || fillRes?.ok === false) return fillRes;
@@ -2576,9 +3061,25 @@ function isHttpUrl(url) {
   return /^https?:\/\//i.test(String(url || ""));
 }
 
+/** Corporate / marketing / about pages — never treat as an application destination. */
+function isMarketingOrCorporateUrl(url) {
+  const href = String(url || "").trim();
+  if (!href) return false;
+  try {
+    const u = new URL(href);
+    const blob = `${u.hostname}${u.pathname}${u.search}`.toLowerCase();
+    return /about-us|about\/|corporate-profile|corporate-governance|board-of-directors|code-of-business|investor|investors\b|\/privacy\b|\/terms\b|media-hub|press-release|sustainability|human-rights|public-policy|contact-us|talk-with|get-in-touch|\/news\b|\/community\b|suppliers\b/i.test(
+      blob
+    );
+  } catch {
+    return /about-us|corporate-profile|corporate-governance|investor|privacy|sustainability/i.test(href);
+  }
+}
+
 function isAllowedApplyNavUrl(url) {
   const href = String(url || "").trim();
   if (!/^https?:\/\//i.test(href)) return false;
+  if (isMarketingOrCorporateUrl(href)) return false;
   try {
     const u = new URL(href);
     const host = u.hostname.toLowerCase();
@@ -2599,6 +3100,34 @@ function isAllowedApplyNavUrl(url) {
     if (/(^|\.)recruit\.zoho\./i.test(host)) return true;
     if (/(^|\.)oraclecloud\.com$/i.test(host)) return true;
     return /\/(apply|application|job-applications)\b/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Destinations Apply may open or follow after a click (incl. gateway handoff).
+ * Rejects marketing/about pages such as Halliburton corporate-profile links.
+ */
+function isPlausibleApplyDestination(url) {
+  const href = String(url || "").trim();
+  if (!isHttpUrl(href) || isDiceProfileUrl(href) || isMarketingOrCorporateUrl(href)) return false;
+  if (isAllowedApplyNavUrl(href)) return true;
+  try {
+    const u = new URL(href);
+    const host = u.hostname.toLowerCase();
+    const path = `${u.pathname || ""}${u.search || ""}`.toLowerCase();
+    if (/^(jobs|careers|career|apply|recruiting|talents?)\./i.test(host)) return true;
+    if (
+      /(^|\.)(lever\.co|ashbyhq\.com|icims\.com|jobvite\.com|workable\.com|breezy\.hr|taleo\.net|successfactors\.com|bamboohr\.com|paylocity\.com|ultipro\.com)$/i.test(
+        host
+      )
+    ) {
+      return true;
+    }
+    return /\/(job|jobs|career|careers|position|positions|requisition|vacancy|vacancies|opening|openings|apply|application)\b/i.test(
+      path
+    );
   } catch {
     return false;
   }
@@ -3235,16 +3764,16 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         continue;
       }
 
-      if (preferNewTab && isAllowedApplyNavUrl(newUrl) && !isDiceProfileUrl(newUrl)) {
+      if (preferNewTab && isPlausibleApplyDestination(newUrl) && !isDiceProfileUrl(newUrl)) {
         await chrome.tabs.update(fresh.id, { active: true }).catch(() => {});
         await waitForPageReady(fresh.id).catch(() => {});
         return { advanced: true, tabId: fresh.id, reason: "adopted_new_tab" };
       }
-      // Gateway sites (Jobright/Jobgether) hand off to an arbitrary employer ATS.
-      // Adopt whatever real page they open, as long as it isn't the gateway itself.
+      // Gateway sites (Jobright/Jobgether) hand off to an employer ATS / careers apply page.
+      // Never adopt marketing/about pages (e.g. halliburton.com/.../corporate-profile).
       if (
         gateway &&
-        isHttpUrl(newUrl) &&
+        isPlausibleApplyDestination(newUrl) &&
         !isGatewaySite(detectSiteFromUrl(newUrl)) &&
         !isDiceProfileUrl(newUrl)
       ) {
@@ -3252,7 +3781,7 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         await waitForPageReady(fresh.id).catch(() => {});
         return { advanced: true, tabId: fresh.id, reason: "adopted_gateway_tab" };
       }
-      if (isDiceProfileUrl(newUrl)) {
+      if (isDiceProfileUrl(newUrl) || isMarketingOrCorporateUrl(newUrl) || !isPlausibleApplyDestination(newUrl)) {
         await chrome.tabs.remove(fresh.id).catch(() => {});
         knownTabIds.add(fresh.id);
         continue;
@@ -3279,6 +3808,27 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
     if (!tab?.id) return { advanced: false, tabId, reason: "tab_gone" };
 
     if (tab.url && prevUrl && tab.url !== prevUrl) {
+      // Reject accidental navigations to About / Corporate / marketing pages.
+      if (isMarketingOrCorporateUrl(tab.url)) {
+        await navigateTabToUrl(tabId, prevUrl).catch(() => {});
+        return { advanced: false, tabId, reason: "rejected_marketing_nav" };
+      }
+      // If we left a known ATS host for a clearly non-apply URL, undo and keep looking.
+      try {
+        const prevHost = new URL(prevUrl).hostname.toLowerCase();
+        const nextHost = new URL(tab.url).hostname.toLowerCase();
+        const leftKnownAts =
+          isAllowedApplyNavUrl(prevUrl) ||
+          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|smartrecruiters\.com|oraclecloud\.com)$/i.test(
+            prevHost
+          );
+        if (leftKnownAts && nextHost !== prevHost && !isPlausibleApplyDestination(tab.url)) {
+          await navigateTabToUrl(tabId, prevUrl).catch(() => {});
+          return { advanced: false, tabId, reason: "rejected_offsite_nav" };
+        }
+      } catch {
+        /* ignore */
+      }
       try {
         await waitForPageReady(tabId);
       } catch {
@@ -3744,6 +4294,9 @@ async function startMultiStepApplyOnTab(
   let didClickSubmit = false;
   let lookedForEntry = false;
   let rebudgetedForLiveSite = false;
+  // Buttons the AI already picked this run, so a dead end is never clicked twice.
+  const aiButtonTried = new Set();
+  let aiButtonPicks = 0;
 
   for (let step = 0; step < stepBudget; step += 1) {
     assertNotCancelled();
@@ -3849,7 +4402,7 @@ async function startMultiStepApplyOnTab(
       if (probe.uploadsBusy) {
         for (let wait = 0; wait < 15 && probe.uploadsBusy; wait += 1) {
           await setStatus("Auto Apply: waiting for upload before Submit...");
-          await sleepMs(700);
+          await sleepMs(500);
           probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
           if (probe.applicationSuccess) break;
         }
@@ -3898,6 +4451,19 @@ async function startMultiStepApplyOnTab(
           return summary;
         }
         if (clickRes?.navigateUrl) {
+          if (
+            isMarketingOrCorporateUrl(clickRes.navigateUrl) ||
+            !isPlausibleApplyDestination(clickRes.navigateUrl)
+          ) {
+            await markReadyToSubmit(
+              (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || ""
+            );
+            summary.status = "needs_review";
+            summary.detail =
+              "Submit pointed at a non-application page — left the tab open so you can finish.";
+            summary.tabId = currentTabId;
+            return summary;
+          }
           await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
         }
         const finished = await finishSubmittedApplication(currentTabId, {
@@ -3936,6 +4502,38 @@ async function startMultiStepApplyOnTab(
           (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
         );
         if (probe.best?.action?.type !== "entry" && !retryUrl) {
+          // No recognisable Apply button ("I'm interested", "Apply for this job"...):
+          // let AI read the page's buttons before giving up on this job.
+          if (aiButtonPicks < 3 && !probe.blockedReason) {
+            aiButtonPicks += 1;
+            const beforeAiUrl =
+              (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || "";
+            const ai = await tryAiApplyButton(currentTabId, {
+              stage: "entry",
+              preferNewTab: useNewTab,
+              gateway: isGatewaySite(liveSite),
+              tried: aiButtonTried
+            });
+            if (ai.advanced) {
+              currentTabId = ai.tabId;
+              summary.tabId = currentTabId;
+              summary.tabUrl =
+                (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+              summary.steps = step + 1;
+              lookedForEntry = false;
+              if (isDiceProfileUrl(summary.tabUrl) || isMarketingOrCorporateUrl(summary.tabUrl)) {
+                if (isMarketingOrCorporateUrl(summary.tabUrl) && beforeAiUrl) {
+                  await navigateTabToUrl(currentTabId, beforeAiUrl).catch(() => {});
+                }
+                summary.status = "needs_review";
+                summary.detail = isMarketingOrCorporateUrl(summary.tabUrl)
+                  ? `AI clicked "${ai.text}" and opened a company About / Corporate page instead of Apply.`
+                  : `AI clicked "${ai.text}" and landed on Dice Profile instead of the application.`;
+                return summary;
+              }
+              continue;
+            }
+          }
           summary.status = "skipped";
           summary.detail =
             probe.blockedReason ||
@@ -4081,8 +4679,8 @@ async function startMultiStepApplyOnTab(
     summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
 
     if (Number(fillRes?.uploadedCount || 0) > 0) {
-      // Dice keeps processing the PDF after the input change; wait before Next.
-      await sleepMs(site === "dice" ? 2500 : 1200);
+      // Give the ATS a short beat to accept the PDF before Next.
+      await sleepMs(500);
     }
 
     probe = await getApplyActionFromTab(currentTabId).catch(() => ({
@@ -4103,7 +4701,7 @@ async function startMultiStepApplyOnTab(
       !probe.diceSubmitPage
     ) {
       for (let wait = 0; wait < 12; wait += 1) {
-        await sleepMs(700);
+        await sleepMs(500);
         if (probe.needsFill && !probe.uploadsBusy) {
           await setStatus("Auto Apply: finishing remaining fields before Next...");
           const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
@@ -4175,6 +4773,30 @@ async function startMultiStepApplyOnTab(
     }
 
     if (!probe.best) {
+      // The step is filled but no button reads like Next / Continue / Submit.
+      // Let AI pick the one that continues; a Submit pick stops for review.
+      if (probe.anyForm && aiButtonPicks < 3) {
+        aiButtonPicks += 1;
+        const ai = await tryAiApplyButton(currentTabId, {
+          stage: "next",
+          gateway: isGatewaySite(liveSite),
+          tried: aiButtonTried
+        });
+        if (ai.advanced) {
+          currentTabId = ai.tabId;
+          summary.tabId = currentTabId;
+          summary.tabUrl =
+            (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+          noAdvance = 0;
+          continue;
+        }
+        if (ai.submitCandidate) {
+          summary.status = "ready_for_review";
+          summary.detail = `Filled the form. "${ai.text}" looks like the final submit button — review the form, then click it.`;
+          summary.tabId = currentTabId;
+          return summary;
+        }
+      }
       summary.status = probe.anyForm ? "ready_for_review" : "needs_review";
       summary.detail = probe.anyForm
         ? "Filled the form. No Next/Submit button detected — please review and submit."
@@ -4212,6 +4834,19 @@ async function startMultiStepApplyOnTab(
         return summary;
       }
       if (clickRes?.navigateUrl) {
+        if (
+          isMarketingOrCorporateUrl(clickRes.navigateUrl) ||
+          !isPlausibleApplyDestination(clickRes.navigateUrl)
+        ) {
+          await markReadyToSubmit(
+            (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || ""
+          );
+          summary.status = "needs_review";
+          summary.detail =
+            "Submit pointed at a non-application page — left the tab open so you can finish.";
+          summary.tabId = currentTabId;
+          return summary;
+        }
         await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
       }
       const finished = await finishSubmittedApplication(currentTabId, {
@@ -4251,7 +4886,7 @@ async function startMultiStepApplyOnTab(
 
     if (clickRes?.deferred === "uploads-busy") {
       await setStatus("Auto Apply: upload still running — waiting before Next...");
-      await sleepMs(3000);
+      await sleepMs(500);
       clickRes = await sendMessageToTab(
         currentTabId,
         { type: "click_apply_action", preferredType: actionType },
@@ -4286,7 +4921,7 @@ async function startMultiStepApplyOnTab(
       summary.tabId = finished.tabId;
       return summary;
     }
-    if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
+    if (clickRes?.navigateUrl && isPlausibleApplyDestination(clickRes.navigateUrl)) {
       if (useNewTab || clickRes.openInNewTab) {
         const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, currentTabId);
         if (newId) currentTabId = newId;
@@ -4303,6 +4938,14 @@ async function startMultiStepApplyOnTab(
     currentTabId = advanced.tabId;
     summary.tabId = currentTabId;
     summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
+
+    if (isMarketingOrCorporateUrl(summary.tabUrl)) {
+      if (prevUrl) await navigateTabToUrl(currentTabId, prevUrl).catch(() => {});
+      summary.status = "needs_review";
+      summary.detail =
+        "Stopped a navigation to a company About / Corporate page (not an application step).";
+      return summary;
+    }
 
     if (isDiceProfileUrl(summary.tabUrl)) {
       summary.status = "needs_review";
@@ -4726,6 +5369,7 @@ ul { margin-top: 0 !important; margin-bottom: 6px !important; }
 li { margin-bottom: 3px !important; }
 h2 + p, h2 + ul, h2 + div, h2 + h3 { margin-top: 3px !important; }
 h2 + p.education { margin-top: 1.15em !important; }
+p.education + p.education { margin-top: 5px !important; }
 h3 + p, h3 + ul, .role-meta + p { margin-top: 3px !important; }
 .role-meta + ul { margin-top: 10px !important; }
 a, a:visited {
@@ -4907,7 +5551,10 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
   const pdfBase64 = await htmlToPdfBase64(html);
 
   const personName = String(resumeData?.name || "").trim() || "Candidate";
-  const folderName = await buildJobFolderName(jobMeta, personName);
+  // A resave targets the folder this job already owns; only a first save takes
+  // the next id in the sequence.
+  const reuseFolder = extractFolderNameFromSaveMeta(jobMeta.overwriteFolderName || "");
+  const folderName = reuseFolder || (await buildJobFolderName(jobMeta, personName));
   const resumeFileBase = sanitizePathSegment(personName.replace(/\s+/g, "_") || "Resume", "Resume");
 
   const jdTxt = buildJdTxtContent({
@@ -5325,7 +5972,7 @@ async function saveResumeAndCoverLetter(
     coverLetterCreated ? " + Cover_Letter.pdf" : ""
   } + jd.txt + HTML)${coverLetterWarning}`;
 
-  if (jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) {
+  if ((jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) && !jobMeta.skipSheetAppend) {
     assertNotCancelled();
     await setStatus("Appending row to Google Sheet...");
     try {
@@ -6169,6 +6816,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "kb_get") {
+    (async () => {
+      try {
+        const profileId = String(message.profileId || "").trim();
+        if (!profileId) {
+          safeSendResponse(sendResponse, { ok: false, error: "Pick a profile first." });
+          return;
+        }
+        const status = await getKbStatus(profileId);
+        safeSendResponse(sendResponse, {
+          ok: true,
+          kb: status.kb,
+          stale: status.stale,
+          qaCount: status.sources.qaRows.length,
+          profileFieldCount: status.sources.profile.length
+        });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "kb_rebuild") {
+    (async () => {
+      try {
+        const profileId = String(message.profileId || "").trim();
+        if (!profileId) {
+          safeSendResponse(sendResponse, { ok: false, error: "Pick a profile first." });
+          return;
+        }
+        const { apiKey, model } = await getOpenAiFormSettings();
+        const status = await getKbStatus(profileId);
+        const { kb, usage, error } = await rebuildProfileKb({
+          profileId,
+          apiKey,
+          model,
+          sources: status.sources
+        });
+        await logKbUsage(model, usage);
+        safeSendResponse(sendResponse, {
+          ok: true,
+          kb,
+          stale: false,
+          qaCount: status.sources.qaRows.length,
+          profileFieldCount: status.sources.profile.length,
+          ...(error ? { warning: error } : null)
+        });
+      } catch (err) {
+        safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
   if (message?.type === "easy_apply_answer_questions") {
     (async () => {
       try {
@@ -6332,7 +7034,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ? message.jobIds.map((id) => String(id || "").trim()).filter(Boolean)
       : [];
     const shared = message.jobMeta || {};
-    const pauseMs = Math.max(0, Number(message.pauseMs) || 3000);
+    const pauseMs = Math.max(0, Number(message.pauseMs) || 500);
 
     if (!profileId) {
       safeSendResponse(sendResponse, { ok: false, error: "Select a profile first." });
@@ -6983,6 +7685,101 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+/**
+ * The job the Preview page is showing.
+ *
+ * Preview mode parks a complete `preview_pending_meta` at generation time. With
+ * preview mode off nothing is parked, but the Preview page still offers Revise
+ * and Resave — so rebuild the same shape from the panel's last job fields plus
+ * the selected imported job. Without this a resave landed in a
+ * "Candidate - Company - Role" folder with no JD and no sheet settings.
+ */
+async function resolvePreviewJobContext() {
+  const stored = await chrome.storage.local.get([
+    "preview_pending_meta",
+    "preview_pending_save",
+    "selected_profile_id",
+    "selected_template_id",
+    "generate_resume_only",
+    "last_job_title",
+    "last_company_name",
+    "last_jd_link",
+    "last_jd_text",
+    "last_output_dir",
+    "last_ats_report",
+    "imported_jobs_selected_id",
+    "imported_jobs_by_id",
+    "spreadsheet_url",
+    "sheets_web_app_url",
+    "sheets_sheet_name",
+    "track_application_status"
+  ]);
+
+  const pending =
+    stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
+      ? stored.preview_pending_meta
+      : {};
+  const jobs =
+    stored.imported_jobs_by_id && typeof stored.imported_jobs_by_id === "object"
+      ? stored.imported_jobs_by_id
+      : {};
+  const importedJobId = String(
+    pending.importedJobId || stored.imported_jobs_selected_id || ""
+  ).trim();
+  const job = importedJobId ? jobs[importedJobId] : null;
+  const atsReport =
+    stored.last_ats_report && typeof stored.last_ats_report === "object"
+      ? stored.last_ats_report
+      : null;
+
+  const jobMeta = {
+    jobTitle: pending.jobTitle || job?.jobTitle || stored.last_job_title || "",
+    companyName: pending.companyName || job?.companyName || stored.last_company_name || "",
+    jdLink: pending.jdLink || job?.jdLink || stored.last_jd_link || "",
+    jdText: String(pending.jdText || job?.jdText || stored.last_jd_text || "").trim(),
+    outputDir: pending.outputDir || "",
+    spreadsheetUrl: pending.spreadsheetUrl || stored.spreadsheet_url || "",
+    sheetName: pending.sheetName || stored.sheets_sheet_name || "",
+    sheetsWebAppUrl: pending.sheetsWebAppUrl || stored.sheets_web_app_url || "",
+    templateId: pending.templateId || stored.selected_template_id || DEFAULT_TEMPLATE_ID,
+    resumeOnly: pending.resumeOnly === true || stored.generate_resume_only === true,
+    trackApplicationStatus:
+      pending.trackApplicationStatus === true || stored.track_application_status === true,
+    importedJobId,
+    workArrangement: pending.workArrangement || job?.workArrangement || "",
+    employmentType: pending.employmentType || job?.employmentType || "",
+    salaryMin: pending.salaryMin || job?.salaryMin || "",
+    salaryMax: pending.salaryMax || job?.salaryMax || "",
+    datePosted: pending.datePosted || job?.datePosted || ""
+  };
+
+  // Already on disk: the pending meta says so, the job is marked generated, or
+  // nothing is waiting to be saved (preview mode off saves during generation).
+  const alreadySaved =
+    pending.alreadySaved === true ||
+    Boolean(job?.hasGeneratedResume) ||
+    stored.preview_pending_save !== true;
+  const savedFolder =
+    extractFolderNameFromSaveMeta(pending.savedFolder || "") ||
+    extractFolderNameFromSaveMeta(job?.resumeFolder || "") ||
+    extractFolderNameFromSaveMeta(stored.last_output_dir || "");
+
+  return {
+    pending,
+    job,
+    jobMeta,
+    alreadySaved,
+    savedFolder,
+    atsScore:
+      Number(pending.atsScore) ||
+      Number(atsReport?.finalScore ?? atsReport?.score) ||
+      Number(job?.atsScore) ||
+      0,
+    profileId: String(pending.profileId || stored.selected_profile_id || "").trim(),
+    resumeOnly: jobMeta.resumeOnly
+  };
+}
+
   if (message?.type === "preview_regenerate_resume") {
     (async () => {
       try {
@@ -6991,15 +7788,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "Enter revision instructions first." });
           return;
         }
-        const stored = await chrome.storage.local.get([
-          "last_resume_json",
-          "last_jd_text",
-          "last_job_title",
-          "last_company_name",
-          "preview_pending_meta",
-          "selected_profile_id",
-          "selected_template_id"
-        ]);
+        const stored = await chrome.storage.local.get("last_resume_json");
         const current =
           stored.last_resume_json && typeof stored.last_resume_json === "object"
             ? stored.last_resume_json
@@ -7008,20 +7797,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "No resume JSON to update. Generate first." });
           return;
         }
-        const pending =
-          stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
-            ? stored.preview_pending_meta
-            : {};
-        const jdText = String(pending.jdText || stored.last_jd_text || "").trim();
-        const jobTitle = String(pending.jobTitle || stored.last_job_title || "").trim();
-        const companyName = String(pending.companyName || stored.last_company_name || "").trim();
+        // Works with preview mode on or off — the context resolver rebuilds the
+        // job details when nothing was parked at generation time.
+        const context = await resolvePreviewJobContext();
+        const pending = context.pending;
+        const jdText = context.jobMeta.jdText;
+        const jobTitle = context.jobMeta.jobTitle;
+        const companyName = context.jobMeta.companyName;
 
-        const previewTemplateId =
-          pending.templateId || stored.selected_template_id || DEFAULT_TEMPLATE_ID;
+        const previewTemplateId = message.templateId || context.jobMeta.templateId;
 
         // Same candidate information and JD-matched project manifest the first
         // generation used, so an update stays anchored instead of drifting.
-        const previewProfileId = pending.profileId || stored.selected_profile_id || "";
+        const previewProfileId = context.profileId;
         const previewProjects = await getProfileProjectContext(previewProfileId, {
           jdText,
           jobTitle
@@ -7101,9 +7889,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         const rawText = JSON.stringify(data, null, 2);
+        // Park a complete meta so Save works even when preview mode never ran,
+        // and remember that this resume is already on disk so the save replaces
+        // it instead of writing a second folder.
         const nextPending = {
           ...pending,
-          atsScore: Number(atsReport?.finalScore ?? atsReport?.score) || pending.atsScore || 0
+          ...context.jobMeta,
+          profileId: previewProfileId,
+          templateId: previewTemplateId,
+          resumeOnly: context.resumeOnly,
+          alreadySaved: context.alreadySaved,
+          savedFolder: context.savedFolder,
+          atsScore:
+            Number(atsReport?.finalScore ?? atsReport?.score) || context.atsScore || 0
         };
         await chrome.storage.local.set({
           last_resume_json: data,
@@ -7140,14 +7938,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: saveBusy });
           return;
         }
-        const stored = await chrome.storage.local.get([
-          "last_resume_json",
-          "last_response",
-          "preview_pending_meta",
-          "selected_profile_id",
-          "selected_template_id",
-          "generate_resume_only"
-        ]);
+        const stored = await chrome.storage.local.get(["last_resume_json", "last_response"]);
         const resumeData =
           stored.last_resume_json && typeof stored.last_resume_json === "object"
             ? stored.last_resume_json
@@ -7156,31 +7947,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: "No resume to save. Generate first." });
           return;
         }
-        const pending =
-          stored.preview_pending_meta && typeof stored.preview_pending_meta === "object"
-            ? stored.preview_pending_meta
-            : {};
-        const profileId = String(pending.profileId || stored.selected_profile_id || "").trim();
-        const resumeOnly =
-          pending.resumeOnly === true || stored.generate_resume_only === true;
+        // Preview mode off still gets a full job context, so Resave lands in the
+        // right folder with the right JD instead of a bare "Company - Role" one.
+        const context = await resolvePreviewJobContext();
+        const pending = context.pending;
+        const profileId = context.profileId;
+        const resumeOnly = context.resumeOnly;
         const jobMeta = {
-          jobTitle: pending.jobTitle || "",
-          companyName: pending.companyName || "",
-          jdLink: pending.jdLink || "",
-          jdText: pending.jdText || "",
-          outputDir: pending.outputDir || "",
-          spreadsheetUrl: pending.spreadsheetUrl || "",
-          sheetName: pending.sheetName || "",
-          sheetsWebAppUrl: pending.sheetsWebAppUrl || "",
-          templateId: message.templateId || pending.templateId || stored.selected_template_id || "",
-          resumeOnly,
-          trackApplicationStatus: pending.trackApplicationStatus === true,
-          importedJobId: pending.importedJobId || "",
-          workArrangement: pending.workArrangement || "",
-          employmentType: pending.employmentType || "",
-          salaryMin: pending.salaryMin || "",
-          salaryMax: pending.salaryMax || "",
-          datePosted: pending.datePosted || ""
+          ...context.jobMeta,
+          templateId: message.templateId || context.jobMeta.templateId,
+          // Replace the PDFs already saved for this job rather than writing a
+          // second numbered folder next to them, and never add a duplicate
+          // tracking row for a job whose row already exists.
+          overwriteFolderName: context.alreadySaved ? context.savedFolder : "",
+          skipSheetAppend: context.alreadySaved
         };
 
         // #region agent log
@@ -7219,8 +7999,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         });
 
         if (jobMeta.importedJobId) {
+          const liveJob = (await getImportedJobsById())[jobMeta.importedJobId];
           await setImportedJobStatus(jobMeta.importedJobId, {
-            status: "generated",
+            // A resave must not drag a submitted application back to "generated".
+            status: liveJob?.status === "completed" ? "completed" : "generated",
             statusDetail: saved?.status || "Resume saved from Preview.",
             profileId,
             patch: {
@@ -7228,7 +8010,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               resumeFolder: saved?.folderName || "",
               resumeFileName: saved?.resumeFileName || "",
               coverLetterFileName: saved?.coverLetterFileName || "",
-              atsScore: Number(pending.atsScore) || undefined
+              atsScore: Number(context.atsScore) || undefined
             }
           });
         }
@@ -7251,7 +8033,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         await chrome.storage.local.set({
           preview_pending_save: false,
-          generation_running: false
+          generation_running: false,
+          // Remember where this resume now lives so the next Resave overwrites it.
+          preview_pending_meta: {
+            ...pending,
+            ...jobMeta,
+            profileId,
+            alreadySaved: true,
+            savedFolder: saved?.folderName || context.savedFolder || "",
+            atsScore: context.atsScore || 0
+          }
         });
         await chrome.storage.local.remove("ui_open_preview");
 

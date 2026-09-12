@@ -172,6 +172,54 @@ export async function findQaMatch(profileId, question, { threshold = 0.82 } = {}
   return null;
 }
 
+/** Every record for a profile plus the shared bank (profileId ""). */
+export async function getQaForProfileAndShared(profileId = "") {
+  const ids = profileId ? [profileId, ""] : [""];
+  return getRecordsForProfiles([...new Set(ids)]);
+}
+
+/**
+ * The closest stored answers for many questions in one read. The form planner
+ * asks about a whole page at once, so the bank is loaded a single time and
+ * every field is scored against it.
+ * @param {Array<{ id: string, text: string }>} questions
+ * @returns {Promise<Map<string, Array<{ record: object, score: number }>>>}
+ */
+export async function findQaMatchesBatch(
+  profileId,
+  questions = [],
+  { limit = 3, threshold = 0.5 } = {}
+) {
+  const out = new Map();
+  const list = (questions || []).filter((q) => q?.id && normalizeQuestion(q.text));
+  if (!list.length) return out;
+  const records = (await getQaForProfileAndShared(profileId)).filter((r) => r?.answer);
+  if (!records.length) return out;
+  const normed = records.map((rec) => ({
+    rec,
+    norm: rec.questionNorm || normalizeQuestion(rec.question)
+  }));
+
+  for (const q of list) {
+    const norm = normalizeQuestion(q.text);
+    const scored = [];
+    for (const { rec, norm: recNorm } of normed) {
+      const score = questionSimilarity(norm, recNorm);
+      if (score >= threshold) scored.push({ record: rec, score });
+    }
+    if (!scored.length) continue;
+    // Equal scores: the profile's own answer beats the shared bank, newer beats older.
+    scored.sort(
+      (a, b) =>
+        b.score - a.score ||
+        Number(Boolean(b.record.profileId)) - Number(Boolean(a.record.profileId)) ||
+        Number(b.record.updatedAt || 0) - Number(a.record.updatedAt || 0)
+    );
+    out.set(q.id, scored.slice(0, limit));
+  }
+  return out;
+}
+
 /**
  * Insert or update a Q&A. When a matching normalized question already exists for
  * the same profile, its answer is refreshed instead of duplicated.

@@ -3,6 +3,8 @@
  * from last resume JSON + saved applicant info.
  */
 
+import { normalizeEducation } from "./templates/shared.js";
+
 const MONTHS = [
   { num: "01", names: ["January", "Jan"] },
   { num: "02", names: ["February", "Feb"] },
@@ -201,37 +203,52 @@ export function buildWorkHistory(resumeData = {}) {
     .filter(Boolean);
 }
 
+/**
+ * One entry per school, so a resume listing two universities fills two
+ * education groups on the application form. Saved applicant info describes the
+ * primary school only, so it fills gaps in the first entry alone; any further
+ * school comes from the resume JSON as-is.
+ */
 export function buildEducationHistory(resumeData = {}, applicantInfo = {}) {
-  const edu = resumeData?.education && typeof resumeData.education === "object" ? resumeData.education : {};
-  const school = String(edu.school || applicantInfo.schoolName || "").trim();
-  const degree = String(edu.degree || "").trim();
-  const fieldOfStudy = String(applicantInfo.fieldOfStudy || "").trim() || fieldOfStudyFromDegree(degree);
+  const schools = normalizeEducation(resumeData?.education);
+  const list = schools.length ? schools : [{ school: "", degree: "", year: "" }];
 
-  const parsedYear = parseDateRange(edu.year || "");
-  const gradRaw = String(applicantInfo.graduationDate || "").trim();
-  const gradParts = gradRaw.match(/^(\d{4})-(\d{1,2})/);
-  const endYear = gradParts?.[1] || parsedYear.endYear || parsedYear.startYear || String(edu.year || "").replace(/\D/g, "").slice(0, 4);
-  const endMonth = gradParts?.[2] || parsedYear.endMonth || "05";
+  return list
+    .map((edu, position) => {
+      const primary = position === 0;
+      const school = String(edu.school || (primary ? applicantInfo.schoolName : "") || "").trim();
+      const degree = String(edu.degree || "").trim();
+      const fieldOfStudy =
+        (primary ? String(applicantInfo.fieldOfStudy || "").trim() : "") ||
+        fieldOfStudyFromDegree(degree);
 
-  if (!school && !degree && !endYear) return [];
+      const parsedYear = parseDateRange(edu.year || "");
+      const gradRaw = primary ? String(applicantInfo.graduationDate || "").trim() : "";
+      const gradParts = gradRaw.match(/^(\d{4})-(\d{1,2})/);
+      const endYear = gradParts?.[1] || parsedYear.endYear || parsedYear.startYear || String(edu.year || "").replace(/\D/g, "").slice(0, 4);
+      const endMonth = gradParts?.[2] || parsedYear.endMonth || "05";
 
-  const span = defaultEducationSpan(degree || applicantInfo.highestDegree, endYear, endMonth);
-  const startMonth = parsedYear.startMonth || span.startMonth || "08";
-  const startYear = parsedYear.startYear || span.startYear;
-  const start = dateBundle(startMonth, startYear);
-  const end = dateBundle(endMonth, endYear);
+      if (!school && !degree && !endYear) return null;
 
-  return [
-    {
-      index: 0,
-      school,
-      degree,
-      fieldOfStudy,
-      current: false,
-      start,
-      end
-    }
-  ];
+      const span = defaultEducationSpan(
+        degree || (primary ? applicantInfo.highestDegree : ""),
+        endYear,
+        endMonth
+      );
+      const startMonth = parsedYear.startMonth || span.startMonth || "08";
+      const startYear = parsedYear.startYear || span.startYear;
+
+      return {
+        school,
+        degree,
+        fieldOfStudy,
+        current: false,
+        start: dateBundle(startMonth, startYear),
+        end: dateBundle(endMonth, endYear)
+      };
+    })
+    .filter(Boolean)
+    .map((entry, index) => ({ index, ...entry }));
 }
 
 export function hasFormHistory(workHistory = [], educationHistory = []) {

@@ -5,6 +5,7 @@ import { navyTechnicalSerifTemplate } from "./navy-technical-serif.js";
 import { US_MARKET_TEMPLATES } from "./us-market.js";
 import {
   normalizeCerts,
+  normalizeEducation,
   normalizeExperience,
   normalizeSkills,
   normalizeTechnicalSummary
@@ -50,6 +51,9 @@ export function normalizeResumeData(data) {
   );
   const normalized = {
     ...data,
+    // Always an array, so every template renders one or several schools the
+    // same way regardless of which shape the model returned.
+    education: normalizeEducation(data.education),
     experience: normalizeExperience(data.experience),
     skills: normalizeSkills(data.skills),
     certifications: normalizeCerts(data.certifications),

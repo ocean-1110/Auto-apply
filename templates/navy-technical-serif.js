@@ -2,6 +2,7 @@ import {
   contactLine,
   escapeHtml,
   normalizeCerts,
+  normalizeEducation,
   normalizeSkills,
   normalizeTechnicalSummary,
   renderOptionalSection,
@@ -90,18 +91,7 @@ ${body}
 
 /** Accepts the standard `{ school, degree, year }` object or an array of them. */
 function renderEducation(education) {
-  const list = (Array.isArray(education) ? education : [education])
-    .filter((e) => e && typeof e === "object")
-    .map((e) => ({
-      school: String(e.school || e.university || e.institution || "").trim(),
-      degree: String(e.degree || e.qualification || "").trim(),
-      year: String(e.year || e.years || e.dates || "").trim()
-    }))
-    .filter((e) => e.school || e.degree || e.year);
-
-  if (!list.length) return "";
-
-  return list
+  return normalizeEducation(education)
     .map(
       (e) => `<div class="education">
   <div class="edu-header">

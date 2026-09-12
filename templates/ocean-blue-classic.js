@@ -2,6 +2,7 @@ import {
   contactLine,
   escapeHtml,
   normalizeCerts,
+  normalizeEducation,
   renderOptionalSection,
   renderSkills,
   wrapHtmlDocument
@@ -50,19 +51,19 @@ ${bullets}
     .join("\n");
 }
 
-function renderEducationAlbert(edu = {}) {
-  const school = escapeHtml(edu.school || "");
-  const degree = escapeHtml(String(edu.degree || "").trim());
-  const year = escapeHtml(String(edu.year || "").trim());
-  if (!school && !degree && !year) return "";
-
-  return `<div class="education">
+/** One block per school — the JSON may carry a single object or an array. */
+function renderEducationAlbert(education) {
+  return normalizeEducation(education)
+    .map(
+      (edu) => `<div class="education">
   <div class="edu-header">
-    <span class="edu-degree">${degree}</span>
-    <span class="edu-year">${year}</span>
+    <span class="edu-degree">${escapeHtml(edu.degree)}</span>
+    <span class="edu-year">${escapeHtml(edu.year)}</span>
   </div>
-  ${school ? `<p class="edu-school">${school}</p>` : ""}
-</div>`;
+  ${edu.school ? `<p class="edu-school">${escapeHtml(edu.school)}</p>` : ""}
+</div>`
+    )
+    .join("\n");
 }
 
 function renderCertsAlbert(certs) {
@@ -333,7 +334,7 @@ export const oceanBlueClassicTemplate = {
   render(data) {
     const name = escapeHtml(data.name || "Resume");
     const headline = escapeHtml(data.headline || "");
-    const edu = data.education || {};
+    const edu = data.education;
 
     return wrapHtmlDocument({
       title: `${name} - Resume`,

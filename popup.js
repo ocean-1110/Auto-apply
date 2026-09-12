@@ -98,6 +98,7 @@ const qaBankSectionEl = document.getElementById("qaBankSection");
 const qaBankNoteEl = document.getElementById("qaBankNote");
 const qaOpenEditorBtn = document.getElementById("qaOpenEditorBtn");
 const qaLearnToggleEl = document.getElementById("qaLearnToggle");
+const aiFormPlanToggleEl = document.getElementById("aiFormPlanToggle");
 const manualQuestionEl = document.getElementById("manualQuestion");
 const manualAnswerEl = document.getElementById("manualAnswer");
 const generateAiAnswerBtn = document.getElementById("generateAiAnswerBtn");
@@ -258,18 +259,57 @@ function renderAtsBadge(report) {
   if (atsScoreTooltipEl) atsScoreTooltipEl.textContent = formatAtsTooltip(report);
 }
 
-function renderAtsForCurrentJob(fallbackReport) {
-  const job = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
-  if (job?.atsReport || Number.isFinite(Number(job?.atsScore))) {
-    renderAtsBadge(job.atsReport || { score: job.atsScore, finalScore: job.atsScore });
-    return;
+/**
+ * Last score seen in storage. Several callers render the badge without having
+ * just read storage (the save-banner refresh, job-card clicks), and the job
+ * record they read from the in-memory cache can still be a tick behind the
+ * run that just finished — without this the badge blanked out right after a
+ * generation completed.
+ */
+let lastAtsReport = null;
+
+/**
+ * True only while a generation is actually in flight. The poll owns it, and
+ * every render path honours it, so a mid-run save-banner refresh can no longer
+ * flash the previous job's score.
+ */
+let atsBadgeSuppressed = false;
+
+function setAtsBadgeSuppressed(suppressed) {
+  atsBadgeSuppressed = Boolean(suppressed);
+  if (atsBadgeSuppressed && atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
+}
+
+function rememberAtsReport(report) {
+  lastAtsReport = report && typeof report === "object" ? report : null;
+  return lastAtsReport;
+}
+
+/**
+ * The stored report for a job, but only when it really carries a score — a
+ * failed scoring pass leaves an atsReport object behind with no number in it,
+ * and treating that as authoritative used to hide the badge.
+ */
+function atsReportForJob(job) {
+  const score = jobFinalAtsScore(job);
+  if (score == null) return null;
+  const report = job?.atsReport;
+  if (report && typeof report === "object") {
+    const reported = Number(report.finalScore ?? report.score);
+    if (Number.isFinite(reported) && reported > 0) return report;
   }
-  renderAtsBadge(fallbackReport);
+  return { score, finalScore: score, source: "stored" };
+}
+
+function renderAtsForCurrentJob(fallbackReport) {
+  if (atsBadgeSuppressed) return;
+  const job = importedJobsSelectedId ? importedJobsById[importedJobsSelectedId] : null;
+  renderAtsBadge(atsReportForJob(job) || fallbackReport || lastAtsReport);
 }
 
 async function refreshAtsBadge() {
   const data = await chrome.storage.local.get("last_ats_report");
-  renderAtsForCurrentJob(data.last_ats_report);
+  renderAtsForCurrentJob(rememberAtsReport(data.last_ats_report));
 }
 
 async function getSheetSettings() {
@@ -711,14 +751,11 @@ async function refreshSaveBannerForCurrentJob() {
     } else {
       hideSaveBanner();
     }
-    renderAtsForCurrentJob(null);
-    const score = jobFinalAtsScore(job);
-    if (score != null) {
-      const report =
-        job.atsReport && typeof job.atsReport === "object"
-          ? job.atsReport
-          : { score, finalScore: score, source: "stored" };
-      chrome.storage.local.set({ last_ats_report: report }).catch(() => {});
+    const jobReport = atsReportForJob(job);
+    if (jobReport) rememberAtsReport(jobReport);
+    renderAtsForCurrentJob();
+    if (jobReport) {
+      chrome.storage.local.set({ last_ats_report: jobReport }).catch(() => {});
     }
     await refreshCopyResumePathBtn();
     return;
@@ -1468,7 +1505,7 @@ async function batchApplySelectedJobs() {
     profileId: collected.profileId,
     jobIds,
     jobMeta: collected.jobMeta,
-    pauseMs: 3000
+    pauseMs: 500
   });
   if (!res?.ok) {
     generationStartPending = false;
@@ -1912,6 +1949,7 @@ async function loadSettings() {
     "ui_ai_qa_section_open",
     "ui_qa_bank_section_open",
     "qa_learn_enabled",
+    "ai_form_plan_enabled",
     "imported_jobs_filter",
     "scraped_job_meta",
     "generate_resume_only",
@@ -1935,6 +1973,7 @@ async function loadSettings() {
   if (aiQaSectionEl) aiQaSectionEl.open = Boolean(data.ui_ai_qa_section_open);
   if (qaBankSectionEl) qaBankSectionEl.open = Boolean(data.ui_qa_bank_section_open);
   if (qaLearnToggleEl) qaLearnToggleEl.checked = data.qa_learn_enabled !== false;
+  if (aiFormPlanToggleEl) aiFormPlanToggleEl.checked = data.ai_form_plan_enabled !== false;
   if (previewModeToggleEl) {
     previewModeToggleEl.checked = data.preview_mode_enabled === true;
   }
@@ -2712,6 +2751,8 @@ async function resetWorkflow() {
     await clearJobFields();
     wasGenerationRunning = false;
     generationStartPending = false;
+    setAtsBadgeSuppressed(false);
+    rememberAtsReport(null);
     renderAtsBadge(null);
     setStatus("Cleared. Ready for the next job.");
     setBusy(false);
@@ -3010,6 +3051,15 @@ qaLearnToggleEl?.addEventListener("change", () => {
   chrome.storage.local.set({ qa_learn_enabled: enabled }).catch(() => {});
   setStatus(enabled ? "Learn mode on — typed answers will be saved." : "Learn mode off.");
 });
+aiFormPlanToggleEl?.addEventListener("change", () => {
+  const enabled = Boolean(aiFormPlanToggleEl.checked);
+  chrome.storage.local.set({ ai_form_plan_enabled: enabled }).catch(() => {});
+  setStatus(
+    enabled
+      ? "AI reads the whole form and answers every field on Apply."
+      : "AI form reader off — Apply uses the Q&A bank first, then AI one question at a time."
+  );
+});
 qaBankSectionEl?.addEventListener("toggle", () => {
   if (qaBankSectionEl.open) refreshQaBank().catch(() => {});
 });
@@ -3233,12 +3283,13 @@ panelPollTimer = setInterval(async () => {
     const cancelled = /\bcancel/i.test(statusText);
     const generationBusy = !cancelled && (running || generationStartPending);
 
+    setAtsBadgeSuppressed(generationBusy);
+
     if (running && !cancelled) {
       generationStartPending = false;
       wasGenerationRunning = true;
       updateGenerationProgress({ running: true, statusText });
       setBusy(true);
-      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
     } else if (generationStartPending && !cancelled) {
       // Keep the local "Starting..." UI until the service worker flips the flag.
       updateGenerationProgress({
@@ -3246,7 +3297,6 @@ panelPollTimer = setInterval(async () => {
         statusText: statusText || "Starting resume generation..."
       });
       setBusy(true);
-      if (atsScoreBadgeEl) atsScoreBadgeEl.hidden = true;
     } else if (cancelled) {
       generationStartPending = false;
       wasGenerationRunning = false;
@@ -3273,12 +3323,10 @@ panelPollTimer = setInterval(async () => {
       setBusy(false);
     }
 
-    // The badge is hidden while a run is in flight. Re-render it in every other
-    // state — including Apply, which generates a resume mid-run and used to
-    // leave the score hidden until the panel was reopened.
-    if (!generationBusy) {
-      renderAtsForCurrentJob(data.last_ats_report);
-    }
+    // Re-render in every state that is not a live run — including Apply, which
+    // generates a resume mid-run and used to leave the score hidden until the
+    // panel was reopened.
+    renderAtsForCurrentJob(rememberAtsReport(data.last_ats_report));
 
     // While a gesture is pending, the click/keydown handler drives the retry.
     if (data.pending_fs_write && !awaitingFolderPermission) {
@@ -3300,6 +3348,9 @@ panelPollTimer = setInterval(async () => {
         if (!importedJobsById[id]) importedJobsChecked.delete(id);
       }
       renderImportedJobs();
+      // The freshly generated job's score arrives with this refresh, after the
+      // render above ran against the previous snapshot.
+      renderAtsForCurrentJob();
     } else if (nextSelected !== importedJobsSelectedId) {
       importedJobsSelectedId = nextSelected;
       if (data.imported_jobs_by_id) importedJobsById = data.imported_jobs_by_id;

@@ -1,4 +1,4 @@
-import { normalizeExperience, normalizeSkills } from "./templates/shared.js";
+import { normalizeEducation, normalizeExperience, normalizeSkills } from "./templates/shared.js";
 
 const EXPECTED_BULLET_COUNTS = [
   { match: /sfa\s*solutions/i, count: 6 },
@@ -256,7 +256,8 @@ export function isUsableResumeJson(data) {
   if (!data || typeof data !== "object") return false;
   if (!String(data.name || "").trim()) return false;
   if (!String(data.profile || "").trim() || String(data.profile).length < 80) return false;
-  if (!data.education || !String(data.education.school || "").trim()) return false;
+  // One school or an array of them — at least one needs a school name.
+  if (!normalizeEducation(data.education).some((edu) => edu.school)) return false;
   if (countRenderableSkills(data.skills) < 2) return false;
   if (!Array.isArray(data.experience) || data.experience.length < 6) return false;
   return totalExperienceBullets(data) >= 18;

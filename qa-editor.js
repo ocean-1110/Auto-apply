@@ -47,7 +47,12 @@ const els = {
   pagerPages: document.getElementById("pagerPages"),
   pagePrev: document.getElementById("pagePrev"),
   pageNext: document.getElementById("pageNext"),
-  pendingCount: document.getElementById("pendingCount")
+  pendingCount: document.getElementById("pendingCount"),
+  kbCount: document.getElementById("kbCount"),
+  kbRebuildBtn: document.getElementById("kbRebuildBtn"),
+  kbMeta: document.getElementById("kbMeta"),
+  kbSummary: document.getElementById("kbSummary"),
+  kbFacts: document.getElementById("kbFacts")
 };
 
 /** @type {{ id: string, label: string }[]} */
@@ -465,6 +470,131 @@ function renderList() {
   renderPager(pages, rows.length);
 }
 
+// ---- Knowledge base -------------------------------------------------------
+
+/** The profile whose knowledge base is shown: the one being browsed, else the save target. */
+function kbProfileId() {
+  const view = filterProfileId();
+  if (view && view !== ALL_ID) return view;
+  return els.formScope.value || profiles[0]?.id || "";
+}
+
+function formatWhen(ts) {
+  const n = Number(ts || 0);
+  if (!n) return "";
+  try {
+    return new Date(n).toLocaleString();
+  } catch {
+    return "";
+  }
+}
+
+function renderKb(profileId, res) {
+  if (!els.kbFacts) return;
+  const kb = res?.kb || null;
+  const facts = Array.isArray(kb?.facts) ? kb.facts : [];
+  const rules = Array.isArray(kb?.rules) ? kb.rules : [];
+  els.kbCount.textContent = String(facts.length);
+
+  const sources = res
+    ? `${Number(res.qaCount || 0)} Q&A + ${Number(res.profileFieldCount || 0)} profile fields`
+    : "";
+  let meta;
+  if (!profileId) {
+    meta = "Pick a profile to see what it has learned.";
+  } else if (!kb) {
+    meta = `${profileLabel(profileId)} · not learned yet — it builds on the next Apply, or click Re-learn${
+      sources ? ` (${sources} available)` : ""
+    }.`;
+  } else {
+    const parts = [profileLabel(profileId), `learned from ${sources}`];
+    if (kb.builtAt) parts.push(`updated ${formatWhen(kb.builtAt)}`);
+    if (!kb.learned && facts.length) parts.push("raw facts only — AI has not distilled them yet");
+    if (res?.stale) parts.push("out of date — re-learns on the next Apply");
+    meta = parts.join(" · ");
+  }
+  els.kbMeta.textContent = meta;
+  els.kbMeta.classList.toggle("is-stale", Boolean(kb && res?.stale));
+
+  els.kbSummary.textContent = kb?.summary || "";
+  els.kbSummary.hidden = !kb?.summary;
+
+  els.kbFacts.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  if (rules.length) {
+    const list = document.createElement("ul");
+    list.className = "kb-rules";
+    for (const rule of rules) {
+      const li = document.createElement("li");
+      li.textContent = rule;
+      list.appendChild(li);
+    }
+    frag.appendChild(list);
+  }
+  for (const fact of facts) {
+    const item = document.createElement("div");
+    item.className = "kb-fact";
+
+    const q = document.createElement("p");
+    q.className = "kb-fact-q";
+    const tag = document.createElement("span");
+    tag.className = "qa-source-tag";
+    tag.textContent = String(fact.topic || "other").replace(/_/g, " ");
+    q.appendChild(tag);
+    q.appendChild(document.createTextNode(fact.question || ""));
+    item.appendChild(q);
+
+    const a = document.createElement("p");
+    a.className = "kb-fact-a";
+    a.textContent = fact.detail ? `${fact.answer} — ${fact.detail}` : fact.answer || "";
+    item.appendChild(a);
+    frag.appendChild(item);
+  }
+  if (profileId && !facts.length) {
+    const empty = document.createElement("p");
+    empty.className = "qa-empty";
+    empty.textContent = "No facts yet. Add Q&A answers or fill in the profile, then Re-learn.";
+    frag.appendChild(empty);
+  }
+  els.kbFacts.appendChild(frag);
+}
+
+let kbLoadSeq = 0;
+async function loadKb() {
+  const profileId = kbProfileId();
+  const seq = (kbLoadSeq += 1);
+  if (!profileId) {
+    renderKb("", null);
+    return;
+  }
+  const res = await chrome.runtime.sendMessage({ type: "kb_get", profileId }).catch(() => null);
+  if (seq !== kbLoadSeq) return; // a newer selection already rendered
+  renderKb(profileId, res?.ok ? res : null);
+}
+
+async function rebuildKb() {
+  const profileId = kbProfileId();
+  if (!profileId) {
+    setStatus("Pick a profile to re-learn.", true);
+    return;
+  }
+  els.kbRebuildBtn.disabled = true;
+  setStatus(`Re-learning ${profileLabel(profileId)} from its Q&A bank and profile...`);
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "kb_rebuild", profileId });
+    if (!res?.ok) throw new Error(res?.error || "Re-learn failed.");
+    kbLoadSeq += 1;
+    renderKb(profileId, res);
+    const count = Array.isArray(res.kb?.facts) ? res.kb.facts.length : 0;
+    if (res.warning) setStatus(`Saved ${count} raw facts — AI could not distill them: ${res.warning}`, true);
+    else setStatus(`Knowledge base updated: ${count} facts.`);
+  } catch (err) {
+    setStatus(`Re-learn failed: ${String(err.message || err)}`, true);
+  } finally {
+    els.kbRebuildBtn.disabled = false;
+  }
+}
+
 async function reload() {
   const [rows, pending] = await Promise.all([getAllQa(null), getPendingQa(null)]);
   allRows = rows;
@@ -561,6 +691,7 @@ function onFilterChange() {
   const view = filterProfileId();
   if (view && view !== ALL_ID) els.formScope.value = view;
   renderList();
+  loadKb().catch(() => {});
 }
 
 els.filterProfile.addEventListener("change", onFilterChange);
@@ -596,6 +727,9 @@ els.clearBtn.addEventListener("click", () => {
   clearShown().catch((err) => setStatus(String(err.message || err), true));
 });
 els.closeBtn.addEventListener("click", () => closeHostWindow());
+els.kbRebuildBtn?.addEventListener("click", () => {
+  rebuildKb().catch((err) => setStatus(String(err.message || err), true));
+});
 
 let reloadTimer = 0;
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -605,6 +739,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
       reload().catch(() => {});
     }, 200);
   }
+  if (area === "local" && changes.profile_kb_version) {
+    loadKb().catch(() => {});
+  }
 });
 
 (async () => {
@@ -612,6 +749,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     profiles = await getResumeProfiles();
     initSelects();
     await reload();
+    loadKb().catch(() => {});
   } catch (err) {
     setStatus(`Could not load Q&A bank: ${String(err.message || err)}`, true);
   }

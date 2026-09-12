@@ -67,30 +67,60 @@ To add another site, append an entry to the `JOB_SCRAPERS` registry in
 
 ## Auto Apply (multi-step, any site)
 
-**Auto Apply** works like Jobright Easy Apply on any ATS (Greenhouse, Lever, Workday,
-Dice, Jobright, etc.):
+**Auto Apply** works like the Jobright autofill extension, on any ATS (Greenhouse, Lever,
+Workday, Dice, Jobright, etc.):
 
-1. Detect / open the application form (Easy Apply, Apply, or linked apply URL).
-2. Fill the current step from **profile**, then the **Q&A bank**, then AI only for remaining questions.
-3. Reusable AI answers (dropdowns, checkboxes, short factual text) are saved to the Q&A bank for the next job. JD-specific essays are not stored.
-4. If the page has **Next / Continue / Review** and not a final **Submit**, click it.
-5. Wait for the next step (same-tab SPA, full navigation, iframe, or new tab).
-6. Repeat until **Submit** — then **stop** so you can review and click Submit yourself.
+1. Detect / open the application form (Easy Apply, Apply, or linked apply URL). When the
+   rule-based finder recognises no Apply / Next button, AI reads the page's buttons and picks
+   the one that starts or continues the application. It never picks sign-in, social import,
+   cookie, or Submit buttons.
+2. Upload the resume / cover letter, and fill identity, contact and location fields from the
+   **profile**.
+3. **Read the whole step**: every empty field — its type (text, textarea, dropdown, radio,
+   checkbox, searchable list), label, section, required flag, and the exact list of options.
+4. **AI answers every field in one pass** from the profile's **knowledge base**, the closest
+   **Q&A bank** answers, the **resume**, and the **job description**. A dropdown / radio answer
+   must be one of the real options. Follow-up fields an answer reveals ("If yes, explain") are
+   read and answered too.
+5. If the page has **Next / Continue / Review** and not a final **Submit**, click it and wait
+   for the next step (same-tab SPA, full navigation, iframe, or new tab), then repeat.
+6. Stop at **Submit** so you can review and click Submit yourself (Dice submits automatically).
 
-Use the panel button **Auto Apply (multi-step)** or **Alt+Shift+E**. Imported-job Apply
-and **Scrape open job page** use the same flow.
+Use the panel button **Apply** or **Alt+Shift+E**. Imported-job Apply and **Scrape open job
+page** use the same flow.
 
-## Cost (GPT-4o-mini + bank-first)
+### Knowledge base (per profile)
 
-Resume and cover letter use **gpt-4o-mini**. Form fill uses the Q&A bank whenever possible, so a typical later apply has **no autofill LLM calls**.
+The Q&A bank holds the candidate's own answers, worded the way each form asked. AI distills
+the bank — answers you typed, edited, or imported, never answers the AI guessed — plus the
+profile info into **one fact per topic**, with conflicts resolved (newest answer wins). Any
+wording of the same question is then answered from that fact.
 
-Approximate USD (list prices; your bill may differ):
+- It re-learns on its own whenever the Q&A bank or profile changes.
+- See it, or force a re-learn, in **Q&A bank → Knowledge base**.
+- Answers the AI had to guess go to **Needs answers** in the Q&A bank. Confirm one once and
+  it becomes a fact for every later application.
 
-| Phase | Previous default (gpt-4o, 2-pass autofill) | Now (mini + bank-first) |
-|-------|--------------------------------------------|-------------------------|
+Untick **AI reads the whole form** (panel → Learn mode) to go back to the old behaviour:
+Q&A bank first, then AI one question at a time. That path is also the automatic fallback
+when the AI form reader fails.
+
+## Cost (GPT-4o-mini)
+
+Resume and cover letter use **gpt-4o-mini**. Form fill uses the form model
+(`OPENAI_FORM_MODEL`, default **gpt-4o-mini**): one call per application step to read and
+answer the whole form, plus one short call whenever a profile's knowledge base re-learns.
+Untick **AI reads the whole form** to go back to bank-first filling, which makes no form-fill
+call at all when the Q&A bank already knows every answer.
+
+Approximate USD (list prices; your bill may differ — the form-fill figure is an estimate for
+one to three ~6k-token steps):
+
+| Phase | Previous default (gpt-4o, 2-pass autofill) | Now (mini, AI reads the whole form) |
+|-------|--------------------------------------------|-------------------------------------|
 | Resume + cover letter | ~$0.11 | ~$0.007 |
-| Form fill (warm bank) | ~$0.15 | ~$0 |
-| **Typical full job** | **~$0.26** | **~$0.009** |
+| Form fill | ~$0.15 | ~$0.004 |
+| **Typical full job** | **~$0.26** | **~$0.01** |
 
 After generate or Auto Apply, the panel status includes a line like:
 

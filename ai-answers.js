@@ -8,6 +8,7 @@
 
 import { chatCompletion, DEFAULT_OPENAI_MODEL } from "./openai.js";
 import { selectRelevantProjects, buildProjectAnswerContext } from "./project-manifest.js";
+import { renderKbForPrompt } from "./profile-kb.js";
 
 /** Cheap, fast model for form classification + application answers. */
 export const DEFAULT_OPENAI_FORM_MODEL = "gpt-4o-mini";
@@ -100,7 +101,8 @@ function buildAutofillContext({
   jobMeta = {},
   resumeText = "",
   applicationBrief = null,
-  applicantInfo = {}
+  applicantInfo = {},
+  knowledgeBase = null
 }) {
   const base =
     applicationBrief && typeof applicationBrief === "object"
@@ -140,6 +142,9 @@ function buildAutofillContext({
   if (projects.length) {
     base.candidateProjects = buildProjectAnswerContext(projects);
   }
+  // Facts the candidate confirmed in their Q&A bank and profile, one per topic.
+  const knowledge = renderKbForPrompt(knowledgeBase);
+  if (knowledge) base.candidateKnowledge = knowledge;
   return base;
 }
 
@@ -399,7 +404,8 @@ export async function generateHumanizedApplicationAnswers({
   applicantInfo,
   jobMeta = {},
   resumeText = "",
-  applicationBrief = null
+  applicationBrief = null,
+  knowledgeBase = null
 }) {
   const list = (questions || []).filter((q) => q?.id && q?.label);
   if (!list.length) return { answers: [], usage: null };
@@ -414,7 +420,13 @@ export async function generateHumanizedApplicationAnswers({
   for (let i = 0; i < short.length; i += 10) chunks.push(short.slice(i, i + 10));
 
   const profile = compactApplicantContext(applicantInfo);
-  const context = buildAutofillContext({ jobMeta, resumeText, applicationBrief, applicantInfo });
+  const context = buildAutofillContext({
+    jobMeta,
+    resumeText,
+    applicationBrief,
+    applicantInfo,
+    knowledgeBase
+  });
   const answers = [];
   let usage = null;
 
@@ -467,7 +479,7 @@ export async function generateHumanizedApplicationAnswers({
           "name them. If the resume has no evidence for them, say so briefly and honestly — and " +
           'when naAllowed is true, answer exactly "N/A".\n' +
           "Priority of evidence:\n" +
-          "1) candidateProfile facts when the question is factual/identity\n" +
+          "1) candidateKnowledge (facts the candidate confirmed in their Q&A bank and profile) and candidateProfile when the question is factual/identity\n" +
           "2) candidateProjects — real projects this candidate delivered; cite the matching one by what it " +
           "did (stack, scale, outcome) when a question asks about experience with a technology or domain\n" +
           "3) resumeExcerpt for experience, tools, employers, skills\n" +
@@ -598,7 +610,8 @@ export async function generateConstrainedChoiceAnswers({
   applicantInfo,
   jobMeta = {},
   resumeText = "",
-  applicationBrief = null
+  applicationBrief = null,
+  knowledgeBase = null
 }) {
   const list = (questions || [])
     .filter((q) => q?.id && q?.label && Array.isArray(q.options) && q.options.length)
@@ -624,7 +637,7 @@ export async function generateConstrainedChoiceAnswers({
           "Treat it as the candidate's real position and map it to the option that means the SAME thing. " +
           "Watch negation — 'No, I do not have a disability' and 'Yes, I have a disability' are opposites even though they share most words. " +
           "If no option carries that meaning, omit the question rather than guessing.\n" +
-          "Evidence order: (1) Q&A-style facts already in candidateProfile, (2) candidateProjects — real projects the candidate delivered, which settle questions about hands-on experience with a technology or domain, (3) resumeExcerpt, (4) job description only when the question is about role fit.\n" +
+          "Evidence order: (1) candidateKnowledge — facts the candidate confirmed in their Q&A bank and profile — and candidateProfile, (2) candidateProjects — real projects the candidate delivered, which settle questions about hands-on experience with a technology or domain, (3) resumeExcerpt, (4) job description only when the question is about role fit.\n" +
           "Default guidance when profile is silent: eligible to work in the US → Yes; visa sponsorship needed → No; " +
           "employment restrictions with current/former employer → No; previously worked for this company → No; " +
           "related to current employee → No; government employee → No; ethics recusal → No. " +
@@ -634,7 +647,13 @@ export async function generateConstrainedChoiceAnswers({
         role: "user",
         content: JSON.stringify(
           {
-            ...buildAutofillContext({ jobMeta, resumeText, applicationBrief, applicantInfo }),
+            ...buildAutofillContext({
+              jobMeta,
+              resumeText,
+              applicationBrief,
+              applicantInfo,
+              knowledgeBase
+            }),
             candidateProfile: profile,
             questions: list.map((q) => ({
               id: q.id,

@@ -414,11 +414,17 @@
             </summary>
             <div class="accordion-body">
               <p class="hint">
-                Apply uses the Q&amp;A bank before AI. Saved answers stay per profile, plus a shared bank.
+                Apply reads the whole form, then AI answers every field from this profile's knowledge
+                base (learned from the Q&amp;A bank and profile info), the job description, and the
+                resume. Saved answers stay per profile, plus a shared bank.
               </p>
               <label class="qa-learn-toggle">
                 <input type="checkbox" id="qaLearnToggle" checked />
                 <span>Save answers you type or pick on application forms.</span>
+              </label>
+              <label class="qa-learn-toggle">
+                <input type="checkbox" id="aiFormPlanToggle" checked disabled />
+                <span>Auto Apply always uses gpt-4o-mini to read the whole form (QA bank + profile first). Legacy per-question fill is only a fallback if the planner fails.</span>
               </label>
               <button type="button" id="qaOpenEditorBtn" class="icon-btn" title="Open Q&amp;A bank">
                 <svg class="btn-icon" aria-hidden="true"><use href="#i-qa"/></svg>

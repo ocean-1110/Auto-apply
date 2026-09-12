@@ -109,6 +109,11 @@ const CSS = `
       margin-top: 1.15em;
     }
 
+    /* Breathing room between a second (or third) university */
+    p.education + p.education {
+      margin-top: 5px;
+    }
+
     p.education br {
       line-height: 1.15;
     }

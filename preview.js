@@ -124,16 +124,19 @@ function renderAtsPreview() {
 
 function updateChrome() {
   const hasResume = Boolean(resumeData && typeof resumeData === "object");
-  const showTools = (previewMode || pendingSave) && hasResume;
+  // Revise + Save are available whenever a resume is on screen. With preview
+  // mode off the PDFs are already saved, and saving again overwrites them in
+  // place, so there is no reason to hide the tools.
+  const showTools = hasResume;
   if (els.revisePanel) els.revisePanel.hidden = !showTools;
   if (els.pendingBanner) els.pendingBanner.hidden = !(previewMode && pendingSave && hasResume);
   if (els.saveBtn) {
-    els.saveBtn.hidden = !((previewMode || pendingSave) && hasResume);
+    els.saveBtn.hidden = !hasResume;
     els.saveBtn.disabled = busy || generating || !hasResume;
     setBtnLabel(els.saveBtn, pendingSave ? "Save" : "Resave");
     els.saveBtn.title = pendingSave
       ? "Render PDFs and save to the output folder"
-      : "Save PDFs again to the output folder";
+      : "Re-render the PDFs and overwrite the ones already saved for this job";
   }
   if (els.openFolderBtn) {
     els.openFolderBtn.hidden = !(hasResume && !pendingSave);
@@ -281,7 +284,9 @@ async function load() {
     folderNameFromPath(job?.resumeFolder || job?.folderName || "") ||
     folderNameFromPath(stored.last_output_dir || "");
   const hintParts = [jobMeta.jobTitle, jobMeta.companyName].filter(Boolean);
-  const modeNote = previewMode ? "Preview mode on — edit with a prompt, then Save PDFs." : "";
+  const modeNote = previewMode
+    ? "Preview mode on — edit with a prompt, then Save PDFs."
+    : "Revise with a prompt, then Resave to overwrite the saved PDFs.";
   els.jobHint.textContent = hintParts.length
     ? `${hintParts.join(" · ")}${modeNote ? ` · ${modeNote}` : ""}`
     : modeNote || "Switch templates to compare layouts without regenerating.";

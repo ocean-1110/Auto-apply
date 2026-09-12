@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-03.combobox-wait.2";
+  const SCRIPT_BUILD = "2026-09-12.ai-form-plan.3";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -1604,7 +1604,7 @@
   }
 
   /** One patience round for an async suggestion list, and how many rounds we allow. */
-  const COMBO_LIST_ROUND_MS = 3000;
+  const COMBO_LIST_ROUND_MS = 500;
   const COMBO_LIST_ROUNDS = 4;
 
   /**
@@ -2961,6 +2961,21 @@
     });
   }
 
+  /**
+   * Required according to the form itself. Only trust markup the ATS sets — a
+   * page-level "* indicates a required field" note would otherwise make every
+   * field look mandatory and stall the run forever.
+   */
+  function controlIsRequired(el) {
+    if (!el) return false;
+    if (el.required === true) return true;
+    const attr = (name) => String(el.getAttribute?.(name) || "").trim().toLowerCase();
+    if (attr("aria-required") === "true") return true;
+    // Validation already rejected this field, so it is required in practice.
+    if (attr("aria-invalid") === "true") return true;
+    return /\brequired\b/.test(String(el.className || ""));
+  }
+
   function isFieldFillable(el) {
     if (!el || el.disabled || el.readOnly) return false;
     if (typeof el.value === "undefined") return false;
@@ -3206,8 +3221,12 @@
     return [];
   }
 
-  /** Second pass: fill empty dropdowns/radios using profile defaults + rule-based keys. */
-  async function fillRemainingChoiceControls(applicantInfo = {}) {
+  /**
+   * Second pass: fill empty dropdowns/radios using profile defaults + rule-based keys.
+   * `explicitOnly` uses only values the profile actually holds — after an AI form
+   * plan, the blank-profile Yes/No defaults must not overrule the model.
+   */
+  async function fillRemainingChoiceControls(applicantInfo = {}, { explicitOnly = false } = {}) {
     const filled = [];
     const handledRadioGroups = new Set();
     const nodes = [
@@ -3229,7 +3248,9 @@
 
       const key = matchApplicantKeyFromControl(el);
       if (!key) continue;
-      const value = resolveApplicantValue(applicantInfo, key);
+      const value = explicitOnly
+        ? String(applicantInfo?.[key] ?? "").trim()
+        : resolveApplicantValue(applicantInfo, key);
       if (!value) continue;
       if (await fillControl(el, value, key)) {
         filled.push({ key, label: questionLabelForControl(el) });
@@ -3567,12 +3588,20 @@
     return work.length > 0 || edu.length > 0;
   }
 
+  /**
+   * @param {{ mode?: "legacy" | "plan" }} [options] In "plan" mode only identity,
+   *   contact and location fields are filled by rule here. Every other field is
+   *   left for the AI form planner, which sees the whole form with its real
+   *   option lists (scan_application_form → apply_form_plan).
+   */
   async function autofillApplication(
     applicantInfo = {},
     uploadFiles = {},
     credentials = {},
-    history = {}
+    history = {},
+    { mode = "legacy" } = {}
   ) {
+    const planMode = mode === "plan";
     // #region agent log
     const autofillStartedAt = Date.now();
     fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
@@ -3614,6 +3643,10 @@
       const label = labelTextForControl(el);
       const key = matchApplicantKeyFromControl(el);
       if (!key) continue;
+      // Plan mode: rules only own who and where the candidate is. Screening,
+      // eligibility, EEO and experience fields go to the AI planner, which
+      // picks from the form's real options instead of guessing "Yes".
+      if (planMode && !PLAN_MODE_RULE_KEYS.has(key)) continue;
       const value = resolveApplicantValue(applicantInfo, key);
       if (!value) continue;
       if (await fillControl(el, value, key)) {
@@ -3622,8 +3655,10 @@
       }
     }
 
-    const choicePass = await fillRemainingChoiceControls(applicantInfo);
-    for (const row of choicePass.filled || []) filled.push(row);
+    if (!planMode) {
+      const choicePass = await fillRemainingChoiceControls(applicantInfo);
+      for (const row of choicePass.filled || []) filled.push(row);
+    }
 
     // Fill saved login/sign-up credentials when this page has a Create Login section.
     const creds = {
@@ -3654,8 +3689,9 @@
       await waitForUploadsToSettle(12000);
     }
 
-    const unmatchedQuestions = collectUnmatchedQuestions(applicantInfo);
-    const unmatchedChoiceQuestions = await collectUnmatchedChoiceQuestions();
+    // Plan mode reads the page with scan_application_form instead.
+    const unmatchedQuestions = planMode ? [] : collectUnmatchedQuestions(applicantInfo);
+    const unmatchedChoiceQuestions = planMode ? [] : await collectUnmatchedChoiceQuestions();
 
     const result = {
       ok: true,
@@ -3706,6 +3742,7 @@
       if (!url) return;
       if (!/^https?:\/\//i.test(url)) return;
       if (seen.has(url)) return;
+      if (isMarketingOrCorporateHref(url) || !isApplyRelatedHref(url)) return;
       if (isDiceJobBrowsePage() && !/\/job-applications\b|\/job-detail\b|\/wizard\b|easy-apply/i.test(url)) {
         return;
       }
@@ -4588,7 +4625,7 @@
   }
   const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss|return)\b/i;
   const ENTRY_JUNK_RE =
-    /\b(cancel|close|dismiss|skip|not now|maybe later|show ad|show ads|advert|sponsored|cookie|subscribe|sign in|log in|register|learn more|see more|next job|previous job|watch|play video)\b/i;
+    /\b(cancel|close|dismiss|skip|not now|maybe later|show ad|show ads|advert|sponsored|cookie|subscribe|sign in|log in|register|learn more|see more|next job|previous job|watch|play video|explore|get in touch|talk with|contact us|about us|corporate|governance|investors?|privacy|terms|sustainability|media hub|company overview|news(room)?|press|suppliers?|human rights|public policy)\b/i;
   const EASY_APPLY_TEXT_RE =
     /^\s*(easy\s*apply|1-?click apply|one-?click apply|quick apply)\s*$/i;
   const APPLY_ONLY_TEXT_RE = /^\s*(apply(\s+now)?|apply with dice)\s*$/i;
@@ -5475,6 +5512,60 @@
     };
   }
 
+  /**
+   * Marketing / about / corporate destinations must never be followed during Apply.
+   * Example: halliburton.com/.../corporate-profile/...
+   */
+  function isMarketingOrCorporateHref(href) {
+    const raw = String(href || "").trim();
+    if (!raw || raw.startsWith("#") || raw.toLowerCase().startsWith("javascript:")) return false;
+    try {
+      const u = new URL(raw, location.href);
+      const blob = `${u.hostname}${u.pathname}${u.search}`.toLowerCase();
+      return /about-us|about\/|corporate-profile|corporate-governance|board-of-directors|code-of-business|investor|investors\b|\/privacy\b|\/terms\b|media-hub|press-release|sustainability|human-rights|public-policy|contact-us|talk-with|get-in-touch|\/news\b|\/community\b|suppliers\b/i.test(
+        blob
+      );
+    } catch {
+      return /about-us|corporate-profile|corporate-governance|investor|privacy|sustainability/i.test(raw);
+    }
+  }
+
+  /** True when an href looks like an application / careers apply destination. */
+  function isApplyRelatedHref(href) {
+    const raw = String(href || "").trim();
+    if (!raw || raw.startsWith("#") || raw.toLowerCase().startsWith("javascript:")) return true;
+    if (isMarketingOrCorporateHref(raw)) return false;
+    try {
+      const u = new URL(raw, location.href);
+      const host = u.hostname.toLowerCase();
+      const path = `${u.pathname || ""}${u.search || ""}`;
+      if (host === location.hostname.toLowerCase()) {
+        // Same-host hash/query moves and in-app steps are fine; block marketing paths.
+        if (isMarketingOrCorporateHref(u.href)) return false;
+        return true;
+      }
+      if (/(^|\.)(greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|smartrecruiters\.com|oraclecloud\.com|zohorecruit\.com|indeed\.com|dice\.com)$/i.test(host)) {
+        return true;
+      }
+      return /\/(apply|application|job-applications|job|jobs|career|careers|position|requisition)\b/i.test(path);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Apply / Next / Continue / Submit / Review style labels only. */
+  function isApplicationActionText(text) {
+    const t = String(text || "").trim();
+    if (!t || t.length > 80) return false;
+    if (ENTRY_JUNK_RE.test(t)) return false;
+    if (classifyActionButton(t)) return true;
+    if (EASY_ENTRY_RE.test(t) || EASY_APPLY_TEXT_RE.test(t) || APPLY_ONLY_TEXT_RE.test(t)) return true;
+    if (/^\s*(i['’]?m interested|i am interested|start application|begin application|apply for this job|apply manually|apply externally)\s*$/i.test(t)) {
+      return true;
+    }
+    return false;
+  }
+
   async function clickKeepingSameTab(el, { preferNewTab = false } = {}) {
     if (!el) return { clicked: false, navigateUrl: "", openInNewTab: false };
     let capturedUrl = "";
@@ -5487,8 +5578,33 @@
       if (el.tagName === "A") {
         const href = String(el.href || "").trim();
         const target = String(el.getAttribute("target") || "").toLowerCase();
-        if (/^https?:/i.test(href) && (preferNewTab || target === "_blank" || target === "blank")) {
-          return { clicked: false, navigateUrl: href, openInNewTab: true };
+        if (/^https?:/i.test(href)) {
+          if (isMarketingOrCorporateHref(href) || !isApplyRelatedHref(href)) {
+            return {
+              clicked: false,
+              navigateUrl: "",
+              openInNewTab: false,
+              refused: true,
+              error: "Refused non-apply link."
+            };
+          }
+          try {
+            const dest = new URL(href);
+            const here = new URL(location.href);
+            const leavesPage =
+              dest.origin !== here.origin ||
+              dest.pathname.replace(/\/$/, "") !== here.pathname.replace(/\/$/, "");
+            // Never blind-click cross-page links — return the URL for the SW to validate.
+            if (leavesPage || preferNewTab || target === "_blank" || target === "blank") {
+              return {
+                clicked: false,
+                navigateUrl: href,
+                openInNewTab: Boolean(preferNewTab || target === "_blank" || target === "blank")
+              };
+            }
+          } catch {
+            return { clicked: false, navigateUrl: href, openInNewTab: Boolean(preferNewTab) };
+          }
         }
         if (!preferNewTab) el.setAttribute("target", "_self");
       }
@@ -5531,6 +5647,15 @@
       el.click();
       await sleep(400);
       if (/^https?:/i.test(capturedUrl)) {
+        if (isMarketingOrCorporateHref(capturedUrl) || !isApplyRelatedHref(capturedUrl)) {
+          return {
+            clicked: false,
+            navigateUrl: "",
+            openInNewTab: false,
+            refused: true,
+            error: "Refused non-apply popup URL."
+          };
+        }
         return {
           clicked: false,
           navigateUrl: capturedUrl,
@@ -5846,7 +5971,12 @@
     return `${location.href}|${wd}|${heading}|${fields}`;
   }
 
-  function formNeedsFill() {
+  /**
+   * @param {{ requiredOnly?: boolean }} [opts] On a Submit/review step only fields
+   *   the form marks required may hold the application back; elsewhere any blank
+   *   field means there is still work to do.
+   */
+  function formNeedsFill({ requiredOnly = false } = {}) {
     if (detectApplicationSuccess()) return false;
     if (uploadsStillBusy()) return true;
     const fileInputs = collectFileInputs();
@@ -5867,6 +5997,9 @@
       if (["hidden", "file", "submit", "button", "image", "reset", "checkbox", "radio"].includes(type)) {
         continue;
       }
+      // A read-only summary field on a review page can never be filled by us,
+      // so it must not block Submit.
+      if (requiredOnly && (!controlIsRequired(el) || !isFieldFillable(el))) continue;
       if (el.tagName === "SELECT") {
         const opt = el.options?.[el.selectedIndex];
         const t = cleanLabelText(opt?.textContent || opt?.value || "");
@@ -5915,9 +6048,13 @@
     }
     const busy = uploadsStillBusy();
     const diceSubmitPage = isDiceApplicationPath() && detectDiceSubmitReviewPage();
-    // On the final Submit step, optional empty fields must not block Auto Apply.
+    // A Submit button on the page does not mean the page is finished. Required
+    // fields still waiting on an answer keep this true, so Apply fills them
+    // before it submits; optional blanks are ignored so they cannot stall it.
     const needsFill =
-      action?.type === "submit" || diceSubmitPage ? busy : formNeedsFill() || busy;
+      action?.type === "submit" || diceSubmitPage
+        ? busy || formNeedsFill({ requiredOnly: true })
+        : formNeedsFill() || busy;
     return {
       ok: true,
       href: location.href,
@@ -6039,6 +6176,19 @@
     }
     if (!action) {
       return { ok: false, clicked: false, openInNewTab: false, before, after: before };
+    }
+    const linkHref = String(action.el?.href || action.el?.getAttribute?.("href") || "").trim();
+    if (linkHref && (isMarketingOrCorporateHref(linkHref) || !isApplyRelatedHref(linkHref))) {
+      return {
+        ok: false,
+        clicked: false,
+        navigateUrl: "",
+        openInNewTab: false,
+        error: `Refused non-apply link "${elActionText(action.el)}"`,
+        action: null,
+        before,
+        after: before
+      };
     }
     const actionHref =
       action.el?.href ||
@@ -6279,6 +6429,959 @@
     summary.status = "ready_for_review";
     summary.detail = "Reached the step limit; please review the remaining steps.";
     return summary;
+  }
+
+  // ---- Whole-form scan + AI form plan -----------------------------------------
+  //
+  // The AI planner has to see the form the way a person does: every field on
+  // the step, what kind of widget it is, the exact choices a dropdown or radio
+  // group offers, and whether the form requires it. The scan tags each field
+  // with data-resume-bot-fid so the plan that comes back lands on the same
+  // element, and tags the page's buttons (data-resume-bot-bid) so the AI can
+  // name the one that moves the application forward when the rule-based finder
+  // recognises none.
+
+  /** Profile keys the rules still fill in plan mode: who and where the candidate is. */
+  const PLAN_MODE_RULE_KEYS = new Set([
+    "firstName",
+    "lastName",
+    "middleName",
+    "preferredName",
+    "email",
+    "phone",
+    "phoneCountryCode",
+    "phoneDeviceType",
+    "addressLine1",
+    "addressLine2",
+    "city",
+    "state",
+    "zipCode",
+    "country",
+    "cityCountryOfResidence",
+    "linkedinUrl",
+    "portfolioUrl",
+    "githubUrl"
+  ]);
+
+  const SCAN_SKIP_RE =
+    /\b(password|otp|one.?time (code|passcode)|captcha|verification code|security code|ssn|social security|credit card|card number|cvv|routing number|account number)\b/i;
+  const MAX_SCAN_FIELDS = 80;
+  const MAX_SCAN_OPTIONS = 400;
+  const MAX_SCAN_COMBO_OPENS = 20;
+  const MAX_SCAN_BUTTONS = 40;
+  const SCAN_EDITOR_SELECTOR =
+    '[contenteditable="true"], [contenteditable=""], [role="textbox"][aria-multiline="true"], .ql-editor, .ck-editor__editable, .fr-element, .public-DraftEditor-content, .ProseMirror';
+  const SCAN_FIELD_SELECTOR = `input, textarea, select, [role="combobox"], [aria-haspopup="listbox"], ${SCAN_EDITOR_SELECTOR}`;
+  const SECTION_HEADING_SELECTOR = "h1, h2, h3, h4, legend, [role='heading']";
+  const SECTION_HEADING_CHILD_SELECTOR = SECTION_HEADING_SELECTOR.split(", ")
+    .map((s) => `:scope > ${s}`)
+    .join(", ");
+  const REQUIRED_NOISE_RE =
+    /\b(this field is required|required field|please (select|choose) an option|select an option)\b\.?/gi;
+  const TEXT_INPUT_TYPES = new Set([
+    "",
+    "text",
+    "email",
+    "tel",
+    "url",
+    "number",
+    "date",
+    "month",
+    "week",
+    "time",
+    "datetime-local"
+  ]);
+  const CHOICE_FIELD_KINDS = new Set(["select", "radio", "checkbox", "checkbox_group", "combobox"]);
+
+  function labelElementFor(input) {
+    if (input.id) {
+      try {
+        const byFor = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
+        if (byFor) return byFor;
+      } catch {
+        /* invalid id */
+      }
+    }
+    return input.closest?.("label") || null;
+  }
+
+  /** Custom radio / checkbox designs hide the real input and show a styled label. */
+  function isScanVisible(el) {
+    try {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const shown =
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        (rect.width > 0 || rect.height > 0);
+      if (shown) return true;
+      if (el.type === "radio" || el.type === "checkbox") {
+        const label = labelElementFor(el);
+        return Boolean(label && isElVisible(label));
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function cleanScanLabel(text) {
+    return cleanLabelText(String(text || "").replace(REQUIRED_NOISE_RE, " "));
+  }
+
+  /** The visible text of one radio / checkbox option. */
+  function optionTextForMember(input, max = 200) {
+    const label = labelElementFor(input);
+    if (label) {
+      const clone = label.cloneNode(true);
+      clone.querySelectorAll("input, select, textarea").forEach((n) => n.remove());
+      const t = cleanLabelText(clone.textContent);
+      if (t) return t.slice(0, max);
+    }
+    const aria = cleanLabelText(input.getAttribute("aria-label"));
+    if (aria) return aria.slice(0, max);
+    const labelledBy = input.getAttribute("aria-labelledby");
+    if (labelledBy) {
+      const t = cleanLabelText(
+        labelledBy
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent || "")
+          .join(" ")
+      );
+      if (t) return t.slice(0, max);
+    }
+    const next = input.nextElementSibling;
+    if (next && /^(LABEL|SPAN|DIV|P)$/.test(next.tagName)) {
+      const t = cleanLabelText(next.textContent);
+      if (t && t.length <= max) return t;
+    }
+    const value = cleanLabelText(input.value || "");
+    return value && value.toLowerCase() !== "on" ? value.slice(0, max) : "";
+  }
+
+  function choiceGroupMembers(el) {
+    const type = el.type;
+    if (el.name) {
+      try {
+        const same = [
+          ...document.querySelectorAll(`input[type="${type}"][name="${CSS.escape(el.name)}"]`)
+        ];
+        if (same.length > 1) return same;
+      } catch {
+        /* invalid name */
+      }
+    }
+    const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
+    if (container) {
+      const inside = [...container.querySelectorAll(`input[type="${type}"]`)];
+      if (inside.length > 1) return inside;
+    }
+    return [el];
+  }
+
+  /** Remove the last whole-word occurrence of `phrase` (option labels trail the question). */
+  function removeLastPhrase(text, phrase) {
+    const p = cleanLabelText(phrase);
+    if (!p) return text;
+    const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(^|[^A-Za-z0-9])${escaped}(?=[^A-Za-z0-9]|$)`, "g");
+    let last = null;
+    let m;
+    while ((m = re.exec(text))) {
+      last = m;
+      if (!m[0].length) re.lastIndex += 1;
+    }
+    if (!last) return text;
+    const start = last.index + last[1].length;
+    return `${text.slice(0, start)} ${text.slice(start + p.length)}`;
+  }
+
+  /**
+   * The question a radio / checkbox group answers. A radio's own <label> is its
+   * option ("Yes"), so the question is the legend, the group's accessible name,
+   * or the text of the closest wrapper around every option minus those options.
+   */
+  function groupQuestionText(members) {
+    const first = members[0];
+    const legend = first.closest("fieldset")?.querySelector(":scope > legend");
+    const legendText = cleanLabelText(legend?.textContent || "");
+    if (legendText) return legendText;
+
+    const group = first.closest('[role="radiogroup"], [role="group"]');
+    if (group) {
+      const labelledBy = group.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const t = cleanLabelText(
+          labelledBy
+            .split(/\s+/)
+            .map((id) => document.getElementById(id)?.textContent || "")
+            .join(" ")
+        );
+        if (t) return t;
+      }
+      const aria = cleanLabelText(group.getAttribute("aria-label"));
+      if (aria) return aria;
+    }
+
+    const optionTexts = members.map((m) => optionTextForMember(m)).filter(Boolean);
+    let node = first.parentElement;
+    for (let depth = 0; depth < 7 && node && node !== document.body; depth += 1) {
+      if (members.every((m) => node.contains(m))) {
+        let text = cleanLabelText(node.innerText || node.textContent || "");
+        for (const opt of optionTexts) text = removeLastPhrase(text, opt);
+        text = cleanScanLabel(text);
+        if (text.length >= 3 && text.length <= 600) return text;
+        if (text.length > 600) break;
+      }
+      node = node.parentElement;
+    }
+    const fallback = captureQuestionText(first);
+    return optionTexts.includes(fallback) ? "" : fallback;
+  }
+
+  /** The nearest heading above a field ("Education", "Voluntary Self-Identification"). */
+  function sectionHeadingFor(el) {
+    let node = el;
+    for (let depth = 0; depth < 10 && node && node !== document.body; depth += 1) {
+      let sib = node.previousElementSibling;
+      for (let hops = 0; sib && hops < 8; hops += 1) {
+        const heading = sib.matches?.(SECTION_HEADING_SELECTOR)
+          ? sib
+          : sib.querySelector?.(SECTION_HEADING_CHILD_SELECTOR);
+        const t = cleanLabelText(heading?.textContent || "");
+        if (t && t.length <= 80) return t;
+        sib = sib.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+    return "";
+  }
+
+  function fieldIsRequired(el, label, members = [el]) {
+    if (members.some((m) => controlIsRequired(m))) return true;
+    const group = el.closest?.('[role="radiogroup"], [role="group"], fieldset');
+    if (group && String(group.getAttribute("aria-required") || "").toLowerCase() === "true") {
+      return true;
+    }
+    const text = String(label || "").trim();
+    if (/\boptional\b/i.test(text)) return false;
+    return /\*\s*$|^\*|\(required\)|\brequired\b/i.test(text);
+  }
+
+  /** What a custom dropdown currently shows as chosen, or "" when it is empty. */
+  function comboboxDisplayValue(el) {
+    const chips = selectedChipTexts(el);
+    if (chips.length) return chips.join(", ");
+    if (el.tagName === "BUTTON") {
+      const t = cleanLabelText(el.textContent);
+      return t && !/^(select|choose|please select|--)/i.test(t) ? t : "";
+    }
+    const shown = selectWidgetDisplayValue(el);
+    if (!shown || isSelectPlaceholderText(shown) || isPlaceholderChoiceValue(shown)) return "";
+    // A React-Select search input holds typed filter text, not a choice.
+    if (isReactSelectInput(el) && normalize(shown) === normalize(el.value || "")) return "";
+    return shown;
+  }
+
+  /** The real <select> a select2-style widget sits on top of, if any. */
+  function nativeSelectBehind(el) {
+    const root = getReactSelectRoot(el) || el;
+    const container = root.closest?.(".select2-container, [class*='select2-container']") || root;
+    if (container.previousElementSibling?.tagName === "SELECT") return container.previousElementSibling;
+    return null;
+  }
+
+  /** Fields in a work / education entry the history filler already completed belong to it. */
+  function insideFilledHistoryGroup(el) {
+    let node = el.parentElement;
+    for (let depth = 0; depth < 4 && node && node !== document.body; depth += 1) {
+      const marked = node.querySelectorAll("[data-resume-bot-history]").length;
+      if (marked >= 2) {
+        return node.querySelectorAll("input, textarea, select").length <= marked + 6;
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  /** The profile value for a matched key, in the words a form would show. */
+  function readableProfileHint(applicantInfo, key) {
+    if (!key) return "";
+    const raw = String(applicantInfo?.[key] ?? "").trim();
+    if (raw) {
+      const labels = VALUE_LABELS[key]?.[raw];
+      if (Array.isArray(labels) && labels.length) return labels[0];
+      if (key === "state") return US_STATE_LABELS[raw.toUpperCase()] || raw;
+      if (/^(yes|no)$/i.test(raw)) return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+      return raw.slice(0, 300);
+    }
+    // Derived values only — never the blank-profile Yes/No defaults, which are guesses.
+    if (PLAN_MODE_RULE_KEYS.has(key)) {
+      return String(resolveApplicantValue(applicantInfo, key) || "").slice(0, 300);
+    }
+    return "";
+  }
+
+  function hintFields(applicantInfo, key) {
+    if (!key) return null;
+    const hint = readableProfileHint(applicantInfo, key);
+    return hint ? { profileKey: key, profileHint: hint } : { profileKey: key };
+  }
+
+  async function readComboboxOptions(el) {
+    let nodes = [];
+    try {
+      openReactSelect(el);
+      nodes = await waitForOptions(8, 90);
+    } catch {
+      nodes = [];
+    }
+    const options = [];
+    const seen = new Set();
+    for (const node of nodes) {
+      const t = cleanLabelText(node.textContent);
+      const n = normalize(t);
+      if (!t || !n || seen.has(n)) continue;
+      seen.add(n);
+      options.push(t);
+      if (options.length >= MAX_SCAN_OPTIONS) break;
+    }
+    // Close the menu so the next widget, and the page, stay usable.
+    const input = isReactSelectInput(el) ? el : el.querySelector?.("input") || el;
+    try {
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" }));
+    } catch {
+      /* ignore */
+    }
+    await sleep(60);
+    return options;
+  }
+
+  function clearScanTags() {
+    for (const el of document.querySelectorAll("[data-resume-bot-fid], [data-resume-bot-bid]")) {
+      el.removeAttribute("data-resume-bot-fid");
+      el.removeAttribute("data-resume-bot-fkind");
+      el.removeAttribute("data-resume-bot-async");
+      el.removeAttribute("data-resume-bot-bid");
+    }
+  }
+
+  function scanPageInfo() {
+    const headings = [];
+    for (const h of document.querySelectorAll("h1, h2, h3")) {
+      if (!isElVisible(h)) continue;
+      const t = cleanLabelText(h.textContent);
+      if (t && t.length <= 120 && !headings.includes(t)) headings.push(t);
+      if (headings.length >= 8) break;
+    }
+    const wd = isWorkdayPage() ? detectWorkdayWizardState() : null;
+    return {
+      url: location.href,
+      title: cleanLabelText(document.title).slice(0, 160),
+      headings,
+      step: wd?.current || "",
+      site: applyPageSite()
+    };
+  }
+
+  /**
+   * Compact visible form text for the planner — labels, legends, placeholders,
+   * and nearby question copy the DOM scanner might miss. Cap keeps tokens low.
+   */
+  function scanFormTextExcerpt(maxChars = 3500) {
+    const chunks = [];
+    const seen = new Set();
+    const push = (raw) => {
+      const t = cleanLabelText(raw);
+      if (!t || t.length < 2 || t.length > 240) return;
+      const key = normalize(t);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      chunks.push(t);
+    };
+
+    const roots = [];
+    const main =
+      document.querySelector("main, [role='main'], form, [data-automation-id='applyFlow'], .application") ||
+      document.body;
+    if (main) roots.push(main);
+
+    for (const root of roots) {
+      for (const el of root.querySelectorAll(
+        "label, legend, [role='heading'], h1, h2, h3, h4, p, span, div, li, th, td"
+      )) {
+        if (!isElVisible(el)) continue;
+        if (el.closest("nav, header, footer, [role='navigation'], [aria-hidden='true']")) continue;
+        // Prefer leaf-ish nodes so we do not duplicate parent+child text.
+        if (el.children.length > 3) continue;
+        const text = el.childNodes.length
+          ? [...el.childNodes]
+              .filter((n) => n.nodeType === Node.TEXT_NODE)
+              .map((n) => n.textContent || "")
+              .join(" ")
+          : "";
+        const candidate = text.trim() || (el.children.length === 0 ? el.textContent : "");
+        if (candidate && candidate.length <= 200) push(candidate);
+        if (chunks.join("\n").length >= maxChars) break;
+      }
+      for (const el of root.querySelectorAll("input, textarea, select, [placeholder], [aria-placeholder]")) {
+        if (!isElVisible(el)) continue;
+        push(el.getAttribute("placeholder") || el.getAttribute("aria-placeholder") || "");
+        push(el.getAttribute("aria-label") || "");
+        if (chunks.join("\n").length >= maxChars) break;
+      }
+      if (chunks.join("\n").length >= maxChars) break;
+    }
+
+    let out = "";
+    for (const c of chunks) {
+      const next = out ? `${out}\n${c}` : c;
+      if (next.length > maxChars) break;
+      out = next;
+    }
+    return out;
+  }
+
+  /** Visible buttons that could start, continue or submit the application. */
+  function scanButtons(token) {
+    const rows = [];
+    const perText = new Map();
+    const nodes = document.querySelectorAll(
+      'button, [role="button"], input[type="submit"], input[type="button"], a[href]'
+    );
+    for (const el of nodes) {
+      if (!isElVisible(el) || !isElEnabled(el)) continue;
+      if (isSiteChromeControl(el) || isInsideAdOrOverlay(el)) continue;
+      const text = elActionText(el).slice(0, 80);
+      if (!text || text.length < 2) continue;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      const hint = classifyActionButton(text) || (EASY_ENTRY_RE.test(text) ? "entry" : "");
+      const href = el.tagName === "A" ? String(el.href || "") : "";
+      if (href && isMarketingOrCorporateHref(href)) continue;
+      // Plain links are navigation unless they read like an application action.
+      // Do not include bare "Explore" / "Start" / marketing CTAs.
+      if (el.tagName === "A") {
+        const applyish =
+          Boolean(hint) ||
+          isApplicationActionText(text) ||
+          /^\s*(i['’]?m interested|i am interested|start application|begin application)\s*$/i.test(
+            text
+          );
+        if (!applyish) continue;
+        if (href && /^https?:/i.test(href) && !isApplyRelatedHref(href)) continue;
+      } else if (!hint && !isApplicationActionText(text) && !el.closest("form")) {
+        // Outside forms, only keep controls that look like apply/next/submit.
+        continue;
+      }
+      const key = normalize(text);
+      const count = perText.get(key) || 0;
+      if (count >= 2) continue;
+      perText.set(key, count + 1);
+      rows.push({
+        el,
+        text,
+        hint,
+        href: /^https?:/i.test(href) ? href.slice(0, 200) : "",
+        inForm: Boolean(el.closest("form")),
+        inDialog: Boolean(el.closest('[role="dialog"], dialog, [aria-modal="true"]'))
+      });
+    }
+    // Buttons that already read like an application action first, then form buttons.
+    rows.sort(
+      (a, b) => Number(Boolean(b.hint)) - Number(Boolean(a.hint)) || Number(b.inForm) - Number(a.inForm)
+    );
+    return rows.slice(0, MAX_SCAN_BUTTONS).map((row, i) => {
+      const id = `b_${token}_${i}`;
+      row.el.setAttribute("data-resume-bot-bid", id);
+      return {
+        id,
+        text: row.text,
+        hint: row.hint,
+        href: row.href,
+        inForm: row.inForm,
+        inDialog: row.inDialog
+      };
+    });
+  }
+
+  /**
+   * Inventory the current application step for the AI planner.
+   * `fields` holds only fields that still need an answer; `filled` summarises
+   * the ones that already have one, so the model keeps its answers consistent.
+   */
+  async function scanApplicationForm({ applicantInfo = {}, buttonsOnly = false } = {}) {
+    clearScanTags();
+    const token = Math.random().toString(36).slice(2, 7);
+    const page = scanPageInfo();
+    const buttons = scanButtons(token);
+    page.formText = scanFormTextExcerpt(3500);
+    if (buttons.length) {
+      page.buttons = buttons.map((b) => ({
+        text: b.text,
+        ...(b.hint ? { hint: b.hint } : null),
+        ...(b.inForm ? { inForm: true } : null)
+      }));
+    }
+    if (buttonsOnly) return { fields: [], filled: [], buttons, page };
+
+    const fields = [];
+    const filled = [];
+    const handled = new Set();
+    let comboOpens = 0;
+    let n = 0;
+
+    const tagField = (nodes, kind, { async = false } = {}) => {
+      n += 1;
+      const id = `f_${token}_${n}`;
+      for (const node of nodes) {
+        node.setAttribute("data-resume-bot-fid", id);
+        node.setAttribute("data-resume-bot-fkind", kind);
+        if (async) node.setAttribute("data-resume-bot-async", "1");
+      }
+      return id;
+    };
+    const noteFilled = (label, value) => {
+      if (filled.length >= 40 || !label || !value || SCAN_SKIP_RE.test(label)) return;
+      filled.push({ label: label.slice(0, 120), value: String(value).slice(0, 80) });
+    };
+
+    for (const el of document.querySelectorAll(SCAN_FIELD_SELECTOR)) {
+      if (fields.length >= MAX_SCAN_FIELDS) break;
+      if (handled.has(el)) continue;
+      handled.add(el);
+      if (el.disabled || el.getAttribute("aria-disabled") === "true") continue;
+      // Parts of a widget that was already scanned (a combobox's inner input).
+      if (el.parentElement?.closest("[data-resume-bot-fid]")) continue;
+      if (isHistoryFilled(el) || insideFilledHistoryGroup(el)) continue;
+      if (isInsideAdOrOverlay(el)) continue;
+      if (el.closest("header, nav, footer") && !el.closest("form")) continue;
+
+      const tagName = el.tagName;
+      const type = String(el.type || "").toLowerCase();
+      const rich = isRichTextEditor(el);
+
+      if (tagName === "SELECT") {
+        if (!isScanVisible(el)) continue;
+        const label = cleanScanLabel(captureQuestionText(el));
+        if (!label || SCAN_SKIP_RE.test(label)) continue;
+        if (!isChoiceControlEmpty(el)) {
+          noteFilled(label, readControlAnswer(el));
+          continue;
+        }
+        const options = [...el.options]
+          .map((o) => cleanLabelText(o.textContent || o.value || ""))
+          .filter((t) => t && !isPlaceholderChoiceValue(t) && !isSelectPlaceholderText(t));
+        if (!options.length) continue;
+        fields.push({
+          id: tagField([el], "select"),
+          kind: "select",
+          label: label.slice(0, 1000),
+          section: sectionHeadingFor(el),
+          required: fieldIsRequired(el, label),
+          options: options.slice(0, MAX_SCAN_OPTIONS),
+          ...(el.multiple ? { multiple: true } : null),
+          ...hintFields(applicantInfo, matchApplicantKeyFromControl(el))
+        });
+        continue;
+      }
+
+      if (tagName === "INPUT" && (type === "radio" || type === "checkbox")) {
+        const members = choiceGroupMembers(el).filter((m) => !m.disabled);
+        members.forEach((m) => handled.add(m));
+        if (!members.length || !members.some(isScanVisible)) continue;
+        if (members.some((m) => isHistoryFilled(m))) continue;
+
+        if (type === "radio" || members.length > 1) {
+          const label = cleanScanLabel(groupQuestionText(members));
+          const options = [...new Set(members.map((m) => optionTextForMember(m)).filter(Boolean))];
+          if (!label || !options.length || SCAN_SKIP_RE.test(label)) continue;
+          const ticked = members.filter((m) => m.checked);
+          if (ticked.length) {
+            noteFilled(label, ticked.map((m) => optionTextForMember(m)).join(", "));
+            continue;
+          }
+          const kind = type === "radio" ? "radio" : "checkbox_group";
+          const labelNorm = normalize(label);
+          fields.push({
+            id: tagField(members, kind),
+            kind,
+            label: label.slice(0, 1000),
+            section: sectionHeadingFor(el),
+            required: fieldIsRequired(el, label, members),
+            options,
+            ...(kind === "checkbox_group" ? { multiple: true } : null),
+            ...hintFields(applicantInfo, matchApplicantKey(labelNorm, labelNorm))
+          });
+          continue;
+        }
+
+        // One box on its own: an agreement, a consent, or a yes/no question.
+        const option = optionTextForMember(el, 600);
+        const question = groupQuestionText([el]);
+        const label = cleanScanLabel(
+          [question, option].filter((t, i, all) => t && all.indexOf(t) === i).join(" — ")
+        );
+        if (!label || SCAN_SKIP_RE.test(label)) continue;
+        if (el.checked) {
+          noteFilled(label, "Yes");
+          continue;
+        }
+        fields.push({
+          id: tagField([el], "checkbox"),
+          kind: "checkbox",
+          label: label.slice(0, 1000),
+          section: sectionHeadingFor(el),
+          required: fieldIsRequired(el, label),
+          options: ["Yes", "No"]
+        });
+        continue;
+      }
+
+      const comboLike =
+        !rich &&
+        tagName !== "TEXTAREA" &&
+        (isReactSelectInput(el) ||
+          looksLikeCombobox(el) ||
+          isSelectPlaceholderWidget(el) ||
+          (tagName === "INPUT" && looksLikeAsyncAutocomplete(el)));
+      if (comboLike) {
+        if (tagName === "INPUT" && !TEXT_INPUT_TYPES.has(type) && type !== "search") continue;
+        if (!isScanVisible(el)) continue;
+        // select2 keeps the real <select> next to its widget; that one was scanned instead.
+        if (nativeSelectBehind(el)?.hasAttribute("data-resume-bot-fid")) continue;
+        const label = cleanScanLabel(captureQuestionText(el));
+        if (!label || SCAN_SKIP_RE.test(label) || /^search\b/i.test(label)) continue;
+        const shown = comboboxDisplayValue(el);
+        if (shown) {
+          noteFilled(label, shown);
+          continue;
+        }
+        const asyncList = tagName === "INPUT" && looksLikeAsyncAutocomplete(el);
+        let options = [];
+        const listId = el.getAttribute("list");
+        if (listId) {
+          options = [...(document.getElementById(listId)?.querySelectorAll("option") || [])]
+            .map((o) => cleanLabelText(o.value || o.textContent || ""))
+            .filter(Boolean)
+            .slice(0, MAX_SCAN_OPTIONS);
+        } else if (!asyncList && comboOpens < MAX_SCAN_COMBO_OPENS) {
+          comboOpens += 1;
+          options = await readComboboxOptions(el);
+        }
+        fields.push({
+          id: tagField([el], "combobox", { async: asyncList && !listId }),
+          kind: "combobox",
+          label: label.slice(0, 1000),
+          section: sectionHeadingFor(el),
+          required: fieldIsRequired(el, label),
+          ...(options.length ? { options } : { optionsAsync: true }),
+          ...(isMultiSelectWidget(el) ? { multiple: true } : null),
+          ...hintFields(applicantInfo, matchApplicantKeyFromControl(el))
+        });
+        continue;
+      }
+
+      if (tagName === "INPUT" && !TEXT_INPUT_TYPES.has(type)) continue;
+      if (tagName !== "INPUT" && tagName !== "TEXTAREA" && !rich) continue;
+      if (rich) {
+        const inner = el.querySelector?.(
+          '[contenteditable="true"], .ql-editor, .ProseMirror, .ck-editor__editable, .fr-element'
+        );
+        if (inner && inner !== el) continue; // the inner editor is its own candidate
+        const r = el.getBoundingClientRect();
+        if (r.width < 120 || r.height < 30) continue;
+      }
+      if (!isScanVisible(el) || el.readOnly) continue;
+
+      const label = cleanScanLabel(
+        rich
+          ? questionTextNearEditor(el)
+          : questionTextForAi(el) ||
+              questionLabelForControl(el) ||
+              el.getAttribute("placeholder") ||
+              identityHintFromControl(el)
+      );
+      const blob = normalize(
+        [label, el.name, el.id, el.getAttribute("autocomplete")].filter(Boolean).join(" ")
+      );
+      if (!label || SCAN_SKIP_RE.test(label) || SCAN_SKIP_RE.test(blob)) continue;
+      if (/^search\b/i.test(label)) continue;
+
+      const current = rich
+        ? isEditorEmpty(el)
+          ? ""
+          : editorPlainText(el)
+        : cleanLabelText(el.value || "");
+      if (current) {
+        noteFilled(label, current);
+        continue;
+      }
+
+      const kind = rich ? "richtext" : tagName === "TEXTAREA" ? "textarea" : "text";
+      const placeholder = cleanLabelText(el.getAttribute("placeholder") || "");
+      const maxLength = Number(el.getAttribute("maxlength") || 0);
+      fields.push({
+        id: tagField([el], kind),
+        kind,
+        label: label.slice(0, 1000),
+        section: sectionHeadingFor(el),
+        required: fieldIsRequired(el, label),
+        ...(tagName === "INPUT" && type && type !== "text" ? { inputType: type } : null),
+        ...(placeholder && placeholder.length <= 80 && normalize(placeholder) !== normalize(label)
+          ? { placeholder }
+          : null),
+        ...(maxLength > 0 && maxLength < 100000 ? { maxLength } : null),
+        ...hintFields(applicantInfo, matchApplicantKeyFromControl(el))
+      });
+    }
+
+    return { fields, filled, buttons, page };
+  }
+
+  /** Index of the option a planned answer names: exact text first, then meaning. */
+  function bestOptionIndex(texts, value) {
+    const want = normalize(value);
+    if (!want) return -1;
+    const exact = texts.findIndex((t) => normalize(t) === want);
+    if (exact >= 0) return exact;
+    return texts.findIndex((t) => optionMatches(t, value));
+  }
+
+  function fillSelectByOption(select, value, values = []) {
+    const opts = [...select.options];
+    const texts = opts.map((o) => cleanLabelText(o.textContent || o.value || ""));
+    const wanted = select.multiple && values.length ? values : [value];
+    let picked = 0;
+    for (const want of wanted) {
+      const idx = bestOptionIndex(texts, want);
+      if (idx < 0) continue;
+      if (select.multiple) opts[idx].selected = true;
+      else select.value = opts[idx].value;
+      picked += 1;
+      if (!select.multiple) break;
+    }
+    if (!picked) return false;
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+
+  /** Tick a radio / checkbox the way a click would, falling back to its label. */
+  function checkChoiceInput(input) {
+    if (input.checked) return true;
+    try {
+      input.click();
+    } catch {
+      /* ignore */
+    }
+    if (!input.checked) {
+      try {
+        labelElementFor(input)?.click();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!input.checked) {
+      input.checked = true;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return input.checked;
+  }
+
+  function fillRadioByOption(radios, value) {
+    let idx = bestOptionIndex(
+      radios.map((r) => optionTextForMember(r)),
+      value
+    );
+    if (idx < 0) idx = radios.findIndex((r) => optionMatches(r.value || "", value));
+    if (idx < 0) return false;
+    return checkChoiceInput(radios[idx]);
+  }
+
+  function fillCheckboxGroupByOption(boxes, values) {
+    const texts = boxes.map((b) => optionTextForMember(b));
+    let ticked = 0;
+    for (const want of values) {
+      const idx = bestOptionIndex(texts, want);
+      if (idx >= 0 && checkChoiceInput(boxes[idx])) ticked += 1;
+    }
+    return ticked > 0;
+  }
+
+  /**
+   * Free text straight into the box. Unlike fillControl this never detours
+   * through dropdown handling: the scan already proved this is a plain input,
+   * so a planned "Yes" for "Are you willing to relocate?" is typed as-is.
+   */
+  function fillPlainText(el, value) {
+    if (el.tagName === "TEXTAREA") {
+      setNativeValue(el, value);
+      return Boolean(String(el.value || "").trim());
+    }
+    const coerced = coerceValueForInput(el, value);
+    if (coerced == null) return false;
+    try {
+      el.focus({ preventScroll: true });
+    } catch {
+      /* ignore */
+    }
+    const ok = setNativeValue(el, coerced);
+    try {
+      el.blur();
+    } catch {
+      /* ignore */
+    }
+    return ok && Boolean(String(el.value || "").trim());
+  }
+
+  async function fillPlannedField(kind, nodes, row) {
+    const value = String(row?.value ?? "").trim();
+    const values = Array.isArray(row?.values)
+      ? row.values.map((v) => String(v ?? "").trim()).filter(Boolean)
+      : [];
+    if (!value && !values.length) return false;
+    const el = nodes[0];
+    switch (kind) {
+      case "select":
+        return fillSelectByOption(el, value, values);
+      case "radio":
+        return fillRadioByOption(nodes, value);
+      case "checkbox":
+        return /^y(es)?$/i.test(value) ? checkChoiceInput(el) : false;
+      case "checkbox_group":
+        return fillCheckboxGroupByOption(nodes, values.length ? values : [value]);
+      case "combobox": {
+        const wanted = values.length ? values : [value];
+        if (el.getAttribute("data-resume-bot-async") === "1") {
+          return fillAsyncAutocomplete(el, wanted[0], null);
+        }
+        let any = false;
+        for (const want of wanted) {
+          if (await fillCustomDropdown(el, want, null)) any = true;
+          if (!isMultiSelectWidget(el)) break;
+        }
+        return any;
+      }
+      case "richtext":
+        return fillContentEditable(el, value);
+      default:
+        return fillPlainText(el, value);
+    }
+  }
+
+  /** Fill the planner's answers into the fields the last scan tagged. */
+  async function applyFormPlan(answers = []) {
+    const filled = [];
+    const failed = [];
+    for (const row of answers) {
+      const id = String(row?.id || "").trim();
+      if (!id) continue;
+      let nodes = [];
+      try {
+        nodes = [...document.querySelectorAll(`[data-resume-bot-fid="${CSS.escape(id)}"]`)];
+      } catch {
+        nodes = [];
+      }
+      if (!nodes.length) {
+        failed.push({ id, reason: "field is gone" });
+        continue;
+      }
+      const kind = nodes[0].getAttribute("data-resume-bot-fkind") || String(row.kind || "text");
+      // Our own fills must never be learned back into the bank as the user's answers.
+      suppressLearn(4000);
+      let ok = false;
+      try {
+        ok = await fillPlannedField(kind, nodes, row);
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        failed.push({ id, kind, reason: "no matching option, or the value was rejected" });
+        continue;
+      }
+      filled.push({
+        id,
+        kind,
+        preview: String(row.value || (row.values || []).join(", ")).slice(0, 80)
+      });
+      // Choice widgets often reveal follow-up fields; give the page a beat to render them.
+      await sleep(CHOICE_FIELD_KINDS.has(kind) ? FIELD_FILL_DELAY_MS : 150);
+    }
+    suppressLearn(2500);
+    return { filledCount: filled.length, filled, failedCount: failed.length, failed };
+  }
+
+  /**
+   * Click a button the AI picked from the last scan. Refuses anything that looks
+   * like sign-in, site chrome or an ad, and — unless allowed — a Submit button
+   * on an application form: sending the application stays a rule/user decision.
+   */
+  async function clickScannedButton(id, { preferNewTab = false, allowSubmit = false } = {}) {
+    let el = null;
+    try {
+      el = document.querySelector(`[data-resume-bot-bid="${CSS.escape(String(id || ""))}"]`);
+    } catch {
+      el = null;
+    }
+    if (!el || !isElVisible(el) || !isElEnabled(el)) {
+      return { ok: false, clicked: false, error: "That button is no longer on the page." };
+    }
+    const text = elActionText(el);
+    if (ENTRY_JUNK_RE.test(text) || isSiteChromeControl(el) || isInsideAdOrOverlay(el)) {
+      return { ok: false, clicked: false, error: `Refused to click "${text}": not an application button.` };
+    }
+    if (!isApplicationActionText(text) && !el.closest("form")) {
+      return {
+        ok: false,
+        clicked: false,
+        error: `Refused to click "${text}": not Apply / Next / Submit related.`
+      };
+    }
+    const href = String(el.href || el.getAttribute?.("href") || "");
+    if (href && (isMarketingOrCorporateHref(href) || !isApplyRelatedHref(href))) {
+      return {
+        ok: false,
+        clicked: false,
+        error: `Refused to open non-apply URL for "${text}".`
+      };
+    }
+    if (
+      !allowSubmit &&
+      classifyActionButton(text) === "submit" &&
+      probeApplicationForm().isApplicationForm
+    ) {
+      return { ok: false, clicked: false, refusedSubmit: true, text };
+    }
+    if (uploadsStillBusy()) await waitForUploadsToSettle(15000);
+    const res = await clickKeepingSameTab(el, { preferNewTab });
+    if (res?.refused) {
+      return { ok: false, clicked: false, error: res.error || "Refused non-apply navigation." };
+    }
+    return {
+      ok: Boolean(res.clicked || res.navigateUrl),
+      clicked: Boolean(res.clicked),
+      navigateUrl: res.navigateUrl || "",
+      openInNewTab: Boolean(res.openInNewTab),
+      text
+    };
+  }
+
+  /** The rule-based profile pass plan mode skips, for the legacy fallback. */
+  async function fillAllMappedProfileFields(applicantInfo = {}) {
+    const filled = [];
+    for (const el of collectFillableControls()) {
+      if (isHistoryFilled(el)) continue;
+      const key = matchApplicantKeyFromControl(el);
+      if (!key || PLAN_MODE_RULE_KEYS.has(key)) continue;
+      const value = resolveApplicantValue(applicantInfo, key);
+      if (!value) continue;
+      if (await fillControl(el, value, key)) {
+        filled.push({ key, label: labelTextForControl(el) });
+        await pauseBetweenFields();
+      }
+    }
+    return filled;
   }
 
   // ---- Learn mode: passively grow the Q&A bank from real user answers -------
@@ -6536,6 +7639,57 @@
         .catch((err) => sendResponse({ ok: false, status: "failed", error: String(err?.message || err) }));
       return true;
     }
+    if (message?.type === "scan_application_form") {
+      scanApplicationForm({
+        applicantInfo: message.applicantInfo || {},
+        buttonsOnly: Boolean(message.buttonsOnly)
+      })
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "apply_form_plan") {
+      applyFormPlan(message.answers || [])
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "click_scanned_button") {
+      clickScannedButton(message.id, {
+        preferNewTab: Boolean(message.preferNewTab),
+        allowSubmit: Boolean(message.allowSubmit)
+      })
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "autofill_fallback_choices") {
+      suppressLearn(8000);
+      fillRemainingChoiceControls(message.applicantInfo || {}, { explicitOnly: true })
+        .then((result) => sendResponse({ ok: true, ...result }))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "collect_unmatched_questions") {
+      // Legacy fallback after a failed AI form plan: the rule passes plan mode
+      // skipped, then the per-question collection the old path answers.
+      (async () => {
+        const info = message.applicantInfo || {};
+        suppressLearn(15000);
+        const profileFilled = await fillAllMappedProfileFields(info);
+        const choicePass = await fillRemainingChoiceControls(info);
+        return {
+          ok: true,
+          filledCount: profileFilled.length + Number(choicePass.filledCount || 0),
+          filled: [...profileFilled, ...(choicePass.filled || [])],
+          unmatchedQuestions: collectUnmatchedQuestions(info),
+          unmatchedChoiceQuestions: await collectUnmatchedChoiceQuestions()
+        };
+      })()
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
     if (message?.type !== "autofill_application") return undefined;
     if (autofillInProgress) {
       sendResponse({ ok: false, error: "Autofill already running on this page." });
@@ -6549,7 +7703,8 @@
       {
         workHistory: message.workHistory || [],
         educationHistory: message.educationHistory || []
-      }
+      },
+      { mode: message.mode === "plan" ? "plan" : "legacy" }
     )
       .then((result) => sendResponse(result))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }))

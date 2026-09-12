@@ -232,6 +232,67 @@ body.editor-page {
   font-weight: 700;
 }
 
+.kb-meta {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.kb-meta.is-stale {
+  color: var(--accent-hot);
+}
+
+.kb-summary {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.kb-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.kb-fact {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--neo);
+  box-shadow: var(--raised-sm);
+}
+
+.kb-fact-q {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.kb-fact-a {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.kb-rules {
+  margin: 0 0 4px;
+  padding-left: 18px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 @media (max-width: 640px) {
   .qa-editor .qa-toolbar .icon-btn,
   .pending-item-actions .icon-btn,

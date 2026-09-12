@@ -14,6 +14,12 @@ export function estimateTokensFromMessages(messages = []) {
 /** Large enough for full resume JSON (6 jobs, dense skills, long bullets). */
 const DEFAULT_MAX_TOKENS = 16384;
 
+/** Floor for reasoning models, whose hidden reasoning shares the same budget. */
+const REASONING_MIN_TOKENS = 4000;
+
+/** Never ask for more than the resume-sized budget, even when growing one. */
+const MAX_TOKEN_CEILING = 16384;
+
 /**
  * Call OpenAI Chat Completions. Used only from the background service worker.
  */
@@ -50,10 +56,25 @@ function quirksFor(model) {
   const reasoning = /^(o\d|gpt-5|gpt5)/.test(key) || /reasoning/.test(key);
   const quirks = {
     tokenParam: reasoning ? "max_completion_tokens" : "max_tokens",
-    supportsTemperature: !reasoning
+    supportsTemperature: !reasoning,
+    reasoning,
+    minTokens: reasoning ? REASONING_MIN_TOKENS : 0
   };
   modelQuirks.set(key, quirks);
   return quirks;
+}
+
+/**
+ * On a reasoning model the token cap pays for hidden reasoning as well as the
+ * visible answer, so a budget sized for the answer alone can be spent before a
+ * single character is written — the request then returns finish_reason "length"
+ * with empty content. Small caller budgets get a floor on those models; a
+ * non-reasoning model keeps exactly what the caller asked for.
+ */
+function effectiveMaxTokens(quirks, requested) {
+  const asked = Math.max(1, Number(requested) || DEFAULT_MAX_TOKENS);
+  if (!quirks.reasoning) return asked;
+  return Math.min(MAX_TOKEN_CEILING, Math.max(asked, quirks.minTokens || REASONING_MIN_TOKENS));
 }
 
 /**
@@ -112,12 +133,16 @@ export async function chatCompletion({
   const abortSignal = signal || activeChatAbortSignal || undefined;
   const delaysMs = [2000, 4000];
 
+  // The budget actually sent, which may be larger than the caller's request.
+  let sentMaxTokens = maxTokens;
+
   const buildBody = () => {
     const quirks = quirksFor(modelName);
+    sentMaxTokens = effectiveMaxTokens(quirks, maxTokens);
     const next = {
       model: modelName,
       messages,
-      [quirks.tokenParam]: maxTokens
+      [quirks.tokenParam]: sentMaxTokens
     };
     if (quirks.supportsTemperature) next.temperature = temperature;
     if (jsonMode) next.response_format = { type: "json_object" };
@@ -199,15 +224,40 @@ export async function chatCompletion({
     throw new Error(`OpenAI error (HTTP ${response.status}): ${apiMessage}`);
   }
 
-  const choice = payload?.choices?.[0];
-  const content = choice?.message?.content;
+  let choice = payload?.choices?.[0];
+  let content = choice?.message?.content;
+
+  // Budget spent entirely on hidden reasoning: no visible characters at all.
+  // Rather than failing the whole step, remember that this model needs more room
+  // and ask once more with a bigger allowance. The correction is cached for the
+  // life of the service worker, so the extra round-trip is paid once per model.
+  if ((typeof content !== "string" || !content.trim()) && choice?.finish_reason === "length") {
+    const quirks = quirksFor(modelName);
+    const grown = Math.min(
+      MAX_TOKEN_CEILING,
+      Math.max(sentMaxTokens * 4, REASONING_MIN_TOKENS)
+    );
+    if (grown > sentMaxTokens) {
+      quirks.reasoning = true;
+      quirks.minTokens = grown;
+      modelQuirks.set(modelName.toLowerCase(), quirks);
+      const retry = await send(buildBody());
+      const retryChoice = retry.payload?.choices?.[0];
+      const retryContent = retryChoice?.message?.content;
+      if (retry.response.ok && typeof retryContent === "string" && retryContent.trim()) {
+        choice = retryChoice;
+        content = retryContent;
+        payload = retry.payload;
+      } else if (retryChoice) {
+        choice = retryChoice;
+      }
+    }
+  }
+
   if (typeof content !== "string" || !content.trim()) {
-    // On reasoning models the token budget covers hidden reasoning too, so a
-    // model can spend the whole allowance before writing a single visible
-    // character. "Empty response" hides that; say what actually happened.
     if (choice?.finish_reason === "length") {
       throw new Error(
-        `OpenAI returned no content: ${modelName} used its entire ${maxTokens}-token budget before answering. Raise the token limit or use a non-reasoning model for this call.`
+        `OpenAI returned no content: ${modelName} spent its entire ${sentMaxTokens}-token budget on reasoning before answering. Pick a non-reasoning model for this call, or raise the limit.`
       );
     }
     throw new Error("OpenAI returned an empty response.");
@@ -228,6 +278,30 @@ export async function chatCompletion({
   };
 }
 
+/**
+ * The JSON object inside a model reply. JSON mode usually returns clean JSON,
+ * but a stray preface or code fence would otherwise fail the whole step.
+ * @returns {object | null}
+ */
+export function parseJsonReply(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(raw.slice(start, end + 1));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
 export const RESUME_JSON_SYSTEM_PROMPT = `You generate tailored technical resumes as a single valid JSON object only — no markdown fences, no commentary.
 
 LENGTH AND COMPLETENESS — CRITICAL (API responses tend to undershoot; do not):
@@ -238,4 +312,5 @@ LENGTH AND COMPLETENESS — CRITICAL (API responses tend to undershoot; do not):
 - Each experience bullet must be ONE long sentence (~170–240 characters), describing concrete implementation work with technologies and impact — not short vague lines.
 - profile: 5–7 full sentences as specified in the user prompt.
 - certifications: include every certification listed in the user prompt, verbatim. If the prompt lists none, return an empty array (do not invent any).
+- education: use the schools from the user prompt exactly. When it lists more than one school, return "education" as an ARRAY of { school, degree, year } objects, one per school, newest first — never merge two schools into one entry or drop one.
 - Finish the entire JSON object in one reply. Do not shorten skills or experience because of length.`;
