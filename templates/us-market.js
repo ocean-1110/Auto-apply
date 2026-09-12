@@ -20,16 +20,13 @@ const BASE = `
     }
     .resume { width: 100%; margin: 0 auto; }
     p { margin: 0 0 5px; }
-    ul { margin: 3px 0 0; padding-left: 17px; }
+    ul { margin: 3px 0 0; padding-left: 17px; list-style: disc; }
     li { margin: 0 0 3px; }
     .job { margin: 0 0 9px; break-inside: avoid; page-break-inside: avoid; }
     .job-header {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: baseline;
+      display: block;
     }
-    .date { flex-shrink: 0; white-space: nowrap; font-weight: 400; }
+    .date { white-space: nowrap; font-weight: 400; }
     .project { margin: 2px 0 3px; font-style: italic; }
     .skills p { margin: 0 0 3px; }
     .certifications { margin: 3px 0 0; padding-left: 17px; }
@@ -209,7 +206,7 @@ export const georgiaTraditionalTemplate = makeTemplate({
       line-height: 1.3;
     }
     header.top {
-      text-align: center;
+      text-align: left;
       margin-bottom: 10px;
       padding-bottom: 6px;
       border-bottom: 1px solid #111;

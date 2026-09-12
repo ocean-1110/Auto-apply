@@ -30,7 +30,7 @@ const CSS = `
     }
 
     header {
-      text-align: center;
+      text-align: left;
       border-bottom: 2px solid #1f3b5a;
       padding-bottom: 8px;
       margin-bottom: 10px;
@@ -85,9 +85,9 @@ const CSS = `
     .skills p { margin: 0 0 3px; }
 
     .certifications {
-      columns: 1;
       margin: 3px 0 0;
       padding-left: 17px;
+      list-style: disc;
     }
 
     .certifications li { break-inside: avoid; }
@@ -99,16 +99,13 @@ const CSS = `
     }
 
     .job-header {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
+      display: block;
       font-weight: 700;
     }
 
     .company { color: #1f3b5a; }
 
     .date {
-      flex-shrink: 0;
       white-space: nowrap;
       font-size: 9pt;
       font-weight: 400;
@@ -123,6 +120,7 @@ const CSS = `
     ul {
       margin: 3px 0 0;
       padding-left: 17px;
+      list-style: disc;
     }
 
     li {
@@ -134,7 +132,7 @@ const CSS = `
 export const classicBlueTemplate = {
   id: "classic-blue",
   label: "Classic Blue (Arial)",
-  description: "Modern layout with blue header accents and flex job rows.",
+  description: "Arial layout with blue header accents; title and dates on one extractable line.",
   render(data) {
     const name = escapeHtml(data.name || "Resume");
     const headline = escapeHtml(data.headline || "");

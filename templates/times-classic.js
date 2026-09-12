@@ -31,7 +31,7 @@ const CSS = `
     }
 
     header.top {
-      text-align: center;
+      text-align: left;
       margin-bottom: 5px;
       padding-bottom: 3px;
     }
@@ -42,21 +42,21 @@ const CSS = `
       font-weight: 700;
       letter-spacing: 0;
       color: #000;
-      text-align: center;
+      text-align: left;
     }
 
     .headline {
       margin: 0 0 4px;
       font-size: 11pt;
       font-weight: 700;
-      text-align: center;
+      text-align: left;
     }
 
     .contact {
       margin: 0 0 2px;
       font-size: 10pt;
-      word-break: break-word;
-      text-align: center;
+      word-break: normal;
+      text-align: left;
     }
 
     a, a:visited {
@@ -120,9 +120,8 @@ const CSS = `
 
     p {
       margin: 0 0 2.6px;
-      white-space: pre-wrap;
-      text-align: justify;
-      text-justify: inter-word;
+      white-space: normal;
+      text-align: left;
     }
 
     .skills p {
@@ -136,11 +135,12 @@ const CSS = `
     .certifications {
       margin: 3px 0 6px;
       padding-left: 18px;
+      list-style: disc;
     }
 
     .certifications li {
       margin: 0 0 3px;
-      text-align: justify;
+      text-align: left;
     }
 
     .job {
@@ -162,8 +162,7 @@ const CSS = `
 
     li {
       margin: 0 0 3px;
-      text-align: justify;
-      text-justify: inter-word;
+      text-align: left;
       line-height: 1.18;
     }
 
@@ -176,7 +175,7 @@ const CSS = `
 export const timesClassicTemplate = {
   id: "times-classic",
   label: "Times Classic (Serif)",
-  description: "Traditional centered header with underlined sections and stacked job titles.",
+  description: "Traditional left-aligned serif with underlined sections and stacked job titles.",
   render(data) {
     const name = escapeHtml(data.name || "Resume");
     const headline = escapeHtml(data.headline || "");

@@ -189,7 +189,7 @@ export function toCoverLetterHtml(rawText) {
     }
     p {
       margin: 0 0 12px 0;
-      text-align: justify;
+      text-align: left;
     }
   </style>
 </head>

@@ -1,8 +1,9 @@
 import {
   contactLine,
   escapeHtml,
-  normalizeCerts,
-  normalizeEducation,
+  renderCerts,
+  renderEducationBlock,
+  renderJobsUs,
   renderOptionalSection,
   renderSkills,
   wrapHtmlDocument
@@ -12,7 +13,7 @@ import {
  * Albert Liu–style resume (US Letter):
  * - Header + section titles: Book Antiqua Bold
  * - Body: Trebuchet MS
- * - Left-aligned header, Title/Dates job rows, · bullets
+ * - Title | Dates on one extractable line, real list bullets
  * Section accent color is Ocean blue (original PDF used terracotta).
  */
 const BLUE = "#1a8cff";
@@ -21,58 +22,6 @@ const BODY = "#222222";
 const MUTED = "#444444";
 const SKILL_ITEMS = "#333333";
 const SCHOOL = "#555555";
-
-function renderJobsAlbert(jobs) {
-  return (jobs || [])
-    .map((job) => {
-      const company = escapeHtml(job.company || "");
-      const location = escapeHtml(job.location || "");
-      const title = escapeHtml(job.title || "");
-      const dates = escapeHtml(job.dates || "");
-      const project = escapeHtml(job.project || "");
-      const bullets = (job.bullets || [])
-        .filter(Boolean)
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join("\n");
-      const companyLine = [company, location].filter(Boolean).join(" · ");
-
-      return `<article class="job">
-  <div class="job-header">
-    <span class="role">${title}</span>
-    <span class="date">${dates}</span>
-  </div>
-  ${companyLine ? `<p class="company">${companyLine}</p>` : ""}
-  ${project ? `<p class="project">${project}</p>` : ""}
-  <ul class="bullets">
-${bullets}
-  </ul>
-</article>`;
-    })
-    .join("\n");
-}
-
-/** One block per school — the JSON may carry a single object or an array. */
-function renderEducationAlbert(education) {
-  return normalizeEducation(education)
-    .map(
-      (edu) => `<div class="education">
-  <div class="edu-header">
-    <span class="edu-degree">${escapeHtml(edu.degree)}</span>
-    <span class="edu-year">${escapeHtml(edu.year)}</span>
-  </div>
-  ${edu.school ? `<p class="edu-school">${escapeHtml(edu.school)}</p>` : ""}
-</div>`
-    )
-    .join("\n");
-}
-
-function renderCertsAlbert(certs) {
-  const list = normalizeCerts(certs);
-  if (!list.length) return "";
-  return `<ul class="certifications">
-${list.map((c) => `<li>${escapeHtml(c)}</li>`).join("\n")}
-</ul>`;
-}
 
 const CSS = `
     @page { size: Letter; margin: 0.44in 0.385in 0.44in 0.385in; }
@@ -176,7 +125,7 @@ const CSS = `
       line-height: 1.55;
       color: ${BODY};
       text-align: left;
-      white-space: pre-wrap;
+      white-space: normal;
     }
 
     .profile p {
@@ -203,10 +152,7 @@ const CSS = `
     }
 
     .job-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
+      display: block;
       margin: 0;
       break-after: avoid;
       page-break-after: avoid;
@@ -221,7 +167,6 @@ const CSS = `
     }
 
     .date {
-      flex-shrink: 0;
       font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
       font-size: 8.6pt;
       font-weight: 700;
@@ -248,12 +193,11 @@ const CSS = `
 
     ul.bullets {
       margin: 2px 0 0;
-      padding: 0 0 0 12px;
-      list-style: none;
+      padding: 0 0 0 18px;
+      list-style: disc;
     }
 
     ul.bullets li {
-      position: relative;
       margin: 0 0 3.5px;
       padding-left: 2px;
       font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
@@ -263,26 +207,10 @@ const CSS = `
       text-align: left;
     }
 
-    ul.bullets li::before {
-      content: "·";
-      position: absolute;
-      left: -11px;
-      top: -2px;
-      font-size: 12pt;
-      font-weight: 700;
-      color: ${BLUE};
-      line-height: 1;
-    }
+    ul.bullets li::marker { color: ${BLUE}; }
 
     .education {
       margin: 8px 0 0;
-    }
-
-    .edu-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
     }
 
     .edu-degree {
@@ -293,7 +221,6 @@ const CSS = `
     }
 
     .edu-year {
-      flex-shrink: 0;
       font-family: "Trebuchet MS", "Segoe UI", Arial, sans-serif;
       font-size: 8.6pt;
       font-weight: 700;
@@ -312,8 +239,8 @@ const CSS = `
 
     ul.certifications {
       margin: 8px 0 0;
-      padding: 0;
-      list-style: none;
+      padding-left: 18px;
+      list-style: disc;
     }
 
     ul.certifications li {
@@ -330,7 +257,7 @@ export const oceanBlueClassicTemplate = {
   id: "ocean-blue-classic",
   label: "Ocean Blue Classic",
   description:
-    "Albert Liu–style: Book Antiqua titles, Trebuchet body, blue section rules (US Letter).",
+    "Albert Liu–style: Book Antiqua titles, Trebuchet body, blue rules — single-column ATS text.",
   render(data) {
     const name = escapeHtml(data.name || "Resume");
     const headline = escapeHtml(data.headline || "");
@@ -353,13 +280,13 @@ export const oceanBlueClassicTemplate = {
       <p>${escapeHtml(data.profile || "")}</p>
     </section>
 
-    ${renderOptionalSection("Education", renderEducationAlbert(edu))}
+    ${renderOptionalSection("Education", renderEducationBlock(edu))}
 
-    ${renderOptionalSection("Certifications", renderCertsAlbert(data.certifications))}
+    ${renderOptionalSection("Certifications", renderCerts(data.certifications))}
 
     ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
 
-    ${renderOptionalSection("Professional Experience", renderJobsAlbert(data.experience), {
+    ${renderOptionalSection("Professional Experience", renderJobsUs(data.experience), {
       className: "experience"
     })}
   </main>`

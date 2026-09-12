@@ -86,12 +86,12 @@ export function buildCoverLetterHtml(rawText, contact = {}) {
     margin: 0;
     background: #fff;
   }
-  .cl-header { margin-bottom: 16px; text-align: center; }
-  .cl-header p { text-align: center; }
+  .cl-header { margin-bottom: 16px; text-align: left; }
+  .cl-header p { text-align: left; }
   .cl-name { font-size: 16pt; font-weight: 700; margin: 0 0 2px 0; }
   .cl-headline { font-weight: 700; margin: 0 0 6px 0; }
   .cl-contact { margin: 0; font-size: 10.5pt; }
-  p { margin: 0 0 12px 0; text-align: justify; }
+  p { margin: 0 0 12px 0; text-align: left; hyphens: none; -webkit-hyphens: none; }
   .signature { margin-top: 6px; }
   .signature p { margin: 0; text-align: left; }
   .signature .cl-name-sign { font-weight: 700; }
@@ -117,9 +117,11 @@ export function buildCoverLetterHtml(rawText, contact = {}) {
     max-width: none !important;
     min-height: 0 !important;
     margin: 0 !important;
-    padding: 0.7in !important;
+    padding: 0 !important;
     box-shadow: none !important;
     background: #fff !important;
+    hyphens: none !important;
+    -webkit-hyphens: none !important;
   }
   @media print {
     html { background: #fff; }

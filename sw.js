@@ -12,7 +12,7 @@ import {
   isCaptureRunning as isJobCaptureRunning
 } from "./capture-runner.js";
 import { buildPrompt, buildCoverLetterPrompt, getCandidateInfoText } from "./profiles.js";
-import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeResumePayload, normalizeSkills } from "./resume-json.js";
+import { resumeJsonToHtml, extractResumeJson, hasRenderableSkills, normalizeResumePayload, normalizeSkills, markHtmlForPdf } from "./resume-json.js";
 import { scoreResumeAgainstJd } from "./ats-score.js";
 import { ensureAtsReadyResume } from "./ats-rewrite.js";
 import { DEFAULT_TEMPLATE_ID, templateRequiresTechnicalSummary } from "./templates/index.js";
@@ -5362,8 +5362,7 @@ p, li {
   margin-top: 0 !important;
   margin-bottom: 2.6px !important;
   line-height: 1.18 !important;
-  text-align: justify !important;
-  text-justify: inter-word !important;
+  text-align: left !important;
 }
 ul { margin-top: 0 !important; margin-bottom: 6px !important; }
 li { margin-bottom: 3px !important; }
@@ -5441,7 +5440,7 @@ async function htmlToPdfBase64(html) {
     try {
       await debuggerCommand(debuggee, "Page.enable");
       const paper = detectPdfPaperFromHtml(htmlText);
-      const result = await debuggerCommand(debuggee, "Page.printToPDF", {
+      const printParams = {
         printBackground: true,
         paperWidth: paper.paperWidth,
         paperHeight: paper.paperHeight,
@@ -5450,7 +5449,17 @@ async function htmlToPdfBase64(html) {
         marginLeft: 0,
         marginRight: 0,
         preferCSSPageSize: true
-      });
+      };
+      let result;
+      try {
+        result = await debuggerCommand(debuggee, "Page.printToPDF", {
+          ...printParams,
+          generateTaggedPDF: true,
+          generateDocumentOutline: true
+        });
+      } catch {
+        result = await debuggerCommand(debuggee, "Page.printToPDF", printParams);
+      }
       if (!result?.data) throw new Error("PDF generation failed.");
       // #region agent log
       fetch("http://127.0.0.1:7779/ingest/d1be8714-c21e-4091-a0f5-4508d30396e2", {
@@ -5594,7 +5603,7 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
 }
 
 async function addCoverLetterToBundle(files, rawCoverText, contact = {}) {
-  const html = buildCoverLetterHtml(rawCoverText, contact);
+  const html = markHtmlForPdf(buildCoverLetterHtml(rawCoverText, contact));
   const pdfBase64 = await htmlToPdfBase64(html);
   files.push({
     name: "Cover_Letter.pdf",

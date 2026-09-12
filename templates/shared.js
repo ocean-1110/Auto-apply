@@ -215,29 +215,60 @@ export function renderOptionalSection(title, innerHtml, { className = "" } = {})
     </section>`;
 }
 
-/** Flex header: company (location) — title | dates on the right. */
+/** Visible fields in left-to-right reading order so PDF text extraction stays intact. */
+export function atsJoin(parts, sep = " | ") {
+  return (parts || [])
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(sep);
+}
+
+function atsPairHtml(primary, secondary, primaryClass, secondaryClass) {
+  const left = String(primary || "").trim();
+  const right = String(secondary || "").trim();
+  if (!left && !right) return "";
+  if (!right) {
+    return primaryClass ? `<span class="${primaryClass}">${left}</span>` : left;
+  }
+  if (!left) {
+    return secondaryClass ? `<span class="${secondaryClass}">${right}</span>` : right;
+  }
+  const leftHtml = primaryClass ? `<span class="${primaryClass}">${left}</span>` : left;
+  const rightHtml = secondaryClass
+    ? `<span class="${secondaryClass}"> | ${right}</span>`
+    : ` | ${right}`;
+  return `${leftHtml}${rightHtml}`;
+}
+
+function jobProjectHtml(job) {
+  const project = String(job?.project || "").trim();
+  return project ? `<p class="project">${escapeHtml(project)}</p>` : "";
+}
+
+function jobBulletsHtml(job) {
+  const bullets = (job?.bullets || [])
+    .filter(Boolean)
+    .map((b) => `<li>${escapeHtml(b)}</li>`)
+    .join("\n");
+  return bullets ? `<ul class="bullets">\n${bullets}\n</ul>` : "";
+}
+
+/**
+ * Company (location) — title | dates on one extractable line.
+ * Avoids flex/two-column headers that ATS parsers split incorrectly.
+ */
 export function renderJobsFlex(jobs) {
   return (jobs || [])
     .map((job) => {
-      const company = escapeHtml(job.company || "");
-      const location = escapeHtml(job.location || "");
-      const title = escapeHtml(job.title || "");
-      const dates = escapeHtml(job.dates || "");
-      const project = escapeHtml(job.project || "");
-      const bullets = (job.bullets || [])
-        .filter(Boolean)
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join("\n");
-
+      const company = String(job.company || "").trim();
+      const location = String(job.location || "").trim();
+      const org = atsJoin([company, location ? `(${location})` : ""], " ");
+      const role = [org, String(job.title || "").trim()].filter(Boolean).join(" — ");
+      const heading = atsJoin([role, job.dates]);
       return `<article class="job">
-  <div class="job-header">
-    <span class="company">${company}${location ? ` (${location})` : ""} — ${title}</span>
-    <span class="date">${dates}</span>
-  </div>
-  ${project ? `<p class="project">${project}</p>` : ""}
-  <ul>
-${bullets}
-  </ul>
+  ${heading ? `<p class="job-header">${escapeHtml(heading)}</p>` : ""}
+  ${jobProjectHtml(job)}
+  ${jobBulletsHtml(job)}
 </article>`;
     })
     .join("\n");
@@ -251,60 +282,38 @@ ${bullets}
 export function renderJobsStacked(jobs) {
   return (jobs || [])
     .map((job) => {
-      const company = escapeHtml(job.company || "");
-      const location = escapeHtml(job.location || "");
-      const title = escapeHtml(job.title || "");
-      const dates = escapeHtml(job.dates || "");
-      const project = escapeHtml(job.project || "");
-      const bullets = (job.bullets || [])
-        .filter(Boolean)
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join("\n");
-
-      const companyLine = [company, dates].filter(Boolean).join(" | ");
-      const roleLine = [title, location].filter(Boolean).join(" | ");
-
+      const companyLine = atsJoin([job.company, job.dates]);
+      const roleLine = atsJoin([job.title, job.location]);
       return `<article class="job">
-  <h3 class="role-company">${companyLine}</h3>
-  <p class="role-meta">${roleLine}</p>
-  ${project ? `<p class="project">${project}</p>` : ""}
-  <ul>
-${bullets}
-  </ul>
+  ${companyLine ? `<h3 class="role-company">${escapeHtml(companyLine)}</h3>` : ""}
+  ${roleLine ? `<p class="role-meta">${escapeHtml(roleLine)}</p>` : ""}
+  ${jobProjectHtml(job)}
+  ${jobBulletsHtml(job)}
 </article>`;
     })
     .join("\n");
 }
 
 /**
- * US recruiter standard:
- *   Title                                          Dates
+ * US recruiter standard as one extractable line:
+ *   Title | Dates
  *   Company · Location
  */
 export function renderJobsUs(jobs) {
   return (jobs || [])
     .map((job) => {
-      const company = escapeHtml(job.company || "");
-      const location = escapeHtml(job.location || "");
-      const title = escapeHtml(job.title || "");
-      const dates = escapeHtml(job.dates || "");
-      const project = escapeHtml(job.project || "");
-      const bullets = (job.bullets || [])
-        .filter(Boolean)
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join("\n");
-      const companyLine = [company, location].filter(Boolean).join(" · ");
-
+      const header = atsPairHtml(
+        escapeHtml(job.title || ""),
+        escapeHtml(job.dates || ""),
+        "role",
+        "date"
+      );
+      const companyLine = atsJoin([job.company, job.location], " · ");
       return `<article class="job">
-  <div class="job-header">
-    <span class="role">${title}</span>
-    <span class="date">${dates}</span>
-  </div>
-  ${companyLine ? `<p class="company">${companyLine}</p>` : ""}
-  ${project ? `<p class="project">${project}</p>` : ""}
-  <ul>
-${bullets}
-  </ul>
+  ${header ? `<p class="job-header">${header}</p>` : ""}
+  ${companyLine ? `<p class="company">${escapeHtml(companyLine)}</p>` : ""}
+  ${jobProjectHtml(job)}
+  ${jobBulletsHtml(job)}
 </article>`;
     })
     .join("\n");
@@ -328,16 +337,23 @@ export function normalizeEducation(education) {
     .filter((entry) => entry.school || entry.degree || entry.year);
 }
 
-/** School on one line; degree and year on one ATS-friendly line, per school. */
+/** School, then degree | year — one block per school, reading order for ATS. */
 export function renderEducationBlock(education) {
   return normalizeEducation(education)
     .map((edu) => {
-      const degreeYear = [edu.degree, edu.year].filter(Boolean).join(" - ");
       const lines = [];
-      if (edu.school) lines.push(`<strong>${escapeHtml(edu.school)}</strong>`);
-      if (degreeYear) lines.push(escapeHtml(degreeYear));
+      if (edu.school) lines.push(`<strong class="edu-school">${escapeHtml(edu.school)}</strong>`);
+      const degreeYear = atsPairHtml(
+        escapeHtml(edu.degree),
+        escapeHtml(edu.year),
+        "edu-degree",
+        "edu-year"
+      );
+      if (degreeYear) lines.push(degreeYear);
+      if (!lines.length) return "";
       return `<p class="education">${lines.join("<br>\n")}</p>`;
     })
+    .filter(Boolean)
     .join("\n");
 }
 
@@ -386,6 +402,46 @@ ${css}
       padding: 0 !important;
       background: #fff !important;
       box-shadow: none !important;
+    }
+
+    /* ATS extraction: one text stream — no hyphenation, justify, CSS bullets, or flex columns. */
+    html, body {
+      hyphens: none !important;
+      -webkit-hyphens: none !important;
+    }
+    .resume h1,
+    .resume h2,
+    .resume h3,
+    .resume p,
+    .resume li,
+    .resume span,
+    .resume div,
+    .resume .job-header,
+    .resume .edu-header {
+      text-align: left !important;
+      text-justify: auto !important;
+      hyphens: none !important;
+      -webkit-hyphens: none !important;
+    }
+    .resume ul,
+    .resume ul.bullets,
+    .resume ul.certifications {
+      list-style-type: disc !important;
+      list-style-position: outside !important;
+    }
+    .resume ul li::before,
+    .resume ul.bullets li::before,
+    .resume ul.certifications li::before {
+      content: none !important;
+      display: none !important;
+    }
+    .resume .job-header,
+    .resume .edu-header {
+      display: block !important;
+    }
+    .resume .contact,
+    .resume a {
+      word-break: normal !important;
     }
 
     /* PDF pagination: flow sections continuously; keep headings with content. */

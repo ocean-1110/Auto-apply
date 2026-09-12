@@ -1,11 +1,12 @@
 import {
   contactLine,
   escapeHtml,
-  normalizeCerts,
-  normalizeEducation,
-  normalizeSkills,
   normalizeTechnicalSummary,
+  renderCerts,
+  renderEducationBlock,
+  renderJobsUs,
   renderOptionalSection,
+  renderSkills,
   wrapHtmlDocument
 } from "./shared.js";
 
@@ -16,99 +17,22 @@ import {
  * `requiresTechnicalSummary` so the generator appends the Technical Summary
  * prompt rules when this template is selected (see templates/index.js).
  *
- * Layout: justified serif body, rule-above/rule-below section headings,
- * Core Competencies as a two-column table, section order
- * Summary → Technical Summary → Experience → Core Competencies → Education → Certifications.
+ * Layout: left-aligned serif body, rule-above/rule-below section headings,
+ * skills as Category: items paragraphs (not a table), section order
+ * Summary → Technical Summary → Skills → Experience → Education → Certifications.
  */
 const NAVY = "#1f4e79";
-const HEAD_BG = "#2e5c8a";
-const BORDER = "#a9c1d9";
 const INK = "#111111";
 const BODY = "#1a1a1a";
 const MUTED = "#333333";
 
-const SERIF =
-  '"Palatino Linotype", "Book Antiqua", Palatino, "URW Palladio L", Georgia, "Times New Roman", serif';
-
-function renderJobs(jobs) {
-  return (jobs || [])
-    .map((job) => {
-      const company = escapeHtml(job.company || "");
-      const location = escapeHtml(job.location || "");
-      const title = escapeHtml(job.title || "");
-      const dates = escapeHtml(job.dates || "");
-      const project = escapeHtml(job.project || "");
-      const metaLine = [location, dates].filter(Boolean).join(" | ");
-      const bullets = (job.bullets || [])
-        .filter(Boolean)
-        .map((b) => `<li>${escapeHtml(b)}</li>`)
-        .join("\n");
-
-      return `<article class="job">
-  ${company ? `<p class="company">${company}</p>` : ""}
-  ${title ? `<p class="role">${title}</p>` : ""}
-  ${metaLine ? `<p class="job-meta">${metaLine}</p>` : ""}
-  ${project ? `<p class="project">${project}</p>` : ""}
-  ${bullets ? `<ul class="bullets">\n${bullets}\n  </ul>` : ""}
-</article>`;
-    })
-    .join("\n");
-}
+const SERIF = 'Georgia, "Times New Roman", Times, serif';
 
 function renderTechnicalSummary(value) {
   const bullets = normalizeTechnicalSummary(value);
   if (!bullets.length) return "";
   return `<ul class="bullets tech-summary">
 ${bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("\n")}
-</ul>`;
-}
-
-/** Core Competencies: Category | Technologies / Skills, like the reference PDF. */
-function renderCompetencyTable(skills) {
-  const rows = normalizeSkills(skills).filter(
-    (row) => String(row?.category || "").trim() || String(row?.items || "").trim()
-  );
-  if (!rows.length) return "";
-
-  const body = rows
-    .map(
-      (row) => `<tr>
-    <td class="cat">${escapeHtml(String(row.category || "").trim())}</td>
-    <td class="items">${escapeHtml(String(row.items || "").trim())}</td>
-  </tr>`
-    )
-    .join("\n");
-
-  return `<table class="competencies">
-  <thead>
-    <tr><th class="cat">Category</th><th class="items">Technologies / Skills</th></tr>
-  </thead>
-  <tbody>
-${body}
-  </tbody>
-</table>`;
-}
-
-/** Accepts the standard `{ school, degree, year }` object or an array of them. */
-function renderEducation(education) {
-  return normalizeEducation(education)
-    .map(
-      (e) => `<div class="education">
-  <div class="edu-header">
-    <span class="edu-degree">${escapeHtml(e.degree)}</span>
-    <span class="edu-year">${escapeHtml(e.year)}</span>
-  </div>
-  ${e.school ? `<p class="edu-school">${escapeHtml(e.school)}</p>` : ""}
-</div>`
-    )
-    .join("\n");
-}
-
-function renderCertifications(certs) {
-  const list = normalizeCerts(certs);
-  if (!list.length) return "";
-  return `<ul class="bullets certifications">
-${list.map((c) => `<li>${escapeHtml(c)}</li>`).join("\n")}
 </ul>`;
 }
 
@@ -126,8 +50,8 @@ const CSS = `
       background: #fff;
       font-size: 9.7pt;
       line-height: 1.34;
-      hyphens: auto;
-      -webkit-hyphens: auto;
+      hyphens: none;
+      -webkit-hyphens: none;
     }
 
     .resume { width: 100%; margin: 0 auto; }
@@ -162,7 +86,7 @@ const CSS = `
       line-height: 1.3;
       color: ${MUTED};
       text-align: left;
-      word-break: break-word;
+      word-break: normal;
     }
 
     a, a:visited {
@@ -181,7 +105,6 @@ const CSS = `
       page-break-after: avoid;
     }
 
-    /* Rule above and below the section title, as in the reference layout. */
     h2 {
       margin: 9px 0 6px;
       padding: 2.5px 0;
@@ -202,14 +125,22 @@ const CSS = `
       font-size: 9.7pt;
       line-height: 1.34;
       color: ${BODY};
-      text-align: justify;
+      text-align: left;
     }
 
-    .profile p { text-align: justify; }
+    .skills p {
+      margin: 0 0 4px;
+      text-align: left;
+    }
+
+    .skills strong {
+      font-weight: 700;
+      color: ${NAVY};
+    }
 
     ul.bullets {
       margin: 0;
-      padding: 0 0 0 15px;
+      padding: 0 0 0 18px;
       list-style: disc;
     }
 
@@ -220,7 +151,7 @@ const CSS = `
       font-size: 9.7pt;
       line-height: 1.34;
       color: ${BODY};
-      text-align: justify;
+      text-align: left;
       break-inside: avoid;
       page-break-inside: avoid;
     }
@@ -233,30 +164,30 @@ const CSS = `
       page-break-inside: auto;
     }
 
-    .job .company {
+    .job-header {
+      display: block;
       margin: 0;
-      font-size: 10pt;
-      font-weight: 700;
-      color: ${INK};
-      text-align: left;
       break-after: avoid;
       page-break-after: avoid;
     }
 
     .job .role {
-      margin: 0;
       font-size: 10pt;
       font-weight: 700;
       color: ${NAVY};
-      text-align: left;
-      break-after: avoid;
-      page-break-after: avoid;
     }
 
-    .job .job-meta {
-      margin: 0;
+    .job .date {
       font-size: 9.2pt;
-      font-style: italic;
+      font-weight: 700;
+      color: ${INK};
+      white-space: nowrap;
+    }
+
+    .job .company {
+      margin: 0 0 2px;
+      font-size: 10pt;
+      font-weight: 700;
       color: ${INK};
       text-align: left;
       break-after: avoid;
@@ -268,61 +199,12 @@ const CSS = `
       font-size: 9.2pt;
       font-style: italic;
       color: ${MUTED};
-      text-align: justify;
+      text-align: left;
       break-after: avoid;
       page-break-after: avoid;
     }
 
-    table.competencies {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      font-size: 9.2pt;
-      break-inside: auto;
-      page-break-inside: auto;
-    }
-
-    table.competencies th,
-    table.competencies td {
-      border: 0.6pt solid ${BORDER};
-      padding: 3.5px 6px;
-      vertical-align: top;
-      text-align: left;
-      line-height: 1.3;
-      word-break: normal;
-      overflow-wrap: break-word;
-    }
-
-    table.competencies thead th {
-      background: ${HEAD_BG};
-      color: #fff;
-      font-weight: 700;
-      font-size: 9pt;
-      border-color: ${HEAD_BG};
-    }
-
-    table.competencies thead { display: table-header-group; }
-    table.competencies tr { break-inside: avoid; page-break-inside: avoid; }
-
-    /* Width applies to the column; the navy label colour is body-rows only,
-       otherwise it would repaint the white header text navy-on-navy. */
-    table.competencies .cat { width: 33%; }
-
-    table.competencies tbody td.cat {
-      font-weight: 700;
-      color: ${NAVY};
-    }
-
-    table.competencies tbody td.items { color: ${BODY}; }
-
     .education { margin: 0 0 6px; }
-
-    .edu-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 12px;
-    }
 
     .edu-degree {
       font-size: 9.9pt;
@@ -331,7 +213,6 @@ const CSS = `
     }
 
     .edu-year {
-      flex-shrink: 0;
       font-size: 9.9pt;
       font-weight: 700;
       color: ${NAVY};
@@ -339,11 +220,15 @@ const CSS = `
     }
 
     .edu-school {
-      margin: 0;
       font-size: 9.5pt;
       color: ${BODY};
-      text-align: left;
       line-height: 1.3;
+    }
+
+    ul.certifications {
+      margin: 0;
+      padding-left: 18px;
+      list-style: disc;
     }
 
     ul.certifications li { margin: 0 0 2px; }
@@ -353,7 +238,7 @@ export const navyTechnicalSerifTemplate = {
   id: "navy-technical-serif",
   label: "Navy Technical Serif (Technical Summary)",
   description:
-    "LaTeX-style navy serif, justified text, Core Competencies table — the only template with a Technical Summary section.",
+    "LaTeX-style navy serif, left-aligned, paragraph skills — the only template with a Technical Summary section.",
   /** Signals the generator to append the Technical Summary prompt rules. */
   requiresTechnicalSummary: true,
   render(data) {
@@ -383,17 +268,15 @@ export const navyTechnicalSerifTemplate = {
       { className: "technical-summary" }
     )}
 
-    ${renderOptionalSection("Professional Experience", renderJobs(data.experience), {
+    ${renderOptionalSection("Skills", renderSkills(data.skills), { className: "skills" })}
+
+    ${renderOptionalSection("Professional Experience", renderJobsUs(data.experience), {
       className: "experience"
     })}
 
-    ${renderOptionalSection("Core Competencies", renderCompetencyTable(data.skills), {
-      className: "skills"
-    })}
+    ${renderOptionalSection("Education", renderEducationBlock(data.education))}
 
-    ${renderOptionalSection("Education", renderEducation(data.education))}
-
-    ${renderOptionalSection("Certifications", renderCertifications(data.certifications))}
+    ${renderOptionalSection("Certifications", renderCerts(data.certifications, { listClass: "bullets certifications" }))}
   </main>`
     });
   }
