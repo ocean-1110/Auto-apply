@@ -2289,15 +2289,14 @@ async function copySheetRow() {
     companyName,
     jdLink,
     includeDate: true,
-    workArrangement: selJob.workArrangement || "",
-    employmentType: selJob.employmentType || "",
     salaryMin: selJob.salaryMin || "",
-    salaryMax: selJob.salaryMax || "",
-    datePosted: selJob.datePosted || ""
+    salaryMax: selJob.salaryMax || ""
   });
   try {
     await navigator.clipboard.writeText(tsv);
-    setStatus("Sheet row copied. Click the first cell of an empty row in Sheets, then paste (Ctrl+V).");
+    setStatus(
+      "Sheet row copied (Created Date → Apply Status). Click column A of an empty row in Sheets, then paste (Ctrl+V)."
+    );
   } catch {
     setStatus("Clipboard write failed. Try again after focusing the popup.");
   }

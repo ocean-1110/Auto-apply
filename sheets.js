@@ -17,6 +17,9 @@ export function extractSheetGid(url) {
   return match ? match[1] : "";
 }
 
+/** Apps Script API versions that know the current sheet column layout. */
+const CURRENT_SHEET_API_VERSION = "2026-09-12";
+
 function validateWebAppUrl(webAppUrl) {
   const endpoint = String(webAppUrl || "").trim();
   if (!endpoint || !/^https:\/\/script\.google\.com\//i.test(endpoint)) {
@@ -74,6 +77,33 @@ export function formatApplicationDate(date = new Date()) {
   return `${month}/${day}/${year}`;
 }
 
+/**
+ * Format salary as "$120000 - $150000" (or a single "$120000" when only one bound exists).
+ */
+export function formatSalaryRange(salaryMin = "", salaryMax = "") {
+  const toDigits = (value) => {
+    const s = String(value || "").trim();
+    if (!s) return "";
+    const cleaned = s.replace(/[$,\s]/g, "");
+    const kMatch = cleaned.match(/^([\d.]+)\s*[kK]\b/i) || cleaned.match(/^([\d.]+)[kK]/);
+    if (kMatch) return String(Math.round(Number(kMatch[1]) * 1000));
+    const n = Number(cleaned.replace(/[^\d.]/g, ""));
+    if (Number.isFinite(n) && n > 0) return String(Math.round(n));
+    const digits = cleaned.match(/\d+/);
+    return digits ? digits[0] : "";
+  };
+
+  const min = toDigits(salaryMin);
+  const max = toDigits(salaryMax);
+  if (min && max) {
+    if (min === max) return `$${min}`;
+    return `$${min} - $${max}`;
+  }
+  if (min) return `$${min}`;
+  if (max) return `$${max}`;
+  return "";
+}
+
 /** Normalize job URLs for duplicate checks (matches capture queue logic). */
 export function normalizeSheetJobLink(value) {
   const raw = String(value || "").trim();
@@ -98,7 +128,7 @@ export function isJobLinkOnSheet(existingLinks, jdLink) {
 
 export class JobAlreadyOnSheetError extends Error {
   constructor(jdLink = "") {
-    super("This job is already on your tracking sheet (column A). Skipping resume generation.");
+    super("This job is already on your tracking sheet (Link column). Skipping resume generation.");
     this.name = "JobAlreadyOnSheetError";
     this.code = "ALREADY_ON_SHEET";
     this.jdLink = String(jdLink || "").trim();
@@ -106,38 +136,37 @@ export class JobAlreadyOnSheetError extends Error {
 }
 
 /**
- * Tab-separated row matching sheet columns A–I:
- * JOB URL | JOB TITLE | COMPANY NAME | Application Date |
- * Work arrangement | Employment type | Salary min | Salary max | Date posted
+ * Tab-separated row matching sheet columns A–H:
+ * No | Created Date | Title | Company | Link | Salary | JD | Apply Status
  * Paste into the first cell of an empty row in Google Sheets.
+ * No and JD are left blank for manual paste; Salary uses "$min - $max".
  */
 export function buildSheetRowTsv({
   jobTitle,
   companyName,
   jdLink,
   includeDate = true,
-  workArrangement = "",
-  employmentType = "",
   salaryMin = "",
   salaryMax = "",
-  datePosted = ""
+  applicationStatus = ""
 }) {
-  const cells = [jdLink || "", jobTitle || "", companyName || ""];
-  cells.push(includeDate ? formatApplicationDate() : "");
-  cells.push(
-    workArrangement || "",
-    employmentType || "",
-    salaryMin || "",
-    salaryMax || "",
-    datePosted || ""
-  );
+  const cells = [
+    "", // No — filled by Apps Script on auto-append; blank for manual paste
+    includeDate ? formatApplicationDate() : "",
+    jobTitle || "",
+    companyName || "",
+    jdLink || "",
+    formatSalaryRange(salaryMin, salaryMax),
+    "", // JD — intentionally blank
+    applicationStatus || ""
+  ];
   return cells.join("\t");
 }
 
 /**
  * Appends one row via the deployed Apps Script web app.
  * Uses text/plain body to avoid CORS preflight issues with Google Apps Script.
- * Optional applicationStatus writes column J (Status) when track-status is enabled.
+ * Optional applicationStatus writes column H (Apply Status) when track-status is enabled.
  */
 export async function appendJobToSpreadsheet({
   spreadsheetUrl,
@@ -146,11 +175,8 @@ export async function appendJobToSpreadsheet({
   companyName,
   jdLink,
   sheetName = "",
-  workArrangement = "",
-  employmentType = "",
   salaryMin = "",
   salaryMax = "",
-  datePosted = "",
   applicationStatus = ""
 }) {
   const spreadsheetId = extractSpreadsheetId(spreadsheetUrl);
@@ -169,6 +195,7 @@ export async function appendJobToSpreadsheet({
   }
 
   const status = String(applicationStatus || "").trim();
+  const salary = formatSalaryRange(salaryMin, salaryMax);
   const payload = {
     action: "appendJob",
     spreadsheetId,
@@ -178,24 +205,17 @@ export async function appendJobToSpreadsheet({
     jobTitle: jobTitle || "",
     companyName: companyName || "",
     applicationDate: formatApplicationDate(),
-    workArrangement: workArrangement || "",
-    employmentType: employmentType || "",
+    salary,
     salaryMin: salaryMin || "",
     salaryMax: salaryMax || "",
-    datePosted: datePosted || "",
     ...(status ? { applicationStatus: status } : null)
   };
 
   const result = await postToSheetsWebApp(endpoint, payload);
   const version = String(result.apiVersion || "");
-  if (!result.row || (version !== "2026-08-09" && version !== "2026-08-23")) {
+  if (!result.row || version !== CURRENT_SHEET_API_VERSION) {
     throw new Error(
       "Your Apps Script Web App is outdated (still running old code). In the extension click Copy script → paste into Apps Script → Save → Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Then try again."
-    );
-  }
-  if (status && version !== "2026-08-23") {
-    throw new Error(
-      "Status tracking needs the latest Apps Script. Click Copy script → paste → Save → Deploy a new Web App version."
     );
   }
 
@@ -209,7 +229,7 @@ export async function appendJobToSpreadsheet({
 }
 
 /**
- * Update column J (Status) for an existing row matched by job URL.
+ * Update column H (Apply Status) for an existing row matched by job Link (column E).
  */
 export async function updateJobStatusInSpreadsheet({
   spreadsheetUrl,
@@ -243,7 +263,7 @@ export async function updateJobStatusInSpreadsheet({
     applicationStatus: status
   });
 
-  if (String(result.apiVersion || "") !== "2026-08-23") {
+  if (String(result.apiVersion || "") !== CURRENT_SHEET_API_VERSION) {
     throw new Error(
       "Status updates need the latest Apps Script. Click Copy script → paste → Save → Deploy a new Web App version."
     );

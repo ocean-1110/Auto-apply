@@ -153,8 +153,10 @@ Chrome cannot write to a spreadsheet from the share/edit link alone. You need a 
 7. Copy the **Web App URL** into the extension with the spreadsheet link
 
 The spreadsheet URL's `gid` selects the sheet tab. After a resume is generated, the extension
-appends JD link, role, company, and date to columns A–D. CSV import reads column A through the
-same web app and ignores jobs whose URL is already present.
+appends a row as:
+`No | Created Date | Title | Company | Link | Salary | JD | Apply Status`
+(Salary looks like `$120000 - $150000`; JD is left blank). Duplicate checks use the **Link**
+column through the same web app.
 
 If you update the Apps Script later, use **Deploy → Manage deployments → Edit → New version**.
 Saving the script alone does not update an existing Web App deployment.
@@ -170,14 +172,14 @@ This extension integrates with the sibling project **`dice-jobright-sf-job-captu
    (Listens on `http://127.0.0.1:3847` by default.)
 
 2. Configure your **Google Sheet** in this extension (spreadsheet URL + Apps Script web app URL).
-   Column A is used to skip jobs you've already tracked.
+   The **Link** column is used to skip jobs you've already tracked.
 
 3. Open the extension panel → **Imported** sidebar:
    - **Auto-capture every 4h** — runs while Chrome is open (JobRight via your login; Dice via the capture API).
    - **Capture now** — manual run.
    - Filter list: **All / Dice / Jobright / LinkedIn / Others**.
 
-New jobs are merged into the **Imported** list (extension storage — no CSV import step). Jobs whose URL is already in column A of your tracking sheet are skipped (“already on sheet”). Jobright also skips jobs you already applied to on Jobright.
+New jobs are merged into the **Imported** list (extension storage — no CSV import step). Jobs whose URL is already in the **Link** column of your tracking sheet are skipped (“already on sheet”). Jobright also skips jobs you already applied to on Jobright.
 
 After each run (manual or every 4h), the panel shows a summary like:
 

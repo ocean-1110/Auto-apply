@@ -5992,11 +5992,8 @@ async function saveResumeAndCoverLetter(
         jobTitle: jobMeta.jobTitle,
         companyName: jobMeta.companyName,
         jdLink: jobMeta.jdLink,
-        workArrangement: jobMeta.workArrangement || "",
-        employmentType: jobMeta.employmentType || "",
         salaryMin: jobMeta.salaryMin || "",
         salaryMax: jobMeta.salaryMax || "",
-        datePosted: jobMeta.datePosted || "",
         applicationStatus: jobMeta.trackApplicationStatus ? "Resume Generated" : ""
       });
       const sheetLabel = sheetResult.sheetName

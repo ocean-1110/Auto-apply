@@ -13,19 +13,22 @@
  *    (open the tab first, then copy the browser URL), or set Sheet tab name
  *
  * After generation, the extension appends:
- *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName, applicationDate,
- *   workArrangement, employmentType, salaryMin, salaryMax, datePosted,
- *   applicationStatus (optional — column J when track status is enabled)
+ *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName,
+ *   applicationDate, salary (or salaryMin/salaryMax), applicationStatus
  *
- * Row order matches your sheet headers:
- *   A JOB URL | B JOB TITLE | C COMPANY NAME | D Application Date |
- *   E Work arrangement | F Employment type | G Salary min | H Salary max | I Date posted |
- *   J Status (optional: "Resume Generated" → "Applied")
+ * Row order matches sheet headers:
+ *   A No | B Created Date | C Title | D Company | E Link | F Salary | G JD | H Apply Status
  *
- * Rows are written on the selected tab, in the first empty cell of column A
- * (same place you'd paste after Copy row).
+ * - Salary is one cell, e.g. "$120000 - $150000"
+ * - JD (column G) is left blank on purpose
+ * - Apply Status (column H) is written when track-status is enabled
+ * - Duplicate checks and status updates match on Link (column E)
+ *
+ * Rows are written on the selected tab, in the first empty cell of column A.
  */
-var API_VERSION = "2026-08-23";
+var API_VERSION = "2026-09-12";
+var LINK_COLUMN = 5;
+var STATUS_COLUMN = 8;
 
 function jsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(
@@ -69,28 +72,44 @@ function getTargetSheet(spreadsheet, sheetGid, sheetName) {
   return spreadsheet.getSheets()[0];
 }
 
-function getColumnAValues(sheet) {
+function getColumnValues(sheet, columnIndex) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 1) return [];
-  // getRange(row, column, numRows, numColumns) — NOT end-row/end-column.
-  return sheet.getRange(1, 1, lastRow, 1).getDisplayValues().map(function (row) {
+  return sheet.getRange(1, columnIndex, lastRow, 1).getDisplayValues().map(function (row) {
     return String(row[0] || "").trim();
   });
 }
 
+function getColumnAValues(sheet) {
+  return getColumnValues(sheet, 1);
+}
+
 function getJobLinks(sheet) {
-  return getColumnAValues(sheet).filter(function (value) {
-    return value !== "" && !/^job\s*(url|link)$/i.test(value);
+  return getColumnValues(sheet, LINK_COLUMN).filter(function (value) {
+    if (!value) return false;
+    if (/^(job\s*)?(url|link)$/i.test(value)) return false;
+    if (/^link$/i.test(value)) return false;
+    return true;
   });
 }
 
-/** First empty row in column A — matches pasting under the last job URL. */
+/** First empty row in column A — matches pasting under the last numbered row. */
 function findNextEmptyRowInColumnA(sheet) {
   var values = getColumnAValues(sheet);
   for (var i = values.length - 1; i >= 0; i -= 1) {
     if (values[i] !== "") return i + 2; // 1-based next row
   }
   return 1;
+}
+
+function nextSerialNo(sheet) {
+  var values = getColumnAValues(sheet);
+  var max = 0;
+  for (var i = 0; i < values.length; i += 1) {
+    var n = parseInt(String(values[i]).replace(/[^\d]/g, ""), 10);
+    if (!isNaN(n) && n > max) max = n;
+  }
+  return max + 1;
 }
 
 function normalizeJobLink(value) {
@@ -103,33 +122,57 @@ function normalizeJobLink(value) {
 function findRowByJobLink(sheet, jobLink) {
   var target = normalizeJobLink(jobLink);
   if (!target) return 0;
-  var values = getColumnAValues(sheet);
+  var values = getColumnValues(sheet, LINK_COLUMN);
   for (var i = 0; i < values.length; i += 1) {
     if (normalizeJobLink(values[i]) === target) return i + 1;
   }
   return 0;
 }
 
+function salaryDigits_(value) {
+  var s = String(value || "").trim();
+  if (!s) return "";
+  var cleaned = s.replace(/[$,\s]/g, "");
+  var kMatch = cleaned.match(/^([\d.]+)\s*[kK]/i);
+  if (kMatch) return String(Math.round(Number(kMatch[1]) * 1000));
+  var n = Number(cleaned.replace(/[^\d.]/g, ""));
+  if (Number.isFinite(n) && n > 0) return String(Math.round(n));
+  var digits = cleaned.match(/\d+/);
+  return digits ? digits[0] : "";
+}
+
+function formatSalaryRange_(minValue, maxValue) {
+  var min = salaryDigits_(minValue);
+  var max = salaryDigits_(maxValue);
+  if (min && max) {
+    if (min === max) return "$" + min;
+    return "$" + min + " - $" + max;
+  }
+  if (min) return "$" + min;
+  if (max) return "$" + max;
+  return "";
+}
+
+function resolveSalary_(data) {
+  var ready = String(data.salary || "").trim();
+  if (ready) return ready;
+  return formatSalaryRange_(data.salaryMin, data.salaryMax);
+}
+
 function appendJobRow(sheet, data) {
   var row = findNextEmptyRowInColumnA(sheet);
   var status = String(data.applicationStatus || "").trim();
   var cells = [
-    data.jobLink || "",
+    nextSerialNo(sheet),
+    data.applicationDate || "",
     data.jobTitle || "",
     data.companyName || "",
-    data.applicationDate || "",
-    data.workArrangement || "",
-    data.employmentType || "",
-    data.salaryMin || "",
-    data.salaryMax || "",
-    data.datePosted || ""
+    data.jobLink || "",
+    resolveSalary_(data),
+    "", // JD — intentionally blank
+    status
   ];
-  if (status) {
-    cells.push(status);
-    sheet.getRange("A" + row + ":J" + row).setValues([cells]);
-  } else {
-    sheet.getRange("A" + row + ":I" + row).setValues([cells]);
-  }
+  sheet.getRange(row, 1, row, STATUS_COLUMN).setValues([cells]);
   return {
     ok: true,
     apiVersion: API_VERSION,
@@ -146,7 +189,7 @@ function updateJobStatus(sheet, data) {
   if (!row) {
     throw new Error('No sheet row found for job URL: "' + String(data.jobLink || "") + '"');
   }
-  sheet.getRange("J" + row).setValue(status);
+  sheet.getRange(row, STATUS_COLUMN).setValue(status);
   return {
     ok: true,
     apiVersion: API_VERSION,
