@@ -18,7 +18,7 @@ export function extractSheetGid(url) {
 }
 
 /** Apps Script API versions that know the current sheet column layout. */
-const CURRENT_SHEET_API_VERSION = "2026-09-12";
+export const CURRENT_SHEET_API_VERSION = "2026-09-12";
 
 function validateWebAppUrl(webAppUrl) {
   const endpoint = String(webAppUrl || "").trim();
@@ -27,7 +27,41 @@ function validateWebAppUrl(webAppUrl) {
       "Paste the Apps Script Web App URL (Deploy → Web app). Spreadsheet share link alone cannot be written to from Chrome."
     );
   }
+  // Must be the /exec Web App URL, not the script editor or /dev link.
+  if (!/\/macros\/s\/|\/a\/macros\//i.test(endpoint) && !/\/exec(?:\?|$)/i.test(endpoint)) {
+    throw new Error(
+      "That does not look like a Web App URL. In Apps Script open Deploy → Manage deployments, copy the Web app URL (ends with /exec), and paste it here — not the script source."
+    );
+  }
   return endpoint;
+}
+
+/**
+ * GET the web app to read apiVersion from the live deployment (Save alone does not update this).
+ */
+export async function pingSheetsWebApp(webAppUrl) {
+  const endpoint = validateWebAppUrl(webAppUrl);
+  const response = await fetch(endpoint, { method: "GET", redirect: "follow" });
+  const result = await readSheetsResponse(response);
+  const apiVersion = String(result.apiVersion || "").trim();
+  return {
+    ok: true,
+    apiVersion,
+    current: CURRENT_SHEET_API_VERSION,
+    upToDate: apiVersion === CURRENT_SHEET_API_VERSION,
+    message: String(result.message || "")
+  };
+}
+
+function outdatedDeployHint(extra = "") {
+  const bit = String(extra || "").trim();
+  return (
+    "Apps Script is still serving old code (Save is not enough). " +
+    "In the spreadsheet: Extensions → Apps Script → paste Copy Apps Script → Save → " +
+    "Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. " +
+    "Then paste the same Web app URL (…/exec) into the extension. " +
+    (bit ? `Detail: ${bit}` : `Expected apiVersion ${CURRENT_SHEET_API_VERSION}.`)
+  );
 }
 
 async function readSheetsResponse(response) {
@@ -43,14 +77,15 @@ async function readSheetsResponse(response) {
     throw new Error(parsed?.error || `Google Sheet request failed (HTTP ${response.status}).`);
   }
   if (!parsed) {
-    throw new Error("Google Sheet returned an invalid response. Redeploy the latest Apps Script code.");
+    throw new Error(
+      "Google Sheet returned HTML/invalid JSON (often a wrong URL or an undeployed script). " +
+        outdatedDeployHint()
+    );
   }
   if (parsed.ok === false) {
     const errText = String(parsed.error || "Google Sheet request failed.");
-    if (/number of rows in the data does not match/i.test(errText)) {
-      throw new Error(
-        "Your Apps Script Web App is still the old version. Click Copy script in the extension, paste into Apps Script, Save, then Deploy → Manage deployments → Edit → New version → Deploy."
-      );
+    if (/number of (rows|columns) in the data does not match/i.test(errText)) {
+      throw new Error(outdatedDeployHint(errText));
     }
     throw new Error(errText);
   }
@@ -215,7 +250,11 @@ export async function appendJobToSpreadsheet({
   const version = String(result.apiVersion || "");
   if (!result.row || version !== CURRENT_SHEET_API_VERSION) {
     throw new Error(
-      "Your Apps Script Web App is outdated (still running old code). In the extension click Copy script → paste into Apps Script → Save → Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy. Then try again."
+      outdatedDeployHint(
+        version
+          ? `deployed apiVersion="${version}", need "${CURRENT_SHEET_API_VERSION}"`
+          : "response had no apiVersion (old deployment)"
+      )
     );
   }
 
@@ -265,7 +304,9 @@ export async function updateJobStatusInSpreadsheet({
 
   if (String(result.apiVersion || "") !== CURRENT_SHEET_API_VERSION) {
     throw new Error(
-      "Status updates need the latest Apps Script. Click Copy script → paste → Save → Deploy a new Web App version."
+      outdatedDeployHint(
+        `deployed apiVersion="${result.apiVersion || ""}", need "${CURRENT_SHEET_API_VERSION}"`
+      )
     );
   }
 
@@ -295,9 +336,7 @@ export async function getExistingJobLinks({ spreadsheetUrl, webAppUrl, sheetName
   const result = await readSheetsResponse(response);
 
   if (!Array.isArray(result.jobLinks)) {
-    throw new Error(
-      "The Apps Script deployment is outdated. Copy the latest script, then deploy a new Web App version."
-    );
+    throw new Error(outdatedDeployHint("getJobLinks missing from deployment"));
   }
   return result.jobLinks.map((value) => String(value || ""));
 }

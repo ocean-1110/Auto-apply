@@ -21,7 +21,8 @@ import {
   sanitizeJobFolderName,
   unlockOutputDirectory,
   getOutputDirectoryHandle,
-  queryDirectoryPermission
+  queryDirectoryPermission,
+  probeDirectoryAccess
 } from "./fs-output.js";
 import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText, jobIdFromLink } from "./csv-jobs.js";
 import {
@@ -46,6 +47,11 @@ document.body.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
 document.documentElement.classList.add(UI_MODE === "sidebar" ? "ui-sidebar" : "ui-window");
 if (UI_MODE === "sidebar") {
   document.body.classList.add("ocean-in-panel");
+  const layout = document.querySelector(".layout");
+  const profileCard = document.getElementById("profileToolbarCard");
+  if (layout && profileCard) {
+    layout.prepend(profileCard);
+  }
   const rail = document.getElementById("sidebarActionRail");
   const actions = document.getElementById("primaryActions");
   if (rail && actions) {
@@ -86,10 +92,8 @@ const outputDirAbsPathEl = document.getElementById("outputDirAbsPath");
 const selectOutputDirBtn = document.getElementById("selectOutputDir");
 const aiQaSectionEl = document.getElementById("aiQaSection");
 const copySheetRowBtn = document.getElementById("copySheetRow");
-const pasteJdBtn = document.getElementById("pasteJd");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
-const scrapeSiteSelectEl = document.getElementById("scrapeSiteSelect");
-const SCRAPE_SITE_KEY = "selected_scrape_site";
+const pasteJdBtn = document.getElementById("pasteJd");
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const atsRewriteToggleEl = document.getElementById("atsRewriteToggle");
 const atsRewriteToggleLabelEl = document.getElementById("atsRewriteToggleLabel");
@@ -565,7 +569,7 @@ async function selectOutputDirectory() {
 
 /**
  * Request folder write access while this click is still a user gesture.
- * Must run before awaiting the service worker (Generate / Batch / Save).
+ * Must be the FIRST await on Generate / Batch / Save — later awaits burn the gesture.
  */
 async function unlockFolderForSession({ quiet = false } = {}) {
   const unlocked = await unlockOutputDirectory({ interactive: true });
@@ -586,14 +590,17 @@ async function unlockFolderForSession({ quiet = false } = {}) {
   if (!quiet) {
     setStatus(
       unlocked.error ||
-        "Click Grant once to unlock the output folder for this browser session.",
+        "Click Unlock once. If Chrome asks, choose Allow on every visit so saves keep working.",
       "error"
     );
   }
   return false;
 }
 
-/** Soft check on panel open: remind once if the saved folder needs a click. */
+/**
+ * Chrome often revokes File System Access while this panel is backgrounded during
+ * a long generate. Detect that early so Unlock can run before PDFs are ready.
+ */
 async function refreshFolderPermissionBanner() {
   try {
     const handle = await getOutputDirectoryHandle();
@@ -602,16 +609,14 @@ async function refreshFolderPermissionBanner() {
       return;
     }
     const state = await queryDirectoryPermission(handle);
-    if (state === "granted") {
+    const usable = state === "granted" && (await probeDirectoryAccess(handle));
+    if (usable) {
       awaitingFolderPermission = false;
       if (!((await chrome.storage.local.get("pending_fs_write")).pending_fs_write)) {
         hidePermissionBanner();
       }
       return;
     }
-    // Folder is remembered but Chrome revoked write access (common after restart
-    // or when several Chromium profiles run the extension). One click unlocks
-    // the rest of this session.
     awaitingFolderPermission = true;
     showPermissionBanner("");
     armPermissionRetryOnNextGesture();
@@ -625,11 +630,21 @@ function showSaveBanner(pathLabel) {
   const label = pathLabel || "Files saved successfully.";
   saveBannerPathEl.textContent = label;
   saveBannerPathEl.title = label;
+  const textEl = saveBannerEl.querySelector(".save-banner-text");
+  if (textEl) textEl.hidden = false;
   saveBannerEl.hidden = false;
 }
 
 function hideSaveBanner() {
-  if (saveBannerEl) saveBannerEl.hidden = true;
+  // Keep Preview / Copy path / Folder on the file card; only clear the path line.
+  if (!saveBannerEl) return;
+  if (saveBannerPathEl) {
+    saveBannerPathEl.textContent = "";
+    saveBannerPathEl.title = "";
+  }
+  const textEl = saveBannerEl.querySelector(".save-banner-text");
+  if (textEl) textEl.hidden = true;
+  saveBannerEl.hidden = false;
 }
 
 function resumeFolderNameForJob(job) {
@@ -1498,6 +1513,9 @@ async function removeSelectedImportedJobs() {
 }
 
 async function batchGenerateSelectedJobs() {
+  // Unlock first — collectBatchGenerateSettings awaits storage and burns the gesture.
+  if (!(await unlockFolderForSession())) return;
+
   const jobIds = visibleImportedJobIds().filter((id) => importedJobsChecked.has(id));
   if (!jobIds.length) {
     setStatus("Check one or more jobs, then click Batch resume build.", "error");
@@ -1517,8 +1535,6 @@ async function batchGenerateSelectedJobs() {
     setStatus("Selected jobs need a job URL or stored JD text.", "error");
     return;
   }
-
-  if (!(await unlockFolderForSession())) return;
 
   generationStartPending = true;
   updateGenerationProgress({
@@ -1554,6 +1570,8 @@ async function batchApplySelectedJobs() {
     );
     return;
   }
+
+  if (!(await unlockFolderForSession())) return;
 
   const collected = await collectBatchGenerateSettings();
   if (!collected) return;
@@ -1768,6 +1786,9 @@ async function applyImportedJob(jobId, { preferSubmit = false } = {}) {
     return;
   }
 
+  // Unlock first while the Apply click is still a user gesture.
+  const unlocked = await unlockFolderForSession({ quiet: true });
+
   // Copy job data into the existing manual editor fields.
   jobTitleEl.value = job.jobTitle || "";
   companyNameEl.value = job.companyName || "";
@@ -1787,8 +1808,7 @@ async function applyImportedJob(jobId, { preferSubmit = false } = {}) {
 
   await chrome.storage.local.set({ imported_jobs_selected_id: jobId });
 
-  // Keep folder unlocked for any resume save this Apply may trigger.
-  if (!(await unlockFolderForSession({ quiet: true }))) {
+  if (!unlocked) {
     // Still allow Apply if PDFs already exist; only block when we know we need a write.
     const docs = await getGeneratedDocsForJob(jobId).catch(() => null);
     if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
@@ -1975,8 +1995,8 @@ function showPermissionBanner(folderName) {
   if (!permBannerEl) return;
   if (permBannerPathEl) {
     permBannerPathEl.textContent = folderName
-      ? `Waiting to write ${folderName}`
-      : "Output folder needs one click to unlock for this session";
+      ? `Waiting to write ${folderName} — click Unlock (choose Allow on every visit if offered)`
+      : "Chrome revoked folder access (common while generating). Click Unlock once — prefer Allow on every visit.";
   }
   permBannerEl.hidden = false;
 }
@@ -2060,8 +2080,7 @@ async function loadSettings() {
     "preview_mode_enabled",
     "ats_rewrite_enabled",
     "ui_panel_mode",
-    "last_ats_report",
-    "selected_scrape_site"
+    "last_ats_report"
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -2093,8 +2112,6 @@ async function loadSettings() {
     atsRewriteToggleEl.checked = data.ats_rewrite_enabled === true;
     updateAtsRewriteToggleLabel();
   }
-  fillScrapeSiteSelect(data.selected_scrape_site || "auto");
-  refreshScrapeSiteHint().catch(() => {});
   updateGenerateButtonLabel();
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
   refreshQaBank().catch(() => {});
@@ -2148,10 +2165,11 @@ async function waitForGenerationComplete(timeoutMs = 10 * 60 * 1000) {
 }
 
 async function startGenerationAndWait() {
+  // Unlock first while the click gesture is still active.
+  if (!(await unlockFolderForSession())) return { ok: false };
+
   const collected = await collectJobMetaOrShowError();
   if (!collected) return { ok: false };
-
-  if (!(await unlockFolderForSession())) return { ok: false };
 
   generationStartPending = true;
   updateGenerationProgress({
@@ -2185,40 +2203,6 @@ async function startGenerationAndWait() {
     throw new Error(statusText);
   }
   return { ok: true, status: statusText };
-}
-
-function scrapeSiteCatalog() {
-  return (
-    globalThis.OceanScrapeCatalog?.SCRAPE_SITES || [{ id: "auto", label: "Auto-detect from this page" }]
-  );
-}
-
-function fillScrapeSiteSelect(selectedId = "auto") {
-  if (!scrapeSiteSelectEl) return;
-  const sites = scrapeSiteCatalog();
-  scrapeSiteSelectEl.innerHTML = "";
-  for (const site of sites) {
-    const opt = document.createElement("option");
-    opt.value = site.id;
-    opt.textContent = site.label;
-    scrapeSiteSelectEl.appendChild(opt);
-  }
-  const valid = sites.some((s) => s.id === selectedId);
-  scrapeSiteSelectEl.value = valid ? selectedId : "auto";
-}
-
-async function refreshScrapeSiteHint() {
-  const autoOpt = scrapeSiteSelectEl?.querySelector('option[value="auto"]');
-  if (!autoOpt) return;
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    const detected = globalThis.OceanScrapeCatalog?.detectScrapeSite(tab?.url || "") || "auto";
-    const label = scrapeSiteCatalog().find((s) => s.id === detected)?.label;
-    autoOpt.textContent =
-      detected !== "auto" && label ? `Auto-detect (${label})` : "Auto-detect from this page";
-  } catch {
-    autoOpt.textContent = "Auto-detect from this page";
-  }
 }
 
 async function upsertScrapedJobIntoList(d, { site = "", tabUrl = "" } = {}) {
@@ -2278,7 +2262,7 @@ async function scrapeCurrentJobPage() {
   setBusy(true);
   if (scrapePageBtn) scrapePageBtn.disabled = true;
   try {
-    const siteId = scrapeSiteSelectEl?.value || "auto";
+    const siteId = "auto";
     const res = await chrome.runtime.sendMessage({ type: "scrape_current_page", siteId });
     if (!res?.ok) {
       throw new Error(res?.error || "Could not scrape this page.");
@@ -2301,10 +2285,44 @@ async function scrapeCurrentJobPage() {
 
     await persistJobFields();
     await chrome.storage.local.set({ scraped_job_meta: scrapedJobMeta });
+    const scrapedSite = String(res.site || "").trim();
     const jobId = await upsertScrapedJobIntoList(d, {
-      site: res.site || "",
+      site: scrapedSite,
       tabUrl: res.tabUrl || ""
     });
+
+    let scrapeHost = "";
+    try {
+      scrapeHost = new URL(String(res.tabUrl || d.jdLink || "")).hostname;
+    } catch {
+      scrapeHost = "";
+    }
+    const onDice = isDiceSource(scrapedSite) || /(^|\.)dice\.com$/i.test(scrapeHost);
+
+    // Non-Dice: add to the job list only so you can batch-build resumes later.
+    // Dice: keep scrape → generate → Apply (handles the full Easy Apply flow).
+    if (!onDice) {
+      const siteLabel = scrapedSite ? ` (${scrapedSite})` : "";
+      if (!jobId) {
+        setStatus(
+          `Scraped${siteLabel}: ${d.jobTitle || "job"}, but there is no job URL to add to the list.`,
+          "error"
+        );
+        return;
+      }
+      if (!d.companyName) {
+        setStatus(
+          `Added to job list${siteLabel}: ${d.jobTitle || "job"} — company missing; fill it before batch build.`,
+          "error"
+        );
+        companyNameEl.focus();
+        return;
+      }
+      setStatus(
+        `Added to job list${siteLabel}: ${d.jobTitle || "job"} @ ${d.companyName}. Select it for batch resume build when ready.`
+      );
+      return;
+    }
 
     if (!d.companyName) {
       setStatus(
@@ -2315,7 +2333,7 @@ async function scrapeCurrentJobPage() {
       return;
     }
 
-    const site = res.site ? ` (${res.site})` : "";
+    const site = scrapedSite ? ` (${scrapedSite})` : "";
     setStatus(`Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`, "running");
 
     const gen = await startGenerationAndWait();
@@ -2554,12 +2572,12 @@ async function persistPreviewModeSetting() {
 }
 
 async function generateResumeAndCoverLetter() {
+  // Unlock FIRST while this click is still a user gesture. Awaiting job fields
+  // first burns activation, and Chrome often revokes access mid-generate later.
+  if (!(await unlockFolderForSession())) return;
+
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
-
-  // Unlock the folder NOW (while this click is still a user gesture). Otherwise
-  // Chrome asks again after the long OpenAI/PDF work when the SW tries to save.
-  if (!(await unlockFolderForSession())) return;
 
   generationStartPending = true;
   updateGenerationProgress({
@@ -2956,13 +2974,9 @@ outputDirAbsPathEl?.addEventListener("blur", () => {
   persistOutputAbsolutePathFromInput().catch(() => {});
 });
 
-pasteJdBtn.addEventListener("click", pasteJdFromClipboard);
+pasteJdBtn?.addEventListener("click", pasteJdFromClipboard);
 scrapePageBtn?.addEventListener("click", () => {
   scrapeCurrentJobPage().catch((err) => setStatus(String(err.message || err)));
-});
-scrapeSiteSelectEl?.addEventListener("change", () => {
-  const siteId = scrapeSiteSelectEl.value || "auto";
-  chrome.storage.local.set({ [SCRAPE_SITE_KEY]: siteId }).catch(() => {});
 });
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
@@ -3405,6 +3419,8 @@ panelPollTimer = setInterval(async () => {
       wasGenerationRunning = true;
       updateGenerationProgress({ running: true, statusText });
       setBusy(true);
+      // Chrome may revoke folder access while this panel is backgrounded mid-generate.
+      await refreshFolderPermissionBanner();
     } else if (generationStartPending && !cancelled) {
       // Keep the local "Starting..." UI until the service worker flips the flag.
       updateGenerationProgress({

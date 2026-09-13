@@ -15,6 +15,9 @@ const OUTPUT_DIR_NAME_KEY = "output_directory_name";
 const OUTPUT_DIR_ABS_PATH_KEY = "output_directory_absolute_path";
 const LAST_SAVE_META_KEY = "last_save_meta";
 
+/** In-memory handle after a successful unlock this page lifetime (avoids stale IDB reads). */
+let sessionOutputHandle = null;
+
 function openDb() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -70,6 +73,7 @@ function idbDelete(storeName, key) {
 
 export async function saveOutputDirectoryHandle(handle) {
   if (!handle) throw new Error("Directory handle is required.");
+  sessionOutputHandle = handle;
   await idbSet(HANDLE_STORE, HANDLE_KEY, handle);
   const name = handle.name || "Selected folder";
   await chrome.storage.local.set({ [OUTPUT_DIR_NAME_KEY]: name });
@@ -77,7 +81,9 @@ export async function saveOutputDirectoryHandle(handle) {
 }
 
 export async function getOutputDirectoryHandle() {
+  if (sessionOutputHandle) return sessionOutputHandle;
   const handle = await idbGet(HANDLE_STORE, HANDLE_KEY);
+  if (handle) sessionOutputHandle = handle;
   return handle || null;
 }
 
@@ -132,6 +138,7 @@ export async function buildResumeFolderAbsolutePath(jobFolderName) {
 }
 
 export async function clearOutputDirectoryHandle() {
+  sessionOutputHandle = null;
   await idbDelete(HANDLE_STORE, HANDLE_KEY);
   await chrome.storage.local.remove([OUTPUT_DIR_NAME_KEY, OUTPUT_DIR_ABS_PATH_KEY]);
 }
@@ -154,29 +161,57 @@ export async function queryDirectoryPermission(handle) {
 }
 
 /**
- * Chrome only allows requestPermission() while a user gesture is active, so the
- * prompt is limited to call paths that started from a real click or key press.
- * Background flushes just report back that a gesture is still needed.
- *
- * Once granted in this document, queryPermission usually stays "granted" for
- * the rest of the panel/session — so unlock once on Generate/Save click, before
- * long background work, and later silent flushes succeed without another prompt.
+ * queryPermission can still say "granted" after Chrome silently revoked access
+ * (common when the extension panel was backgrounded during a long generate).
+ * Prove we can actually read the directory.
  */
-export async function ensureDirectoryPermission(handle, { interactive = false } = {}) {
+export async function probeDirectoryAccess(handle) {
   if (!handle) return false;
-  if ((await queryDirectoryPermission(handle)) === "granted") return true;
-  if (!interactive || !hasUserActivation()) return false;
   try {
-    return (await handle.requestPermission({ mode: "readwrite" })) === "granted";
+    for await (const _entry of handle.entries()) {
+      break;
+    }
+    return true;
   } catch {
     return false;
   }
 }
 
 /**
- * Unlock the saved output folder while a user click is still active.
- * Call this at the start of Generate / Save / Batch — before awaiting the
- * service worker — so permission is already granted when files are flushed.
+ * Chrome only allows requestPermission() while a user gesture is active, so the
+ * prompt is limited to call paths that started from a real click or key press.
+ * Background flushes just report back that a gesture is still needed.
+ *
+ * Chrome may also revoke a prior grant while this tab is backgrounded for a long
+ * OpenAI/PDF run — unlock again with one click (prefer "Allow on every visit").
+ */
+export async function ensureDirectoryPermission(handle, { interactive = false } = {}) {
+  if (!handle) return false;
+  const state = await queryDirectoryPermission(handle);
+  if (state === "granted") {
+    if (await probeDirectoryAccess(handle)) {
+      sessionOutputHandle = handle;
+      return true;
+    }
+    // Stale "granted" — fall through and re-request if we still have a gesture.
+  }
+  if (!interactive || !hasUserActivation()) return false;
+  try {
+    const next = await handle.requestPermission({ mode: "readwrite" });
+    if (next === "granted" && (await probeDirectoryAccess(handle))) {
+      sessionOutputHandle = handle;
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Unlock the saved output folder while a user click is still a user gesture.
+ * Call this as the FIRST await on Generate / Save / Batch — before any other
+ * async work — so Chrome still sees the click as user activation.
  *
  * @returns {Promise<{ ok: boolean, status: "granted"|"prompt"|"missing"|"denied", error?: string }>}
  */
@@ -189,9 +224,11 @@ export async function unlockOutputDirectory({ interactive = true } = {}) {
       error: 'No output folder selected. Click "Select folder" first.'
     };
   }
-  const before = await queryDirectoryPermission(handle);
-  if (before === "granted") return { ok: true, status: "granted" };
+  if (await ensureDirectoryPermission(handle, { interactive: false })) {
+    return { ok: true, status: "granted" };
+  }
   if (!interactive) {
+    const before = await queryDirectoryPermission(handle);
     return {
       ok: false,
       status: before === "denied" ? "denied" : "prompt",
@@ -204,7 +241,7 @@ export async function unlockOutputDirectory({ interactive = true } = {}) {
     ok: false,
     status: (await queryDirectoryPermission(handle)) === "denied" ? "denied" : "prompt",
     error:
-      "Folder access was not granted. Click Grant (or click once in this panel) and allow editing of the output folder."
+      "Folder access was not granted. Click Unlock and choose Allow on every visit if Chrome offers that option."
   };
 }
 

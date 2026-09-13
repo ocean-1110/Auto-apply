@@ -734,11 +734,24 @@ textarea:focus {
 .primary-action-btns {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   margin-bottom: 0;
 }
 
-.primary-action-btns .icon-btn {
+.primary-action-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.primary-action-main > .icon-btn {
+  flex: 1 1 140px;
+  min-width: 0;
+  justify-content: center;
+}
+
+.primary-action-btns > #scrapePageBtn {
   width: 100%;
   justify-content: center;
 }
@@ -1773,6 +1786,12 @@ body.ui-sidebar .layout {
   flex-direction: column;
 }
 
+body.ui-sidebar #profileToolbarCard {
+  width: 100%;
+  order: -1;
+  margin-bottom: 0;
+}
+
 body.ui-sidebar .sidebar {
   width: 100%;
   flex: 1 1 auto;
@@ -1805,15 +1824,25 @@ body.ui-sidebar .primary-actions {
 body.ui-sidebar .primary-action-btns {
   order: 1;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+body.ui-sidebar .primary-action-main {
+  display: flex;
   flex-direction: row;
   gap: 8px;
   width: 100%;
 }
 
-body.ui-sidebar .primary-action-btns > * {
+body.ui-sidebar .primary-action-main > * {
   min-width: 0;
   flex: 1 1 0;
-  width: auto;
+}
+
+body.ui-sidebar .primary-action-btns > #scrapePageBtn {
+  width: 100%;
 }
 
 body.ui-sidebar .gen-options-row {

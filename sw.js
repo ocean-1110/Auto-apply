@@ -71,6 +71,7 @@ import {
   isUrlOnApplySite,
   stepBudgetForSite,
   isAutoSubmitAllowedSite,
+  isAiFormAssistAllowed,
   isGatewaySite
 } from "./ats/adapters.js";
 import {
@@ -1525,7 +1526,8 @@ async function resolveTextAnswers({
   resumeText = "",
   profileId = "",
   applicationBrief = null,
-  site = ""
+  site = "",
+  allowAi = true
 }) {
   const list = (questions || []).filter((q) => q?.id && q?.label);
   if (!list.length) return [];
@@ -1550,7 +1552,7 @@ async function resolveTextAnswers({
     stillNeed.push(q);
   }
 
-  if (!stillNeed.length) {
+  if (!stillNeed.length || !allowAi) {
     resolved.bankHits = bankHits;
     resolved.aiAnswers = 0;
     return resolved;
@@ -1707,7 +1709,7 @@ async function resolveChoiceAnswers(
   applicantInfo = {},
   jobMeta = {},
   resumeText = "",
-  { applicationBrief = null, site = "" } = {}
+  { applicationBrief = null, site = "", allowAi = true } = {}
 ) {
   const list = (questions || []).filter((q) => q?.id && q?.label);
   const resolved = [];
@@ -1725,7 +1727,7 @@ async function resolveChoiceAnswers(
           // The bank knows this candidate's position but this form words its
           // options differently. Hand the bank answer to the AI pass so it maps
           // the meaning onto a real option instead of inventing text.
-          stillNeed.push({ ...q, bankAnswer: answer });
+          if (allowAi) stillNeed.push({ ...q, bankAnswer: answer });
           continue;
         }
         answer = onList;
@@ -1738,7 +1740,7 @@ async function resolveChoiceAnswers(
     }
   }
 
-  if (!stillNeed.length) {
+  if (!stillNeed.length || !allowAi) {
     resolved.bankHits = bankHits;
     resolved.aiAnswers = 0;
     return resolved;
@@ -2062,8 +2064,11 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     await setStatus(`Uploading from ${loc.summary}...`);
   }
 
-  // Auto Apply always uses gpt-4o-mini whole-form planning when a key is present.
-  const planMode = await isAiFormPlanEnabled();
+  const site = detectSiteFromUrl(tab.url || "");
+  // Dice (and any adapter with aiFormAssist:false) uses legacy profile/rules fill
+  // and auto-advances Next/Submit — no whole-form GPT plan or per-field AI.
+  const allowAiFill = isAiFormAssistAllowed(site);
+  const planMode = allowAiFill && (await isAiFormPlanEnabled());
   let formModel = DEFAULT_OPENAI_FORM_MODEL;
   if (planMode) {
     try {
@@ -2079,6 +2084,8 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
       if (isCancelError(err)) throw err;
       /* KB failure must not block the fill — plan still runs with fallback facts. */
     }
+  } else if (!allowAiFill) {
+    await setStatus(`Auto Apply (${applySiteLabel(site)}): rule-based fill (no AI)...`);
   }
 
   await ensureAutofillScript(tab.id);
@@ -2096,7 +2103,6 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   });
   const result = mergeAutofillFrameResults(frameResults);
 
-  const site = hostnameFromUrl(tab.url || "");
   await ensureCostSession(ctx.jobMeta.jdLink || ctx.jobMeta.jobTitle || tab.url || "");
 
   // Read the whole step and let gpt-4o-mini answer every field from the knowledge base,
@@ -2148,6 +2154,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     : [];
 
   // Q&A bank first → classify with mini → AI (JD/resume for thinking fields).
+  // Sites with aiFormAssist:false (Dice) stay on bank + profile rules only.
   if (unmatchedChoice.length) {
     try {
       const byFrame = new Map();
@@ -2163,7 +2170,7 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
           applicantInfo,
           ctx.jobMeta,
           ctx.resumeText,
-          { applicationBrief: ctx.applicationBrief, site }
+          { applicationBrief: ctx.applicationBrief, site, allowAi: allowAiFill }
         );
         bankHits += Number(choiceAnswers.bankHits || 0);
         llmAnswerCount += Number(choiceAnswers.aiAnswers || 0);
@@ -2182,7 +2189,9 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
 
   if (unmatched.length) {
     await setStatus(
-      `Form fill: Q&A bank first, then gpt-4o-mini for ${unmatched.length} remaining question(s)...`
+      allowAiFill
+        ? `Form fill: Q&A bank first, then gpt-4o-mini for ${unmatched.length} remaining question(s)...`
+        : `Form fill: Q&A bank only for ${unmatched.length} remaining question(s) (no AI on ${applySiteLabel(site)})...`
     );
     try {
       const byFrame = new Map();
@@ -2199,7 +2208,8 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
           resumeText: ctx.resumeText,
           profileId,
           applicationBrief: ctx.applicationBrief,
-          site
+          site,
+          allowAi: allowAiFill
         });
         bankHits += Number(answers.bankHits || 0);
         llmAnswerCount += Number(answers.aiAnswers || 0);
@@ -2237,6 +2247,24 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     aiAnswers: llmAnswerCount
   });
 
+  // Dice (and other non-AI sites): re-scan after bank fill so leftover custom
+  // questions are accurate — the first list was collected before bank answers.
+  if (!allowAiFill) {
+    try {
+      const leftover = mergeAutofillFrameResults(
+        await sendMessageToAllFrames(tab.id, { type: "collect_unmatched_questions", applicantInfo })
+      );
+      result.unmatchedQuestions = leftover.unmatchedQuestions || [];
+      result.unmatchedChoiceQuestions = leftover.unmatchedChoiceQuestions || [];
+      result.filledCount = Number(result.filledCount || 0) + Number(leftover.filledCount || 0);
+      if (Array.isArray(leftover.filled) && leftover.filled.length) {
+        result.filled = [...(result.filled || []), ...leftover.filled];
+      }
+    } catch {
+      /* keep prior unmatched lists */
+    }
+  }
+
   return {
     ok: Boolean(result?.ok),
     tabId: tab.id,
@@ -2245,6 +2273,47 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     aiFilledCount,
     choiceFilledCount,
     bankHits
+  };
+}
+
+/**
+ * Empty custom questions still on the page after a rule-based Dice fill.
+ * Used to pause before Next so the user can answer them manually.
+ */
+async function collectUnansweredApplicationFields(tabId, profileId) {
+  const applicantInfo = await getApplicantInfo(profileId).catch(() => ({}));
+  const leftover = mergeAutofillFrameResults(
+    await sendMessageToAllFrames(tabId, { type: "collect_unmatched_questions", applicantInfo }).catch(
+      () => []
+    )
+  );
+  const texts = Array.isArray(leftover.unmatchedQuestions) ? leftover.unmatchedQuestions : [];
+  const choices = Array.isArray(leftover.unmatchedChoiceQuestions)
+    ? leftover.unmatchedChoiceQuestions
+    : [];
+  const labels = [...texts, ...choices]
+    .map((q) => String(q?.label || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  return {
+    count: texts.length + choices.length,
+    texts,
+    choices,
+    labels,
+    detail: labels.length
+      ? labels.map((l) => (l.length > 80 ? `${l.slice(0, 77)}…` : l)).join("; ")
+      : ""
+  };
+}
+
+function dicePauseForUnansweredFields(openFields, { beforeSubmit = false } = {}) {
+  const where = beforeSubmit ? "Submit" : "Next";
+  const listed = openFields.detail ? `: ${openFields.detail}` : "";
+  return {
+    status: "needs_review",
+    detail:
+      `Stopped before ${where} — ${openFields.count} unanswered field(s) on this Dice step` +
+      `${listed}. Fill them on the page, then click Apply again.`
   };
 }
 
@@ -2261,8 +2330,8 @@ const KB_REFRESH_DEBOUNCE_MS = 8000;
 let kbRefreshTimer = null;
 
 /**
- * Auto Apply always uses the whole-form GPT plan when an API key exists.
- * The panel toggle is ignored — legacy per-question fill is emergency fallback only.
+ * Whole-form GPT plan when an API key exists (other ATS). Dice forces legacy
+ * via isAiFormAssistAllowed — the panel toggle is still ignored for non-Dice.
  */
 async function isAiFormPlanEnabled() {
   return Boolean(await getEnv("OPENAI_API_KEY"));
@@ -2561,6 +2630,9 @@ async function tryAiApplyButton(
   { stage = "entry", preferNewTab = false, gateway = false, tried = new Set() } = {}
 ) {
   const none = { advanced: false, tabId };
+  const live = await chrome.tabs.get(tabId).catch(() => null);
+  const site = detectSiteFromUrl(live?.url || "");
+  if (!isAiFormAssistAllowed(site)) return none;
   if (!(await isAiFormPlanEnabled().catch(() => false))) return none;
   let settings;
   try {
@@ -3630,9 +3702,8 @@ async function isDiceBrowserTab(tabId) {
 }
 
 /**
- * After a confirmed Dice submit: close the success wizard and the original
- * Dice job tab. Never closes non-Dice tabs, and never runs unless callers
- * already verified Submit + the success page.
+ * After a confirmed Dice submit: close only success / apply-wizard tab(s).
+ * Never closes the original job-detail tab the user started from.
  */
 async function closeApplyFlowTabs({
   currentTabId = null,
@@ -3640,20 +3711,22 @@ async function closeApplyFlowTabs({
   delayMs = 1000
 } = {}) {
   await closeAllDiceSuccessTabs({ delayMs });
-  const ids = new Set();
-  if (currentTabId != null) ids.add(currentTabId);
-  if (originTabId != null) ids.add(originTabId);
-  for (const id of ids) {
-    if (await isDiceBrowserTab(id)) {
-      await closeTabQuietly(id);
-    }
+
+  // Extra close for the tab we were on if it is still a success or apply wizard
+  // tab (and not the origin job listing / job-detail page).
+  if (currentTabId == null || currentTabId === originTabId) return;
+  if (!(await isDiceBrowserTab(currentTabId))) return;
+  const live = await chrome.tabs.get(currentTabId).catch(() => null);
+  if (!live?.id) return;
+  const href = live.url || live.pendingUrl || "";
+  if (applicationSuccessFromUrl(href) || isDiceApplicationUrl(href)) {
+    await closeTabQuietly(currentTabId);
   }
 }
 
 /**
  * After Submit is clicked, wait for the ATS confirmation page, then close
- * Dice tabs only if the success wizard is actually visible. Never close on
- * a vanished tab, timeout, or non-Dice site.
+ * only the Dice success wizard tab. The original job tab is left open.
  */
 async function finishSubmittedApplication(
   tabId,
@@ -3684,21 +3757,38 @@ async function finishSubmittedApplication(
   const successTabId = waited.tabId || tabId;
   if (waited.success) {
     if (closeOnSuccess && !waited.tabGone) {
-      await setStatus("Application submitted — closing Dice application tabs...");
+      await setStatus("Application succeeded — closing Dice success tab...");
       await closeApplyFlowTabs({
         currentTabId: successTabId,
-        originTabId: originTabId != null ? originTabId : tabId,
+        originTabId: originTabId != null ? originTabId : null,
         delayMs: 1000
       });
-      if (successTabId !== tabId && (await isDiceBrowserTab(tabId))) {
-        await closeTabQuietly(tabId);
+      // If Submit ran on a wizard tab and success opened elsewhere, close that
+      // wizard tab too — but never the original job-detail tab.
+      if (
+        tabId != null &&
+        tabId !== successTabId &&
+        tabId !== originTabId &&
+        (await isDiceBrowserTab(tabId))
+      ) {
+        const wizard = await chrome.tabs.get(tabId).catch(() => null);
+        const wizardUrl = wizard?.url || wizard?.pendingUrl || "";
+        if (isDiceApplicationUrl(wizardUrl) || applicationSuccessFromUrl(wizardUrl)) {
+          await closeTabQuietly(tabId);
+        }
       }
     }
     return {
       status: "submitted",
-      detail: `Clicked ${clickLabel}. ${waited.detail}`,
+      detail: `Application succeeded. Clicked ${clickLabel}. ${waited.detail}`,
       tabClosed: Boolean(closeOnSuccess && !waited.tabGone),
-      tabId: waited.tabGone || closeOnSuccess ? null : successTabId
+      // Keep pointing at the origin job tab when we closed only the success tab.
+      tabId:
+        waited.tabGone || closeOnSuccess
+          ? originTabId != null && originTabId !== successTabId
+            ? originTabId
+            : null
+          : successTabId
     };
   }
   if (waited.tabGone) {
@@ -4194,7 +4284,7 @@ async function runApplyImportedJobCore(
         `${ea.detail || ""}`.trim()
     });
     await setStatus(
-      `${prefix}Applied.${isAutoSubmitAllowedSite(site) ? " Dice tabs closed." : ""} ${sheetNote} ${await getCostSummaryText()}`.trim()
+      `${prefix}Applied.${isAutoSubmitAllowedSite(site) ? " Success tab closed." : ""} ${sheetNote} ${await getCostSummaryText()}`.trim()
     );
     return {
       ok: true,
@@ -4270,7 +4360,7 @@ async function startMultiStepApplyOnTab(
   let stepBudget = stepBudgetInit;
   const useNewTab = preferNewTab || initialSite === "dice" || isGatewaySite(initialSite);
   const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
-  // Dice only: close the job + wizard tabs after Submit AND the success page.
+  // Dice only: close the success wizard tab after Submit. Keep the job page open.
   // Other sites never close the current tab.
   const mayCloseTabs = Boolean(closeOnSuccess && autoClickSubmit);
   // Resolve the PDFs ONCE, against the job page we start on, and reuse them for
@@ -4346,12 +4436,12 @@ async function startMultiStepApplyOnTab(
 
     if (probe.applicationSuccess && didClickSubmit) {
       if (mayCloseTabs) {
-        await setStatus("Application submitted — closing Dice application tabs...");
+        await setStatus("Application succeeded — closing Dice success tab...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = mayCloseTabs ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? originTabId : currentTabId;
       return summary;
     }
 
@@ -4385,12 +4475,12 @@ async function startMultiStepApplyOnTab(
       if (otp.ok) {
         if (didClickSubmit) {
           if (mayCloseTabs) {
-            await setStatus("Application submitted — closing Dice application tabs...");
+            await setStatus("Application succeeded — closing Dice success tab...");
             await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
           }
           summary.status = "submitted";
           summary.detail = otp.detail;
-          summary.tabId = mayCloseTabs ? null : currentTabId;
+          summary.tabId = mayCloseTabs ? originTabId : currentTabId;
           return summary;
         }
         continue;
@@ -4402,10 +4492,13 @@ async function startMultiStepApplyOnTab(
     }
 
     // Dice final step: wait 1s on the Submit page, click Submit, then close wizard tabs.
+    // If required fields are still empty, fall through to fill first.
     if (
       site === "dice" &&
       autoClickSubmit &&
-      (probe.diceSubmitPage || probe.best?.action?.type === "submit")
+      (probe.diceSubmitPage || probe.best?.action?.type === "submit") &&
+      !probe.needsFill &&
+      !probe.uploadsBusy
     ) {
       if (probe.uploadsBusy) {
         for (let wait = 0; wait < 15 && probe.uploadsBusy; wait += 1) {
@@ -4425,12 +4518,12 @@ async function startMultiStepApplyOnTab(
       }
       if (probe.applicationSuccess && didClickSubmit) {
         if (mayCloseTabs) {
-          await setStatus("Application submitted — closing Dice application tabs...");
+          await setStatus("Application succeeded — closing Dice success tab...");
           await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
         }
         summary.status = "submitted";
         summary.detail = probe.applicationSuccess;
-        summary.tabId = mayCloseTabs ? null : currentTabId;
+        summary.tabId = mayCloseTabs ? originTabId : currentTabId;
         return summary;
       }
       if (probe.best?.action?.type === "submit") {
@@ -4729,7 +4822,13 @@ async function startMultiStepApplyOnTab(
 
     // Dice last wizard step: Submit can stay disabled until the SPA finishes
     // rendering. Keep polling — never exit early on a carousel Next.
-    if (site === "dice" && !probe.applicationSuccess && probe.best?.action?.type !== "submit") {
+    // Skip this wait when the step still has blanks (we'll pause and notify instead).
+    if (
+      site === "dice" &&
+      !probe.applicationSuccess &&
+      !probe.needsFill &&
+      probe.best?.action?.type !== "submit"
+    ) {
       for (let i = 0; i < 12; i += 1) {
         await sleepMs(400);
         const again = await getApplyActionFromTab(currentTabId).catch(() => null);
@@ -4744,12 +4843,12 @@ async function startMultiStepApplyOnTab(
 
     if (probe.applicationSuccess && didClickSubmit) {
       if (mayCloseTabs) {
-        await setStatus("Application submitted — closing Dice application tabs...");
+        await setStatus("Application succeeded — closing Dice success tab...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = probe.applicationSuccess;
-      summary.tabId = mayCloseTabs ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? originTabId : currentTabId;
       return summary;
     }
 
@@ -4758,6 +4857,45 @@ async function startMultiStepApplyOnTab(
       summary.detail =
         "File upload is still in progress on this page. Wait for the resume/cover letter to finish uploading, then run Auto Apply again.";
       return summary;
+    }
+
+    // Dice: never advance while custom / unanswered fields remain. Notify and stop
+    // so the user can fill them, then click Apply again.
+    if (site === "dice" && !probe.applicationSuccess) {
+      const onSubmitStep =
+        probe.diceSubmitPage || probe.best?.action?.type === "submit";
+      if (!onSubmitStep) {
+        const openFields = await collectUnansweredApplicationFields(currentTabId, profileId);
+        if (openFields.count > 0) {
+          const pause = dicePauseForUnansweredFields(openFields, { beforeSubmit: false });
+          await setStatus(pause.detail);
+          summary.status = pause.status;
+          summary.detail = pause.detail;
+          summary.tabId = currentTabId;
+          return summary;
+        }
+        if (probe.needsFill) {
+          summary.status = "needs_review";
+          summary.detail =
+            "Stopped before Next — empty fields remain on this Dice step. Fill them on the page, then click Apply again.";
+          await setStatus(summary.detail);
+          summary.tabId = currentTabId;
+          return summary;
+        }
+      } else if (probe.needsFill) {
+        const openFields = await collectUnansweredApplicationFields(currentTabId, profileId);
+        const pause = dicePauseForUnansweredFields(
+          openFields.count
+            ? openFields
+            : { count: 1, detail: "required fields still empty" },
+          { beforeSubmit: true }
+        );
+        await setStatus(pause.detail);
+        summary.status = pause.status;
+        summary.detail = pause.detail;
+        summary.tabId = currentTabId;
+        return summary;
+      }
     }
 
     // Dice last page: Submit may appear a beat after fill. Keep polling briefly
@@ -4975,12 +5113,12 @@ async function startMultiStepApplyOnTab(
     const afterAdvance = await getApplyActionFromTab(currentTabId).catch(() => null);
     if (afterAdvance?.applicationSuccess && didClickSubmit) {
       if (mayCloseTabs) {
-        await setStatus("Application submitted — closing Dice application tabs...");
+        await setStatus("Application succeeded — closing Dice success tab...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
       }
       summary.status = "submitted";
       summary.detail = afterAdvance.applicationSuccess;
-      summary.tabId = mayCloseTabs ? null : currentTabId;
+      summary.tabId = mayCloseTabs ? originTabId : currentTabId;
       return summary;
     }
 
@@ -4991,12 +5129,12 @@ async function startMultiStepApplyOnTab(
       if (otp.ok) {
         if (didClickSubmit) {
           if (mayCloseTabs) {
-            await setStatus("Application submitted — closing Dice application tabs...");
+            await setStatus("Application succeeded — closing Dice success tab...");
             await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
           }
           summary.status = "submitted";
           summary.detail = otp.detail;
-          summary.tabId = mayCloseTabs ? null : currentTabId;
+          summary.tabId = mayCloseTabs ? originTabId : currentTabId;
           return summary;
         }
         continue;
@@ -5823,7 +5961,8 @@ async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 12000
   }
 
   await setStatus(
-    `Click anywhere in the extension panel to unlock ${rootLabel || "the output folder"} and finish saving ${folderName}.`
+    `Folder access needed to finish saving ${folderName}. Click Unlock in the extension panel` +
+      `${rootLabel ? ` (${rootLabel})` : ""} — choose Allow on every visit if Chrome offers it.`
   );
 
   const deadline = Date.now() + timeoutMs;

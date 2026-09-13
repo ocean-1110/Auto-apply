@@ -314,6 +314,9 @@
         </div>
         <div class="row-split" style="margin-top: 10px; gap: 8px; display: flex; flex-wrap: wrap; align-items: center">
           <button type="button" id="copyAppsScript" class="secondary compact">Copy Apps Script</button>
+          <button type="button" id="testSheetsWebApp" class="secondary compact" title="Check that the Web App URL is live and up to date">
+            Test Web App
+          </button>
           <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for this profile">
             Save for this profile
           </button>
@@ -327,7 +330,11 @@
           <span>Track application status in sheet (column H)</span>
         </label>
         <p class="hint">
-          When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>. Redeploy Apps Script after enabling.
+          <strong>Save is not enough</strong> — after pasting Apps Script, use
+          Deploy → Manage deployments → Edit (pencil) → <strong>New version</strong> → Deploy.
+          Paste the Web app URL ending in <code>/exec</code> here (not the script text).
+          Click <strong>Test Web App</strong> — it must report apiVersion <code>2026-09-12</code>.
+          When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>.
         </p>
       </section>
 

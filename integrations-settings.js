@@ -1,7 +1,7 @@
 /**
  * Google Sheet + login/signup settings used on the profile editor page.
  */
-import { extractSpreadsheetId } from "./sheets.js";
+import { extractSpreadsheetId, pingSheetsWebApp, CURRENT_SHEET_API_VERSION } from "./sheets.js";
 import {
   getSheetPresets,
   getPresetForProfile,
@@ -23,6 +23,7 @@ export function initIntegrationsSettings({ getProfileId, setStatus }) {
     saveSheetPreset: document.getElementById("saveSheetPreset"),
     deleteSheetPreset: document.getElementById("deleteSheetPreset"),
     copyAppsScript: document.getElementById("copyAppsScript"),
+    testSheetsWebApp: document.getElementById("testSheetsWebApp"),
     sheetSummaryNote: document.getElementById("sheetSummaryNote"),
     credentialsNote: document.getElementById("credentialsNote"),
     accountEmail: document.getElementById("accountEmail"),
@@ -225,9 +226,48 @@ export function initIntegrationsSettings({ getProfileId, setStatus }) {
       const text = await res.text();
       if (!String(text || "").trim()) throw new Error("empty");
       await navigator.clipboard.writeText(text);
-      setStatus("Apps Script copied. Paste it into Extensions → Apps Script, then deploy as Web app.");
+      setStatus(
+        "Apps Script copied. Paste into Extensions → Apps Script → Save, then Deploy → Manage deployments → Edit → New version → Deploy. Paste the /exec URL here and click Test Web App."
+      );
     } catch {
       setStatus("Could not copy. Open apps-script/Code.gs in the project instead.", true);
+    }
+  });
+
+  els.testSheetsWebApp?.addEventListener("click", async () => {
+    const webAppUrl = (els.sheetsWebAppUrl?.value || "").trim();
+    if (!webAppUrl) {
+      setStatus("Paste the Apps Script Web App URL (…/exec) first.", true);
+      return;
+    }
+    try {
+      await persistSheetFields();
+      setStatus("Testing Web App deployment…");
+      const ping = await pingSheetsWebApp(webAppUrl);
+      if (ping.upToDate) {
+        setStatus(
+          `Web App OK — apiVersion ${ping.apiVersion} (current). Sheet append should work.`
+        );
+        if (els.sheetSummaryNote) {
+          els.sheetSummaryNote.textContent = `OK · ${ping.apiVersion}`;
+          els.sheetSummaryNote.classList.add("is-connected");
+        }
+        return;
+      }
+      setStatus(
+        `Web App is live but outdated (apiVersion "${ping.apiVersion || "missing"}", need "${CURRENT_SHEET_API_VERSION}"). Save is not enough — Deploy → Manage deployments → Edit → New version → Deploy, then Test again.`,
+        true
+      );
+      if (els.sheetSummaryNote) {
+        els.sheetSummaryNote.textContent = `Outdated · ${ping.apiVersion || "?"}`;
+        els.sheetSummaryNote.classList.remove("is-connected");
+      }
+    } catch (err) {
+      setStatus(`Web App test failed: ${String(err?.message || err)}`, true);
+      if (els.sheetSummaryNote) {
+        els.sheetSummaryNote.textContent = "Test failed";
+        els.sheetSummaryNote.classList.remove("is-connected");
+      }
     }
   });
 

@@ -14,6 +14,7 @@
  * @property {boolean} [isGateway]
  * @property {number} [stepBudget]
  * @property {boolean} [emailOtp]
+ * @property {boolean} [aiFormAssist] When false, Apply uses rule-based fill only (no form plan / button AI).
  */
 
 /** @type {AtsAdapter[]} */
@@ -23,6 +24,8 @@ export const ATS_ADAPTERS = [
     label: "Dice",
     hostPatterns: [/(^|\.)dice\.com$/i],
     autoSubmitAllowed: true,
+    // Dice Easy Apply is profile + upload + Next/Submit; AI form planning slows/breaks it.
+    aiFormAssist: false,
     stepBudget: 12
   },
   {
@@ -145,6 +148,17 @@ export function isEmployerAtsSite(site) {
 
 export function isAutoSubmitAllowedSite(site) {
   return Boolean(getAdapter(site)?.autoSubmitAllowed);
+}
+
+/**
+ * Whether Auto Apply may call OpenAI for whole-form planning, per-field answers,
+ * or button picking. Dice stays rule-based so scrape/apply can finish end-to-end.
+ * @param {string} site
+ */
+export function isAiFormAssistAllowed(site) {
+  const adapter = getAdapter(site);
+  if (!adapter) return true;
+  return adapter.aiFormAssist !== false;
 }
 
 /**
