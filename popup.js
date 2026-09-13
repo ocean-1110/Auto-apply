@@ -18,7 +18,10 @@ import {
   getLastSaveMeta,
   browseLastSavedJobDirectory,
   readJobUploadDocsFromDirectory,
-  sanitizeJobFolderName
+  sanitizeJobFolderName,
+  unlockOutputDirectory,
+  getOutputDirectoryHandle,
+  queryDirectoryPermission
 } from "./fs-output.js";
 import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText, jobIdFromLink } from "./csv-jobs.js";
 import {
@@ -520,7 +523,11 @@ async function selectOutputDirectory() {
       startIn: "documents"
     });
     const name = await saveOutputDirectoryHandle(handle);
+    // Picker already grants access; reaffirm so later silent saves work this session.
+    await unlockOutputDirectory({ interactive: true });
     outputDirLabelEl.value = name;
+    awaitingFolderPermission = false;
+    hidePermissionBanner();
 
     // Chrome only returns the leaf folder name — ask for the absolute path once.
     const prevAbs = await getOutputDirectoryAbsolutePath();
@@ -553,6 +560,63 @@ async function selectOutputDirectory() {
       return;
     }
     setStatus(`Could not select folder: ${String(err.message || err)}`);
+  }
+}
+
+/**
+ * Request folder write access while this click is still a user gesture.
+ * Must run before awaiting the service worker (Generate / Batch / Save).
+ */
+async function unlockFolderForSession({ quiet = false } = {}) {
+  const unlocked = await unlockOutputDirectory({ interactive: true });
+  if (unlocked.ok) {
+    awaitingFolderPermission = false;
+    hidePermissionBanner();
+    return true;
+  }
+  if (unlocked.status === "missing") {
+    if (!quiet) {
+      setStatus(unlocked.error || 'Click "Select folder" first.', "error");
+    }
+    return false;
+  }
+  awaitingFolderPermission = true;
+  showPermissionBanner("");
+  armPermissionRetryOnNextGesture();
+  if (!quiet) {
+    setStatus(
+      unlocked.error ||
+        "Click Grant once to unlock the output folder for this browser session.",
+      "error"
+    );
+  }
+  return false;
+}
+
+/** Soft check on panel open: remind once if the saved folder needs a click. */
+async function refreshFolderPermissionBanner() {
+  try {
+    const handle = await getOutputDirectoryHandle();
+    if (!handle) {
+      hidePermissionBanner();
+      return;
+    }
+    const state = await queryDirectoryPermission(handle);
+    if (state === "granted") {
+      awaitingFolderPermission = false;
+      if (!((await chrome.storage.local.get("pending_fs_write")).pending_fs_write)) {
+        hidePermissionBanner();
+      }
+      return;
+    }
+    // Folder is remembered but Chrome revoked write access (common after restart
+    // or when several Chromium profiles run the extension). One click unlocks
+    // the rest of this session.
+    awaitingFolderPermission = true;
+    showPermissionBanner("");
+    armPermissionRetryOnNextGesture();
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -1174,17 +1238,19 @@ function renderImportedJobs() {
       applySummaryBtn.textContent = "Working";
       applySummaryBtn.disabled = true;
     } else {
-      applySummaryBtn.textContent = ["failed", "needs_review", "ready_for_review", "check_failed"].includes(
-        String(job.status)
-      )
-        ? "Retry"
-        : "Apply";
+      const status = String(job.status || "");
+      const canSubmit = status === "ready_for_review";
+      const retry = ["failed", "needs_review", "check_failed"].includes(status);
+      applySummaryBtn.textContent = canSubmit ? "Submit" : retry ? "Retry" : "Apply";
       applySummaryBtn.disabled = false;
-      applySummaryBtn.title = "Apply (Alt+Enter when this job is selected)";
+      applySummaryBtn.classList.toggle("is-submit", canSubmit);
+      applySummaryBtn.title = canSubmit
+        ? "Submit the filled application on the open form tab"
+        : "Apply (Alt+Enter when this job is selected)";
       applySummaryBtn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        await applyImportedJob(jobId);
+        await applyImportedJob(jobId, { preferSubmit: canSubmit });
       });
     }
 
@@ -1452,6 +1518,8 @@ async function batchGenerateSelectedJobs() {
     return;
   }
 
+  if (!(await unlockFolderForSession())) return;
+
   generationStartPending = true;
   updateGenerationProgress({
     running: true,
@@ -1693,7 +1761,7 @@ async function openImportedJobPage(jobId) {
   chrome.storage.local.set({ imported_jobs_selected_id: jobId }).catch(() => {});
 }
 
-async function applyImportedJob(jobId) {
+async function applyImportedJob(jobId, { preferSubmit = false } = {}) {
   const job = importedJobsById[jobId];
   if (!job) {
     setStatus("Job not found in imported list.");
@@ -1718,6 +1786,42 @@ async function applyImportedJob(jobId) {
   collected.jobMeta.datePosted = job.datePosted || "";
 
   await chrome.storage.local.set({ imported_jobs_selected_id: jobId });
+
+  // Keep folder unlocked for any resume save this Apply may trigger.
+  if (!(await unlockFolderForSession({ quiet: true }))) {
+    // Still allow Apply if PDFs already exist; only block when we know we need a write.
+    const docs = await getGeneratedDocsForJob(jobId).catch(() => null);
+    if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
+      setStatus(
+        "Click Unlock once to allow saving resumes for this browser session, then Apply again.",
+        "error"
+      );
+      return;
+    }
+  }
+
+  const wantsSubmit = preferSubmit || String(job.status || "") === "ready_for_review";
+  if (wantsSubmit) {
+    setStatus(`Submitting application: ${job.jobTitle || jobId}`, "running");
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: "autofill_current_page",
+        profileId: collected.profileId,
+        preferredAction: "submit",
+        importedJobId: jobId
+      });
+      if (!res?.ok) {
+        throw new Error(res?.error || "Submit failed.");
+      }
+      if (res.button) await applyAutofillButtonState(res.button);
+      setStatus(res.status || "Submitted.");
+      return res;
+    } catch (err) {
+      setStatus(`Submit failed: ${String(err?.message || err)}`, "error");
+      return;
+    }
+  }
+
   setStatus(`Starting application: ${job.jobTitle || jobId}`);
 
   const res = await chrome.runtime.sendMessage({
@@ -1872,7 +1976,7 @@ function showPermissionBanner(folderName) {
   if (permBannerPathEl) {
     permBannerPathEl.textContent = folderName
       ? `Waiting to write ${folderName}`
-      : "Waiting to write the generated files";
+      : "Output folder needs one click to unlock for this session";
   }
   permBannerEl.hidden = false;
 }
@@ -2005,6 +2109,8 @@ async function loadSettings() {
 
   if (data.pending_fs_write) {
     await tryFlushPendingOutput();
+  } else {
+    await refreshFolderPermissionBanner();
   }
 }
 
@@ -2044,6 +2150,8 @@ async function waitForGenerationComplete(timeoutMs = 10 * 60 * 1000) {
 async function startGenerationAndWait() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return { ok: false };
+
+  if (!(await unlockFolderForSession())) return { ok: false };
 
   generationStartPending = true;
   updateGenerationProgress({
@@ -2449,6 +2557,10 @@ async function generateResumeAndCoverLetter() {
   const collected = await collectJobMetaOrShowError();
   if (!collected) return;
 
+  // Unlock the folder NOW (while this click is still a user gesture). Otherwise
+  // Chrome asks again after the long OpenAI/PDF work when the SW tries to save.
+  if (!(await unlockFolderForSession())) return;
+
   generationStartPending = true;
   updateGenerationProgress({
     running: true,
@@ -2580,11 +2692,11 @@ async function applyAutofillButtonState(button = null) {
     actionType === "submit" || String(button?.label || "").toLowerCase() === "submit";
   const title =
     String(button?.title || "").trim() ||
-    "Apply: fill every step and continue the application. On Dice this runs through Submit. (Alt+Shift+E)";
+    "Apply: open/fill the application. Only Apply / Next / Submit buttons are clicked. (Alt+Shift+E)";
   const labelEl = autofillBtn.querySelector(".btn-label");
   const fillIcon = autofillBtn.querySelector(".btn-icon-fill");
   const sendIcon = autofillBtn.querySelector(".btn-icon-submit");
-  if (labelEl) labelEl.textContent = "Apply";
+  if (labelEl) labelEl.textContent = isSubmit ? "Submit" : "Apply";
   if (fillIcon) fillIcon.hidden = isSubmit;
   if (sendIcon) sendIcon.hidden = !isSubmit;
   autofillBtn.classList.toggle("is-submit", isSubmit);
@@ -2617,7 +2729,7 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
   if (!quiet) {
     setStatus(
       preferredAction === "submit"
-        ? "Apply: submitting..."
+        ? "Submit: clicking the page Submit button..."
         : "Apply: filling the form and continuing the application...",
       "running"
     );
@@ -2625,7 +2737,7 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
       running: true,
       statusText:
         preferredAction === "submit"
-          ? "Apply: submitting..."
+          ? "Submit: clicking the page Submit button..."
           : "Apply: filling the form and continuing..."
     });
   }
@@ -3095,9 +3207,11 @@ copyResumePathBtn?.addEventListener("click", () => {
   copyResumeFolderPath();
 });
 grantFolderAccessBtn?.addEventListener("click", () => {
-  tryFlushPendingOutput({ interactive: true }).catch((err) =>
-    setStatus(String(err.message || err))
-  );
+  (async () => {
+    const unlocked = await unlockFolderForSession();
+    if (!unlocked) return;
+    await tryFlushPendingOutput({ interactive: true });
+  })().catch((err) => setStatus(String(err.message || err)));
 });
 
 // Profile edits happen in the overlay iframe; refresh the list when storage changes.
@@ -3231,7 +3345,9 @@ document.addEventListener("keydown", (e) => {
     if (!job || job.status === "completed" || job.status === "unavailable") return;
     if (["opening", "generating", "opening_form", "filling"].includes(String(job.status))) return;
     e.preventDefault();
-    applyImportedJob(jobId).catch((err) => setStatus(String(err.message || err), "error"));
+    applyImportedJob(jobId, {
+      preferSubmit: String(job.status || "") === "ready_for_review"
+    }).catch((err) => setStatus(String(err.message || err), "error"));
   }
 });
 

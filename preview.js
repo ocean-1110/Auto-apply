@@ -5,7 +5,8 @@ import { closeHostWindow } from "./close-host.js";
 import {
   browseLastSavedJobDirectory,
   getLastSaveMeta,
-  sanitizeJobFolderName
+  sanitizeJobFolderName,
+  unlockOutputDirectory
 } from "./fs-output.js";
 
 const els = {
@@ -159,12 +160,16 @@ function updateChrome() {
       els.applyBtn.disabled = true;
       els.applyBtn.title = "Application in progress";
     } else {
-      const retry = ["failed", "needs_review", "ready_for_review", "check_failed"].includes(status);
-      setBtnLabel(els.applyBtn, retry ? "Retry" : "Apply");
+      const canSubmit = status === "ready_for_review";
+      const retry = ["failed", "needs_review", "check_failed"].includes(status);
+      setBtnLabel(els.applyBtn, canSubmit ? "Submit" : retry ? "Retry" : "Apply");
       els.applyBtn.disabled = !applyContext.profileId;
-      els.applyBtn.title = retry
-        ? "Retry apply (same as the job card)"
-        : "Apply to this job (same as Apply on the job card)";
+      els.applyBtn.classList?.toggle?.("is-submit", canSubmit);
+      els.applyBtn.title = canSubmit
+        ? "Submit the filled application on the open form tab"
+        : retry
+          ? "Retry apply (same as the job card)"
+          : "Apply to this job (same as Apply on the job card)";
     }
   }
   if (els.regenerateBtn) els.regenerateBtn.disabled = busy || generating || !hasResume;
@@ -339,6 +344,16 @@ async function saveDocuments() {
     setReviseStatus("No resume to save.", { error: true });
     return;
   }
+  // Unlock folder on this click — before the long SW render — so silent save works.
+  const unlocked = await unlockOutputDirectory({ interactive: true });
+  if (!unlocked.ok) {
+    setReviseStatus(
+      unlocked.error ||
+        "Unlock the output folder first (open the extension panel and click Grant / Select folder).",
+      { error: true }
+    );
+    return;
+  }
   busy = true;
   updateChrome();
   setReviseStatus("Rendering and saving PDFs…");
@@ -433,8 +448,28 @@ async function applyFromPreview() {
   }
   busy = true;
   updateChrome();
-  setReviseStatus("Starting apply — same as the job card Apply button…");
+  const canSubmit = String(applyContext.status || "") === "ready_for_review";
+  setReviseStatus(
+    canSubmit
+      ? "Submitting — clicking Submit on the application page…"
+      : "Starting apply — same as the job card Apply button…"
+  );
   try {
+    if (canSubmit) {
+      const res = await chrome.runtime.sendMessage({
+        type: "autofill_current_page",
+        profileId: applyContext.profileId,
+        preferredAction: "submit",
+        importedJobId: applyContext.jobId
+      });
+      if (!res?.ok) throw new Error(res?.error || "Submit failed.");
+      setReviseStatus(res.status || "Submitted.");
+      applyContext.status = res.submitted || /submit/i.test(String(res.status || ""))
+        ? "completed"
+        : applyContext.status;
+      updateChrome();
+      return;
+    }
     const res = await chrome.runtime.sendMessage({
       type: "apply_imported_job",
       importedJobId: applyContext.jobId,

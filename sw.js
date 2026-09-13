@@ -1993,7 +1993,7 @@ async function pauseAtSubmitForReview(tabId, summary, clickLabel = "Submit") {
   const live = await chrome.tabs.get(tabId).catch(() => null);
   await markReadyToSubmit(live?.url || summary.tabUrl || "");
   summary.status = "ready_for_review";
-  summary.detail = `Filled the form. Review the fields, then click ${clickLabel} in Ocean to send. The application tab was left open.`;
+  summary.detail = `Filled the form. Review the fields, then click Submit in Ocean to press "${clickLabel}" on the page. The application tab was left open.`;
   summary.tabId = tabId;
   return summary;
 }
@@ -2630,6 +2630,14 @@ async function tryAiApplyButton(
   if (!button) return none;
   tried.add(`${button.frameId}|${button.text}`);
   if (pick.type === "submit") return { ...none, submitCandidate: true, text: button.text };
+  // Only Apply / Next / Review / Continue-style progression — never ads, cookies, sign-in, etc.
+  const allowed =
+    pick.type === "entry" ||
+    pick.type === "next" ||
+    pick.type === "review" ||
+    (stage === "entry" && /\bapply\b/i.test(String(button.text || ""))) ||
+    (stage === "next" && /\b(next|continue|review|save\s*(and|&)\s*continue)\b/i.test(String(button.text || "")));
+  if (!allowed) return none;
 
   const before = await chrome.tabs.get(tabId).catch(() => null);
   const prevUrl = before?.url || "";
@@ -2673,13 +2681,13 @@ function describeAutofillButton(probe = {}, { readyToSubmit = false } = {}) {
   const text = String(probe?.best?.action?.text || "").trim();
   const needsFill = probe.needsFill !== false;
   const applyTitle =
-    "Apply: fill every step and continue the application. On Dice this runs through Submit. (Alt+Shift+E)";
+    "Apply: open/fill the application. Only Apply / Next / Submit buttons are clicked. (Alt+Shift+E)";
   if (type === "submit" && (!needsFill || readyToSubmit)) {
     return {
-      label: "Apply",
+      label: "Submit",
       actionType: "submit",
       actionText: text || "Submit",
-      title: "Review the filled form, then click Apply to submit. (Alt+Shift+E)"
+      title: `Review the filled form, then click Submit to press "${text || "Submit"}" on the page. (Alt+Shift+E)`
     };
   }
   return {
@@ -3025,7 +3033,7 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
   } else if (readyForReview) {
     status =
       status ||
-      "Filled every step. Review the form, then click Apply again to submit.";
+      "Filled every step. Review the form, then click Submit in Ocean to send the application.";
   } else if (ea.status === "skipped") {
     status = status || "No Apply button on this page.";
   } else if (ea.status === "already_applied") {
@@ -4791,8 +4799,11 @@ async function startMultiStepApplyOnTab(
           continue;
         }
         if (ai.submitCandidate) {
+          await markReadyToSubmit(
+            (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl || ""
+          );
           summary.status = "ready_for_review";
-          summary.detail = `Filled the form. "${ai.text}" looks like the final submit button — review the form, then click it.`;
+          summary.detail = `Filled the form. "${ai.text}" looks like the final submit button — review the form, then click Submit in Ocean.`;
           summary.tabId = currentTabId;
           return summary;
         }
@@ -6725,9 +6736,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
         panelApplyRunToken = acquireGenerationLock();
-        await setStatus("Apply: filling the form and continuing the application...");
+        const preferredAction = String(message.preferredAction || "");
+        await setStatus(
+          preferredAction.toLowerCase() === "submit"
+            ? "Submit: clicking the page Submit button..."
+            : "Apply: filling the form and continuing the application..."
+        );
         const result = await runPanelApply(profileId, {
-          preferredAction: message.preferredAction || ""
+          preferredAction
         });
         if (result.skipped) {
           await setStatus(`Apply skipped: ${result.error}`);
@@ -6740,6 +6756,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           safeSendResponse(sendResponse, { ok: false, error: err, button: result.button });
           return;
         }
+
+        const importedJobId = String(message.importedJobId || "").trim();
+        if (
+          importedJobId &&
+          preferredAction.toLowerCase() === "submit" &&
+          (result.submitted || /submit/i.test(String(result.status || "")))
+        ) {
+          try {
+            const jobs = await getImportedJobsById();
+            const job = jobs[importedJobId];
+            if (job) {
+              await finalizeImportedJobAsApplied(importedJobId, {
+                profileId,
+                jobMeta: {
+                  jobTitle: job.jobTitle || "",
+                  companyName: job.companyName || "",
+                  jdLink: job.jdLink || job.url || ""
+                },
+                site: detectSiteFromUrl(job.jdLink || job.url || ""),
+                detail: result.status || "Submitted from Ocean."
+              });
+            }
+          } catch {
+            /* best-effort card update */
+          }
+        }
+
         const msg = result.status || "Apply done.";
         await setStatus(msg);
         safeSendResponse(sendResponse, { ok: true, ...result, status: msg });

@@ -3672,7 +3672,7 @@
         (el) => {
           if (!isElVisible(el) || !isElEnabled(el)) return false;
           const t = elActionText(el);
-          return /^(create account|create an account|sign in|log in|register|continue)$/i.test(
+          return /^(create account|create an account|sign in|log in|register)$/i.test(
             t.trim()
           );
         }
@@ -7336,6 +7336,17 @@
         ok: false,
         clicked: false,
         error: `Refused to click "${text}": not Apply / Next / Submit related.`
+      };
+    }
+    // Even inside a form, only click Apply / Next / Continue / Review / Submit.
+    const cls = classifyActionButton(text);
+    const looksEntry =
+      EASY_ENTRY_RE.test(text) || EASY_APPLY_TEXT_RE.test(text) || APPLY_ONLY_TEXT_RE.test(text);
+    if (!cls && !looksEntry && !allowSubmit) {
+      return {
+        ok: false,
+        clicked: false,
+        error: `Refused to click "${text}": only Apply / Next / Submit are allowed.`
       };
     }
     const href = String(el.href || el.getAttribute?.("href") || "");

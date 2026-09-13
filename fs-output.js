@@ -157,6 +157,10 @@ export async function queryDirectoryPermission(handle) {
  * Chrome only allows requestPermission() while a user gesture is active, so the
  * prompt is limited to call paths that started from a real click or key press.
  * Background flushes just report back that a gesture is still needed.
+ *
+ * Once granted in this document, queryPermission usually stays "granted" for
+ * the rest of the panel/session — so unlock once on Generate/Save click, before
+ * long background work, and later silent flushes succeed without another prompt.
  */
 export async function ensureDirectoryPermission(handle, { interactive = false } = {}) {
   if (!handle) return false;
@@ -167,6 +171,41 @@ export async function ensureDirectoryPermission(handle, { interactive = false } 
   } catch {
     return false;
   }
+}
+
+/**
+ * Unlock the saved output folder while a user click is still active.
+ * Call this at the start of Generate / Save / Batch — before awaiting the
+ * service worker — so permission is already granted when files are flushed.
+ *
+ * @returns {Promise<{ ok: boolean, status: "granted"|"prompt"|"missing"|"denied", error?: string }>}
+ */
+export async function unlockOutputDirectory({ interactive = true } = {}) {
+  const handle = await getOutputDirectoryHandle();
+  if (!handle) {
+    return {
+      ok: false,
+      status: "missing",
+      error: 'No output folder selected. Click "Select folder" first.'
+    };
+  }
+  const before = await queryDirectoryPermission(handle);
+  if (before === "granted") return { ok: true, status: "granted" };
+  if (!interactive) {
+    return {
+      ok: false,
+      status: before === "denied" ? "denied" : "prompt",
+      error: "Chrome needs one click in the extension panel to unlock the output folder."
+    };
+  }
+  const granted = await ensureDirectoryPermission(handle, { interactive: true });
+  if (granted) return { ok: true, status: "granted" };
+  return {
+    ok: false,
+    status: (await queryDirectoryPermission(handle)) === "denied" ? "denied" : "prompt",
+    error:
+      "Folder access was not granted. Click Grant (or click once in this panel) and allow editing of the output folder."
+  };
 }
 
 /**
