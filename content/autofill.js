@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-13.keep-apply-modal.1";
+  const SCRIPT_BUILD = "2026-09-14.allow-cookies.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -5021,17 +5021,22 @@
   const KEEP_MODAL_OPEN_CTA_RE =
     /ok,? let['’]?s do it|let['’]?s do it now|contact hiring|i applied|subscribe|sign up|upgrade|boost|unlock|continue to apply with/i;
   const COOKIE_COPY_RE =
-    /we use cookies|this (site|website) uses cookies|cookie (policy|preferences|consent|notice|banner)|accept cookies|allow cookies|manage cookies|cookie settings|gdpr/i;
+    /we use cookies|this (site|website) uses cookies|cookie (policy|preferences|consent|notice|banner)|accept cookies|allow cookies|manage cookies|cookie settings|gdpr|privacy (preferences|choices)|consent to (the use of )?cookies/i;
+  /** Exact / near-exact cookie accept CTAs (button label alone). */
   const COOKIE_ACCEPT_TEXT_RE =
-    /^\s*(accept all( cookies)?|allow all( cookies)?|allow cookies|i agree|agree( and close)?|accept( and close)?|accept cookies|got it|ok(ay)?(,?\s*got it)?|allow)\s*$/i;
-  const COOKIE_CLOSE_TEXT_RE =
-    /reject all|decline all|necessary only|essential only|reject|deny|continue without/i;
+    /^\s*(accept all( cookies)?|allow all( cookies)?|allow cookies|yes,? allow( all)?( cookies)?|i agree|agree( and close)?|agree( and )?continue|accept( and close)?|accept( and )?continue|accept cookies|i accept|got it|ok(ay)?(,?\s*got it)?|allow|consent|confirm)\s*$/i;
+  /** Looser match when the control sits inside a cookie banner. */
+  const COOKIE_ACCEPT_LOOSE_RE =
+    /\b(allow|accept)\b.{0,24}\b(all|cookies?|consent)\b|\b(i agree|agree and continue|accept and continue|got it)\b/i;
+  const COOKIE_REJECT_TEXT_RE =
+    /reject all|decline all|necessary only|essential only|reject|deny|continue without|manage (preferences|cookies)|cookie settings|customize|customise|set preferences/i;
   const COOKIE_BANNER_SEL = [
     "#onetrust-banner-sdk",
     "#onetrust-consent-sdk",
     "#CybotCookiebotDialog",
     "#usercentrics-root",
     "#didomi-host",
+    "#didomi-notice",
     "#qc-cmp2-container",
     ".qc-cmp2-container",
     ".fc-consent-root",
@@ -5053,7 +5058,8 @@
     "[class*='cookie-consent']",
     "[id*='consent-banner']",
     "[class*='consent-banner']",
-    "[aria-label*='cookie']"
+    "[aria-label*='cookie' i]",
+    "[aria-label*='consent' i]"
   ].join(", ");
   const COOKIE_ACCEPT_SEL = [
     "#onetrust-accept-btn-handler",
@@ -5061,16 +5067,26 @@
     "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
     "#CybotCookiebotDialogBodyButtonAccept",
     "#CybotCookiebotDialogBodyLevelButtonAccept",
+    "#didomi-notice-agree-button",
+    ".fc-cta-consent",
+    "button.fc-cta-consent",
+    ".osano-cm-accept-all",
+    "button.osano-cm-accept",
     "[data-testid='accept-cookies']",
     "[data-testid='cookie-accept']",
+    "[data-testid*='uc-accept' i]",
     "[data-action='accept-all']",
-    "button[aria-label*='accept all']",
-    "button[aria-label*='allow all']",
-    "button[aria-label*='accept cookies']",
-    "button[id*='accept-all']",
-    "button[id*='acceptAll']",
-    "button[class*='accept-all']",
-    "button[class*='acceptAll']"
+    "button[aria-label*='accept all' i]",
+    "button[aria-label*='allow all' i]",
+    "button[aria-label*='accept cookies' i]",
+    "button[aria-label*='allow cookies' i]",
+    "button[id*='accept-all' i]",
+    "button[id*='acceptAll' i]",
+    "button[id*='allow' i][id*='cookie' i]",
+    "button[class*='accept-all' i]",
+    "button[class*='acceptAll' i]",
+    "button[class*='allowAll' i]",
+    "button[class*='allow-all' i]"
   ].join(", ");
 
   function modalRootSelector() {
@@ -5166,27 +5182,80 @@
     ).filter((el) => isElVisible(el) && isElEnabled(el));
   }
 
+  function cookieControlHint(el) {
+    return `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""} ${el.id || ""} ${el.className || ""} ${el.getAttribute?.("data-testid") || ""}`;
+  }
+
+  function scoreCookieAcceptControl(el, { inBanner = false } = {}) {
+    if (!el || !isElVisible(el) || !isElEnabled(el)) return -1;
+    const t = elActionText(el);
+    const hint = cookieControlHint(el);
+    const blob = `${t} ${hint}`;
+    if (COOKIE_REJECT_TEXT_RE.test(t) && !COOKIE_ACCEPT_TEXT_RE.test(t)) return -1;
+    if (/manage (preferences|cookies)|cookie settings|customise|customize/i.test(t)) return -1;
+
+    let score = 0;
+    if (/allow\s+cookies/i.test(t)) score += 200;
+    if (/accept\s+all(\s+cookies)?/i.test(t)) score += 190;
+    if (/allow\s+all(\s+cookies)?/i.test(t)) score += 185;
+    if (COOKIE_ACCEPT_TEXT_RE.test(t)) score += 160;
+    if (COOKIE_ACCEPT_LOOSE_RE.test(t)) score += 120;
+    if (/accept.?all|allow.?all|accept.?cookie|allow.?cookie|agree.?button/i.test(hint)) score += 140;
+    if (inBanner && COOKIE_ACCEPT_LOOSE_RE.test(blob)) score += 80;
+    if (inBanner && /^(ok|okay|got it|agree|accept|allow|consent|confirm)$/i.test(t.trim())) score += 70;
+    // Prefer primary-looking CTAs over tiny text links.
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 72 && r.height >= 28) score += 20;
+    } catch {
+      /* ignore */
+    }
+    return score;
+  }
+
   function findKnownCookieAcceptButton(root = document) {
     try {
-      return queryAllDeep(COOKIE_ACCEPT_SEL, root).find((el) => isElVisible(el) && isElEnabled(el)) || null;
+      const scored = queryAllDeep(COOKIE_ACCEPT_SEL, root)
+        .map((el) => {
+          if (!isElVisible(el) || !isElEnabled(el)) return { el, score: -1 };
+          const scoredText = scoreCookieAcceptControl(el, { inBanner: true });
+          // Known CMP accept selectors count even when the label is empty/icon-only.
+          return { el, score: Math.max(scoredText, 100) };
+        })
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score);
+      return scored[0]?.el || null;
     } catch {
       return null;
     }
   }
 
+  /** Document-wide "Allow cookies" / "Accept all" even when the banner has no known root. */
+  function findCookieAcceptByText(root = document, { inBanner = false } = {}) {
+    const clickable = visibleBannerClickables(root);
+    let best = null;
+    let bestScore = 0;
+    for (const el of clickable) {
+      const score = scoreCookieAcceptControl(el, { inBanner });
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    // Outside a known banner, require a strong accept label so we don't
+    // click random "Allow" / "OK" buttons on the page.
+    if (!inBanner && bestScore < 120) return null;
+    return best;
+  }
+
   function pickCookieAction(root) {
     const known = findKnownCookieAcceptButton(root);
     if (known) return known;
-    const clickable = visibleBannerClickables(root);
-    const accept = clickable.find((el) => {
-      const t = elActionText(el);
-      const hint = `${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
-      return COOKIE_ACCEPT_TEXT_RE.test(t) || /accept.?all|allow.?all|accept.?cookie/i.test(hint);
-    });
-    if (accept) return accept;
-    const close = clickable.find((el) => isCloseControl(el));
-    if (close) return close;
-    return clickable.find((el) => COOKIE_CLOSE_TEXT_RE.test(elActionText(el))) || null;
+    const byText = findCookieAcceptByText(root, { inBanner: true });
+    if (byText) return byText;
+    // Never click Close/X for cookies — that often denies consent or does nothing.
+    // Prefer an explicit accept/allow CTA only.
+    return null;
   }
 
   function findCookieBannerRoots() {
@@ -5211,9 +5280,14 @@
   }
 
   function dismissCookieConsentOnce() {
-    const loose = findKnownCookieAcceptButton(document);
-    if (loose) {
-      safeClick(loose);
+    const known = findKnownCookieAcceptButton(document);
+    if (known) {
+      safeClick(known);
+      return true;
+    }
+    const byText = findCookieAcceptByText(document, { inBanner: false });
+    if (byText) {
+      safeClick(byText);
       return true;
     }
     for (const banner of findCookieBannerRoots()) {

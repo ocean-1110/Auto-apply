@@ -3324,7 +3324,7 @@ async function waitForPageReady(tabId, timeoutMs = 15000) {
   await sleepMs(300);
 }
 
-async function dismissPageOverlays(tabId, { rounds = 2, cookiesOnly = false } = {}) {
+async function dismissPageOverlays(tabId, { rounds = 3, cookiesOnly = false } = {}) {
   try {
     await ensureAutofillScript(tabId);
     await sendMessageToTab(
@@ -3335,6 +3335,13 @@ async function dismissPageOverlays(tabId, { rounds = 2, cookiesOnly = false } = 
   } catch {
     /* script may not be injectable yet */
   }
+}
+
+/** Cookie banners often paint after first paint — retry Accept/Allow a few times. */
+async function dismissCookieBannersEarly(tabId) {
+  await dismissPageOverlays(tabId, { rounds: 4, cookiesOnly: true });
+  await sleepMs(600);
+  await dismissPageOverlays(tabId, { rounds: 2, cookiesOnly: true });
 }
 
 /**
@@ -4089,7 +4096,7 @@ async function runApplyImportedJobCore(
     await waitForPageReady(tabId, 12000);
   }
 
-  await dismissPageOverlays(tabId);
+  await dismissCookieBannersEarly(tabId);
 
   try {
     // Poll on client-rendered boards — a closed/expired banner can land after the
@@ -4191,7 +4198,7 @@ async function runApplyImportedJobCore(
   tabId = liveTab.id;
   await chrome.tabs.update(tabId, { active: true }).catch(() => {});
   await waitForPageReady(tabId, 8000);
-  await dismissPageOverlays(tabId);
+  await dismissCookieBannersEarly(tabId);
   const site = detectSiteFromUrl(liveTab.url || url);
 
   try {
@@ -4364,7 +4371,7 @@ async function startMultiStepApplyOnTab(
   }
 
   await waitForPageReady(tab.id, 12000);
-  await dismissPageOverlays(tab.id);
+  await dismissCookieBannersEarly(tab.id);
 
   let currentTabId = tab.id;
   const originTabId = tab.id;
