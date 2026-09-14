@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-13.keep-apply-modal.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-14.builtin-apply.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -3191,6 +3191,7 @@ function isAllowedApplyNavUrl(url) {
       return /\/(viewjob|apply|indeedapply|job)\b|jk=/i.test(path);
     }
     if (/(^|\.)jobgether\.com$/i.test(host)) return true;
+    if (/(^|\.)builtin\.com$/i.test(host)) return true;
     if (/(^|\.)smartrecruiters\.com$/i.test(host)) return true;
     if (/(^|\.)zohorecruit\.com$/i.test(host)) return true;
     if (/(^|\.)recruit\.zoho\./i.test(host)) return true;
@@ -3940,7 +3941,7 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         const nextHost = new URL(tab.url).hostname.toLowerCase();
         const leftKnownAts =
           isAllowedApplyNavUrl(prevUrl) ||
-          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|smartrecruiters\.com|oraclecloud\.com)$/i.test(
+          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|smartrecruiters\.com|oraclecloud\.com|builtin\.com)$/i.test(
             prevHost
           );
         if (leftKnownAts && nextHost !== prevHost && !isPlausibleApplyDestination(tab.url)) {
@@ -4378,7 +4379,6 @@ async function startMultiStepApplyOnTab(
   const initialSite = detectSiteFromUrl(tab.url);
   let liveSite = initialSite;
   const site = initialSite;
-  const siteLabel = applySiteLabel(initialSite);
   const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
   let stepBudget = stepBudgetInit;
   const useNewTab = preferNewTab || initialSite === "dice" || isGatewaySite(initialSite);
@@ -4431,6 +4431,11 @@ async function startMultiStepApplyOnTab(
       liveSite !== initialSite &&
       !isGatewaySite(liveSite)
     ) {
+      if (initialSite === "builtin") {
+        await setStatus(
+          `Auto Apply (Built In): external ATS (${applySiteLabel(liveSite)}) — continuing with application form...`
+        );
+      }
       stepBudget = stepBudgetForSite(liveSite, stepBudget);
       rebudgetedForLiveSite = true;
     }
@@ -4441,7 +4446,13 @@ async function startMultiStepApplyOnTab(
       summary.tabId = currentTabId;
       return summary;
     }
-    const stepLabel = workdayStepHint ? `${siteLabel} · ${workdayStepHint}` : siteLabel;
+    const activeSite =
+      rebudgetedForLiveSite && liveSite !== initialSite && !isGatewaySite(liveSite)
+        ? liveSite
+        : initialSite;
+    const stepLabel = workdayStepHint
+      ? `${applySiteLabel(activeSite)} · ${workdayStepHint}`
+      : applySiteLabel(activeSite);
     await setStatus(`Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — checking page...`);
     await ensureAutofillScript(currentTabId);
 
@@ -4567,7 +4578,7 @@ async function startMultiStepApplyOnTab(
           clickLabel,
           settleMs: 1000
         });
-        if (clickRes?.externalRedirect) {
+        if (clickRes?.externalRedirect && initialSite !== "builtin") {
           summary.status = "skipped";
           summary.detail =
             "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
@@ -4691,7 +4702,7 @@ async function startMultiStepApplyOnTab(
           { type: "click_apply_action", preferredType: "entry", preferNewTab: useNewTab },
           { attempts: 2, frameId: probe.best.frameId }
         );
-        if (clickRes?.externalRedirect) {
+        if (clickRes?.externalRedirect && initialSite !== "builtin") {
           summary.status = "skipped";
           summary.detail =
             "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
@@ -5011,7 +5022,7 @@ async function startMultiStepApplyOnTab(
         clickLabel,
         settleMs: site === "dice" ? 1000 : liveSite === "workday" ? 800 : 400
       });
-      if (clickRes?.externalRedirect) {
+      if (clickRes?.externalRedirect && initialSite !== "builtin") {
         summary.status = "skipped";
         summary.detail =
           "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
@@ -5095,7 +5106,7 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    if (clickRes?.externalRedirect) {
+    if (clickRes?.externalRedirect && initialSite !== "builtin") {
       summary.status = "skipped";
       summary.detail =
         "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";

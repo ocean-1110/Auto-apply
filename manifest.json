@@ -44,6 +44,8 @@
         "https://*.ashbyhq.com/*",
         "https://jobgether.com/*",
         "https://*.jobgether.com/*",
+        "https://builtin.com/*",
+        "https://*.builtin.com/*",
         "https://jobs.smartrecruiters.com/*",
         "https://*.smartrecruiters.com/*",
         "https://*.zohorecruit.com/*",

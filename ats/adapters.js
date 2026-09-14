@@ -69,6 +69,14 @@ export const ATS_ADAPTERS = [
     stepBudget: 18
   },
   {
+    id: "builtin",
+    label: "Built In",
+    hostPatterns: [/(^|\.)builtin\.com$/i],
+    autoSubmitAllowed: false,
+    isGateway: true,
+    stepBudget: 16
+  },
+  {
     id: "smartrecruiters",
     label: "SmartRecruiters",
     hostPatterns: [/(^|\.)smartrecruiters\.com$/i],

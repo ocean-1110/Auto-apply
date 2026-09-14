@@ -14,6 +14,7 @@
     { id: "hiringcafe", label: "HiringCafe", hosts: ["hiringcafe.com", "hiring.cafe"] },
     { id: "jobright", label: "Jobright", hosts: ["jobright.ai"] },
     { id: "dice", label: "Dice", hosts: ["dice.com"] },
+    { id: "builtin", label: "Built In", hosts: ["builtin.com"] },
     { id: "greenhouse", label: "Greenhouse", hosts: ["greenhouse.io"] },
     { id: "schema", label: "Generic (schema.org / any page)" }
   ];

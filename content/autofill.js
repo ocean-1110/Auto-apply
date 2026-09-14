@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-14.allow-cookies.1";
+  const SCRIPT_BUILD = "2026-09-14.builtin-apply.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -3689,12 +3689,12 @@
       password: String(credentials.password || "")
     };
     const credResult = fillLoginCredentials(creds);
-    if (isWorkdayPage() && credResult.filledCount > 0) {
+    if ((isWorkdayPage() || isBuiltInPage()) && credResult.filledCount > 0) {
       const authSubmit = queryAllDeep("button, a, [role='button'], input[type='submit']").find(
         (el) => {
           if (!isElVisible(el) || !isElEnabled(el)) return false;
           const t = elActionText(el);
-          return /^(create account|create an account|sign in|log in|register)$/i.test(
+          return /^(create account|create an account|sign in|log in|register|continue)$/i.test(
             t.trim()
           );
         }
@@ -3931,6 +3931,18 @@
     }
   }
 
+  function isBuiltInPage(url = location.href) {
+    try {
+      return /(^|\.)builtin\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isBuiltInAuthPage() {
+    return isBuiltInPage() && Boolean(document.querySelector('input[type="password"]'));
+  }
+
   function isSmartRecruitersPage(url = location.href) {
     try {
       return /(^|\.)smartrecruiters\.com$/i.test(new URL(String(url || location.href)).hostname);
@@ -3966,6 +3978,7 @@
     if (isGreenhousePage(url)) return "greenhouse";
     if (isJobrightPage(url)) return "jobright";
     if (isJobgetherPage(url)) return "jobgether";
+    if (isBuiltInPage(url)) return "builtin";
     if (isSmartRecruitersPage(url)) return "smartrecruiters";
     if (isZohoRecruitPage(url)) return "zohorecruit";
     if (isOracleCloudPage(url)) return "oraclecloud";
@@ -3991,6 +4004,7 @@
       }
       if (site === "greenhouse") return /(^|\.)greenhouse\.io$/i.test(target.hostname);
       if (site === "jobgether") return /(^|\.)jobgether\.com$/i.test(target.hostname);
+      if (site === "builtin") return /(^|\.)builtin\.com$/i.test(target.hostname);
       if (site === "smartrecruiters") return /(^|\.)smartrecruiters\.com$/i.test(target.hostname);
       if (site === "zohorecruit") {
         return /(^|\.)zohorecruit\.com$/i.test(target.hostname) || /(^|\.)recruit\.zoho\./i.test(target.hostname);
@@ -4053,7 +4067,8 @@
       }
       return "";
     }
-    if (document.querySelector('input[type="password"]')) {
+    // Built In Easy Apply may ask for login mid-flow — credentials are filled during autofill.
+    if (document.querySelector('input[type="password"]') && !isBuiltInPage()) {
       return "A sign-in form is on the page. Log in, then retry.";
     }
     if (isIndeedPage() && /\/account\/login|\/auth|\/m\/basecamp/i.test(href)) {
@@ -4312,6 +4327,17 @@
     // Jobright/Jobgether are gateways: the listing page is never the application
     // form itself — the real form lives on the employer ATS they open.
     if (isJobgetherPage() || isJobrightPage()) isApplicationForm = false;
+    // Built In job detail is a gateway until Easy Apply opens (or auth is required).
+    if (
+      isBuiltInPage() &&
+      !isBuiltInAuthPage() &&
+      identityFields < 2 &&
+      !hasFileInput &&
+      fillableCount < 2
+    ) {
+      isApplicationForm = false;
+    }
+    if (isBuiltInAuthPage()) isApplicationForm = true;
     if (
       (isSmartRecruitersPage() || isZohoRecruitPage() || isOracleCloudPage()) &&
       identityFields < 2 &&
@@ -5351,6 +5377,51 @@
     return scored[0] || null;
   }
 
+  /** True when the Built In job page offers Easy Apply (prefer it over external Apply). */
+  function builtInPageOffersEasyApply() {
+    if (!isBuiltInPage()) return false;
+    const controls = visibleActionControls();
+    return controls.some((el) => {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""}`;
+      return EASY_APPLY_TEXT_RE.test(text) || /\beasy\s*apply\b/i.test(hint);
+    });
+  }
+
+  /**
+   * Built In job detail: prefer "Easy Apply" on-site; otherwise "Apply" / "Apply Now"
+   * which may hand off to an employer ATS.
+   */
+  function findBuiltInApplyButton() {
+    if (!isBuiltInPage()) return null;
+    dismissBlockingModalsOnce();
+    const controls = visibleActionControls();
+    const preferEasy = builtInPageOffersEasyApply();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("title") || ""} ${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
+      if (ENTRY_JUNK_RE.test(text)) continue;
+      const isEasy = EASY_APPLY_TEXT_RE.test(text) || /\beasy\s*apply\b/i.test(hint);
+      const isApplyNow = APPLY_NOW_RE.test(text) || APPLY_NOW_RE.test(hint);
+      const isApply = APPLY_ONLY_TEXT_RE.test(text);
+      if (preferEasy && !isEasy) continue;
+      if (!isEasy && !isApplyNow && !isApply) continue;
+      let score = isEasy ? 150 : isApplyNow ? 110 : 80;
+      if (/apply/i.test(hint)) score += 15;
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= 72 && rect.height >= 28) score += 20;
+        if (rect.top < 260 && rect.left > window.innerWidth * 0.4) score += 30;
+      } catch {
+        /* ignore */
+      }
+      scored.push({ type: "entry", el, text: text || (isEasy ? "Easy Apply" : "Apply"), score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
   /** Jobright job detail: the "APPLY NOW" CTA that hands off to the employer ATS. */
   function findJobrightApplyButton() {
     if (!isJobrightPage()) return null;
@@ -5462,6 +5533,8 @@
 
   function findEasyApplyEntryButton() {
     dismissBlockingModalsOnce();
+    const builtinApply = findBuiltInApplyButton();
+    if (builtinApply) return builtinApply;
     const jobrightApply = findJobrightApplyButton();
     if (jobrightApply) return jobrightApply;
     const jobgetherApply = findJobgetherApplyButton();
@@ -6006,6 +6079,14 @@
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
     await sleep(400);
     await dismissBlockingModals();
+    if (isBuiltInPage()) {
+      const target = findBuiltInApplyButton();
+      const easyApply = target && /\beasy\s*apply\b/i.test(target.text || "");
+      return clickLabeledEntry(target, {
+        preferNewTab: easyApply ? false : true,
+        alreadyOpenText: easyApply ? "easy apply" : "apply"
+      });
+    }
     if (isJobgetherPage()) {
       return clickLabeledEntry(findJobgetherApplyButton(), {
         preferNewTab,
@@ -6316,7 +6397,12 @@
       action.el?.getAttribute?.("formaction") ||
       action.el?.closest?.("form")?.getAttribute?.("action") ||
       "";
-    if (isIndeedPage() && actionHref && !isSameSiteApplyUrl(actionHref, "indeed")) {
+    if (
+      isIndeedPage() &&
+      actionHref &&
+      !isSameSiteApplyUrl(actionHref, "indeed") &&
+      !isBuiltInPage()
+    ) {
       return {
         ok: false,
         clicked: false,
