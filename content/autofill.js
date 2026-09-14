@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-12.ai-form-plan.3";
+  const SCRIPT_BUILD = "2026-09-13.keep-apply-modal.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -1789,14 +1789,18 @@
     await sleep(100);
 
     if (isDropdownMenuOpen(el)) {
-      // Close leftover open list without wiping a committed single-value.
+      // Prefer Tab over Escape — Escape closes LinkedIn/Indeed apply modals.
       const before = selectWidgetDisplayValue(el);
       pressKey(input, "Tab", "Tab");
       await sleep(80);
       if (isDropdownMenuOpen(el)) {
-        pressKey(input, "Escape", "Escape");
-        await sleep(60);
-        // If Escape cleared a good single-value, we still report based on state.
+        const inAppModal = Boolean(
+          input?.closest?.('[role="dialog"], dialog, [aria-modal="true"], [class*="modal" i], [class*="Modal"]')
+        );
+        if (!inAppModal) {
+          pressKey(input, "Escape", "Escape");
+          await sleep(60);
+        }
         if (!selectWidgetDisplayValue(el) && before) {
           /* ignore */
         }
@@ -2251,6 +2255,12 @@
   }
 
   async function waitForUploadsToSettle(timeoutMs = 20000) {
+    const dice = /(^|\.)dice\.com$/i.test(location.hostname);
+    // Dice upload step: attach files, wait 0.5s, continue — no long spinner loops.
+    if (dice) {
+      await sleep(Math.min(500, Math.max(0, Number(timeoutMs) || 500)));
+      return !uploadsStillBusy();
+    }
     const start = Date.now();
     // Give the SPA a moment to start its upload handler after change/drop.
     await sleep(600);
@@ -2269,6 +2279,7 @@
     await revealApplicationUploads();
     const uploaded = [];
     const skipped = [];
+    const dice = /(^|\.)dice\.com$/i.test(location.hostname);
     const resumeDoc = uploadFiles.resume;
     const coverDoc = uploadFiles.coverLetter;
 
@@ -2334,7 +2345,7 @@
     for (const row of targets) {
       if (!row.file || used.has(row.input)) continue;
       scrollElIntoView(row.input);
-      await sleep(200);
+      await sleep(dice ? 100 : 200);
       const ok = setFileOnInput(row.input, row.file);
       if (ok) {
         used.add(row.input);
@@ -2343,8 +2354,13 @@
           fileName: row.file.name,
           label: row.label
         });
-        // Wait for each file to finish before attaching the next / clicking Next.
-        await waitForUploadsToSettle(row.kind === "coverLetter" ? 25000 : 20000);
+        if (dice) {
+          // Brief gap between resume / cover letter attaches only.
+          await sleep(100);
+        } else {
+          // Wait for each file to finish before attaching the next / clicking Next.
+          await waitForUploadsToSettle(row.kind === "coverLetter" ? 25000 : 20000);
+        }
       } else {
         skipped.push({
           reason: "set-failed",
@@ -2360,7 +2376,7 @@
       }
     }
 
-    const settled = await waitForUploadsToSettle(8000);
+    const settled = await waitForUploadsToSettle(dice ? 500 : 8000);
     return { uploadedCount: uploaded.length, uploaded, skipped, settled };
   }
 
@@ -2882,12 +2898,18 @@
             .map((node) => cleanLabelText(node.textContent))
             .filter(Boolean)
             .slice(0, 40);
-          // Close menu so the page stays usable while AI answers.
+          // Close menu without Escape inside apply modals (Escape closes the whole dialog).
           const input = isReactSelectInput(el) ? el : el.querySelector?.("input") || el;
           if (input) {
-            input.dispatchEvent(
-              new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" })
+            const inAppModal = Boolean(
+              input.closest?.('[role="dialog"], dialog, [aria-modal="true"], [class*="modal" i], [class*="Modal"]')
             );
+            pressKey(input, "Tab", "Tab");
+            if (!inAppModal) {
+              input.dispatchEvent(
+                new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" })
+              );
+            }
           }
         } catch {
           options = [];
@@ -3686,7 +3708,8 @@
 
     // One more quiet check so Next is never pressed mid-upload.
     if (uploadResult.uploadedCount > 0 || uploadsStillBusy()) {
-      await waitForUploadsToSettle(12000);
+      const dice = /(^|\.)dice\.com$/i.test(location.hostname);
+      await waitForUploadsToSettle(dice ? 500 : 12000);
     }
 
     // Plan mode reads the page with scan_application_form instead.
@@ -5061,11 +5084,20 @@
   function isLikelyApplicationModal(node) {
     if (!node) return false;
     const fields = node.querySelectorAll(
-      'input:not([type="hidden"]):not([type="button"]):not([type="submit"]), textarea, select'
+      'input:not([type="hidden"]):not([type="button"]):not([type="submit"]), textarea, select, [contenteditable="true"]'
     ).length;
-    if (fields >= 4) return true;
-    const text = modalCopy(node).slice(0, 1800);
-    if (fields >= 2 && /work experience|education|cover letter|first name|phone number|resume/i.test(text)) {
+    const files = node.querySelectorAll?.('input[type="file"]')?.length || 0;
+    if (fields >= 3 || files >= 1) return true;
+    const text = modalCopy(node).slice(0, 2200);
+    const hint = `${node.id || ""} ${node.className || ""} ${node.getAttribute?.("data-testid") || ""}`;
+    if (
+      /\b(easy.?apply|apply.?form|application.?form|jobs?-?application|job-applications|posting-?apply|ia-ApplyForm|ia-BasePage)\b/i.test(
+        `${text} ${hint}`
+      )
+    ) {
+      return true;
+    }
+    if (fields >= 1 && /work experience|education|cover letter|first name|phone|resume|submit application/i.test(text)) {
       return true;
     }
     return false;
@@ -5080,18 +5112,23 @@
     return false;
   }
 
+  /**
+   * Only "No thanks / Not now" style CTAs. Never return bare Close/X — clicking
+   * those closes LinkedIn / Indeed / Greenhouse application modals mid-fill.
+   */
   function findModalDismissControl(modal) {
     const clickable = queryAllDeep(
       "a, button, [role='button'], input[type='button'], input[type='submit'], [aria-label], [title]",
       modal
     ).filter((el) => isElVisible(el) && isElEnabled(el));
-    const closeBtn = clickable.find((el) => isCloseControl(el));
-    const dismissCta = clickable.find((el) => {
-      const t = elActionText(el);
-      if (!t || KEEP_MODAL_OPEN_CTA_RE.test(t)) return false;
-      return DISMISS_MODAL_CTA_RE.test(t);
-    });
-    return closeBtn || dismissCta || null;
+    return (
+      clickable.find((el) => {
+        const t = elActionText(el);
+        if (!t || KEEP_MODAL_OPEN_CTA_RE.test(t)) return false;
+        if (isCloseControl(el) && !DISMISS_MODAL_CTA_RE.test(t)) return false;
+        return DISMISS_MODAL_CTA_RE.test(t);
+      }) || null
+    );
   }
 
   function isInterruptModal(node) {
@@ -5188,10 +5225,19 @@
     return false;
   }
 
-  function dismissBlockingModalsOnce() {
+  function dismissBlockingModalsOnce({ cookiesOnly = false } = {}) {
     if (dismissCookieConsentOnce()) return true;
+    if (cookiesOnly) return false;
+    // Once an application form/modal is open, never click dismiss/close —
+    // that was shutting LinkedIn / Indeed Easy Apply mid-fill.
+    try {
+      if (probeApplicationForm().isApplicationForm) return false;
+    } catch {
+      /* probe may throw before install finishes */
+    }
     let dismissed = false;
     for (const modal of findInterruptModals()) {
+      if (isLikelyApplicationModal(modal)) continue;
       const el = findModalDismissControl(modal);
       if (!el) continue;
       safeClick(el);
@@ -5200,9 +5246,9 @@
     return dismissed;
   }
 
-  async function dismissBlockingModals({ rounds = 4 } = {}) {
+  async function dismissBlockingModals({ rounds = 4, cookiesOnly = false } = {}) {
     for (let i = 0; i < rounds; i += 1) {
-      if (!dismissBlockingModalsOnce()) break;
+      if (!dismissBlockingModalsOnce({ cookiesOnly })) break;
       await sleep(450);
     }
   }
@@ -6105,7 +6151,8 @@
       (preferredType === "next" || preferredType === "review" || preferredType === "submit" || !preferredType) &&
       (before.uploadsBusy || uploadsStillBusy())
     ) {
-      await waitForUploadsToSettle(15000);
+      const dice = /(^|\.)dice\.com$/i.test(location.hostname);
+      await waitForUploadsToSettle(dice ? 500 : 15000);
       if (uploadsStillBusy()) {
         return {
           ok: false,
@@ -6318,7 +6365,11 @@
 
     let noAdvance = 0;
     for (let step = 0; step < maxSteps; step += 1) {
-      await dismissBlockingModals();
+      // Cookies only once the application form/modal is open — never close it.
+      await dismissBlockingModals({
+        rounds: 2,
+        cookiesOnly: Boolean(probeApplicationForm().isApplicationForm)
+      });
       const goneNow = detectJobUnavailable();
       if (goneNow) {
         summary.status = "unavailable";
@@ -6747,9 +6798,16 @@
       if (options.length >= MAX_SCAN_OPTIONS) break;
     }
     // Close the menu so the next widget, and the page, stay usable.
+    // Prefer Tab — Escape closes LinkedIn / Indeed application modals.
     const input = isReactSelectInput(el) ? el : el.querySelector?.("input") || el;
     try {
-      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" }));
+      const inAppModal = Boolean(
+        input?.closest?.('[role="dialog"], dialog, [aria-modal="true"], [class*="modal" i], [class*="Modal"]')
+      );
+      pressKey(input, "Tab", "Tab");
+      if (!inAppModal) {
+        input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape", code: "Escape" }));
+      }
     } catch {
       /* ignore */
     }
@@ -7603,9 +7661,40 @@
       return true;
     }
     if (message?.type === "dismiss_page_overlays") {
-      dismissBlockingModals({ rounds: Math.min(6, Math.max(1, Number(message.rounds) || 3)) })
+      dismissBlockingModals({
+        rounds: Math.min(6, Math.max(1, Number(message.rounds) || 3)),
+        cookiesOnly: Boolean(message.cookiesOnly)
+      })
         .then(() => sendResponse({ ok: true }))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "focus_submit_button") {
+      try {
+        const action = findActionButton(null, { includeDisabledSubmit: true });
+        const el = action?.type === "submit" ? action.el : null;
+        if (el) {
+          scrollElIntoView(el);
+          try {
+            el.focus?.({ preventScroll: true });
+          } catch {
+            try {
+              el.focus?.();
+            } catch {
+              /* ignore */
+            }
+          }
+          sendResponse({
+            ok: true,
+            focused: true,
+            text: action.text || elActionText(el) || "Submit"
+          });
+        } else {
+          sendResponse({ ok: true, focused: false, text: "" });
+        }
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
       return true;
     }
     if (message?.type === "fill_greenhouse_security_code") {

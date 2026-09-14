@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-12.ai-form-plan.3";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-13.keep-apply-modal.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1994,9 +1994,25 @@ async function isReadyToSubmit(url) {
 async function pauseAtSubmitForReview(tabId, summary, clickLabel = "Submit") {
   const live = await chrome.tabs.get(tabId).catch(() => null);
   await markReadyToSubmit(live?.url || summary.tabUrl || "");
+  let focusedLabel = clickLabel;
+  try {
+    await ensureAutofillScript(tabId);
+    const focused = await sendMessageToTab(
+      tabId,
+      { type: "focus_submit_button" },
+      { attempts: 1 }
+    );
+    if (focused?.text) focusedLabel = focused.text;
+  } catch {
+    /* best-effort focus */
+  }
   summary.status = "ready_for_review";
-  summary.detail = `Filled the form. Review the fields, then click Submit in Ocean to press "${clickLabel}" on the page. The application tab was left open.`;
+  summary.detail =
+    `Filled the form and focused "${focusedLabel}". Review the fields, then click Submit in Ocean to send the application. Nothing was submitted yet.`;
   summary.tabId = tabId;
+  await setStatus(
+    `Ready for your confirmation — review the form, then click Submit in Ocean to press "${focusedLabel}".`
+  );
   return summary;
 }
 
@@ -3308,12 +3324,12 @@ async function waitForPageReady(tabId, timeoutMs = 15000) {
   await sleepMs(300);
 }
 
-async function dismissPageOverlays(tabId, { rounds = 2 } = {}) {
+async function dismissPageOverlays(tabId, { rounds = 2, cookiesOnly = false } = {}) {
   try {
     await ensureAutofillScript(tabId);
     await sendMessageToTab(
       tabId,
-      { type: "dismiss_page_overlays", rounds },
+      { type: "dismiss_page_overlays", rounds, cookiesOnly },
       { attempts: 1 }
     );
   } catch {
@@ -4421,7 +4437,6 @@ async function startMultiStepApplyOnTab(
     const stepLabel = workdayStepHint ? `${siteLabel} · ${workdayStepHint}` : siteLabel;
     await setStatus(`Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — checking page...`);
     await ensureAutofillScript(currentTabId);
-    await dismissPageOverlays(currentTabId);
 
     let probe = await getApplyActionFromTab(currentTabId).catch(() => ({
       best: null,
@@ -4433,6 +4448,17 @@ async function startMultiStepApplyOnTab(
       signature: "",
       href: ""
     }));
+
+    // After the application form/modal is open, only clear cookie banners —
+    // never dismiss/close controls (that was closing Easy Apply modals).
+    await dismissPageOverlays(currentTabId, {
+      rounds: 1,
+      cookiesOnly: Boolean(probe.anyForm)
+    });
+    if (probe.anyForm) {
+      // Re-probe after cookie handling in case the form settled.
+      probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+    }
 
     if (probe.applicationSuccess && didClickSubmit) {
       if (mayCloseTabs) {
@@ -4780,7 +4806,7 @@ async function startMultiStepApplyOnTab(
     summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
 
     if (Number(fillRes?.uploadedCount || 0) > 0) {
-      // Give the ATS a short beat to accept the PDF before Next.
+      // Dice: 0.5s then Next. Other ATS: short beat to accept the PDF.
       await sleepMs(500);
     }
 
@@ -4801,8 +4827,11 @@ async function startMultiStepApplyOnTab(
       probe.best?.action?.type !== "submit" &&
       !probe.diceSubmitPage
     ) {
-      for (let wait = 0; wait < 12; wait += 1) {
-        await sleepMs(500);
+      // Dice upload page: one short recheck only — do not spin for seconds.
+      const maxWaits = site === "dice" ? 1 : 12;
+      const waitMs = site === "dice" ? 500 : 500;
+      for (let wait = 0; wait < maxWaits; wait += 1) {
+        await sleepMs(waitMs);
         if (probe.needsFill && !probe.uploadsBusy) {
           await setStatus("Auto Apply: finishing remaining fields before Next...");
           const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
@@ -4811,7 +4840,7 @@ async function startMultiStepApplyOnTab(
           summary.aiFilled += Number(again?.aiFilledCount || 0);
           summary.choiceFilled += Number(again?.choiceFilledCount || 0);
           summary.bankHits += Number(again?.bankHits || 0);
-        } else {
+        } else if (site !== "dice") {
           await setStatus("Auto Apply: waiting for file upload to finish...");
         }
         probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
@@ -4820,21 +4849,27 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    // Dice last wizard step: Submit can stay disabled until the SPA finishes
-    // rendering. Keep polling — never exit early on a carousel Next.
-    // Skip this wait when the step still has blanks (we'll pause and notify instead).
+    // Dice: only poll for Submit when we are on the final step (or no Next yet).
+    // On the upload page Next is already available — do not wait multi-seconds for Submit.
     if (
       site === "dice" &&
       !probe.applicationSuccess &&
       !probe.needsFill &&
-      probe.best?.action?.type !== "submit"
+      probe.best?.action?.type !== "submit" &&
+      probe.best?.action?.type !== "next" &&
+      probe.best?.action?.type !== "review"
     ) {
-      for (let i = 0; i < 12; i += 1) {
+      for (let i = 0; i < 8; i += 1) {
         await sleepMs(400);
         const again = await getApplyActionFromTab(currentTabId).catch(() => null);
         if (!again) continue;
         probe = again;
-        if (again.applicationSuccess || again.best?.action?.type === "submit" || again.diceSubmitPage) {
+        if (
+          again.applicationSuccess ||
+          again.best?.action?.type === "submit" ||
+          again.best?.action?.type === "next" ||
+          again.diceSubmitPage
+        ) {
           break;
         }
         if (again.uploadsBusy) continue;
@@ -4900,10 +4935,13 @@ async function startMultiStepApplyOnTab(
 
     // Dice last page: Submit may appear a beat after fill. Keep polling briefly
     // instead of stopping with "ready for review". Workday Review prefers Submit.
+    // Skip when Next/Continue is already the right action (e.g. upload step).
     if (
       (!probe.best || probe.best.action?.type !== "submit") &&
       (site === "dice" || liveSite === "workday") &&
-      probe.anyForm
+      probe.anyForm &&
+      probe.best?.action?.type !== "next" &&
+      probe.best?.action?.type !== "review"
     ) {
       await setStatus(
         liveSite === "workday"
@@ -4914,6 +4952,7 @@ async function startMultiStepApplyOnTab(
         await sleepMs(liveSite === "workday" ? 450 + 100 * i : 400);
         probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
         if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
+        if (probe.best?.action?.type === "next" || probe.best?.action?.type === "review") break;
         if (liveSite === "workday" && probe.best && !probe.workdayWizard?.isReview) break;
       }
     }
