@@ -26,7 +26,7 @@
  *
  * Rows are written on the selected tab, in the first empty cell of column A.
  */
-var API_VERSION = "2026-09-12";
+var API_VERSION = "2026-09-14";
 var LINK_COLUMN = 5;
 var STATUS_COLUMN = 8;
 
@@ -172,7 +172,8 @@ function appendJobRow(sheet, data) {
     "", // JD — intentionally blank
     status
   ];
-  sheet.getRange(row, 1, row, STATUS_COLUMN).setValues([cells]);
+  // Sheet.getRange(row, column, numRows, numColumns) — 3rd/4th args are sizes, not lastRow/lastCol.
+  sheet.getRange(row, 1, 1, STATUS_COLUMN).setValues([cells]);
   return {
     ok: true,
     apiVersion: API_VERSION,

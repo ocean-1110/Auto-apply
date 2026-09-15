@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-14.builtin-apply.1";
+  const SCRIPT_BUILD = "2026-09-14.submit-click-only.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -6324,14 +6324,46 @@
     }
 
     if (preferredType === "submit") {
-      // Dice enables Submit a moment after the last step renders.
+      // User clicked Submit in Ocean — only press Submit / Apply on the page.
+      // Do not prefer Next/Continue when a final control is available.
+      const findSubmitOnly = () => {
+        const hit = findActionButton(null, { includeDisabledSubmit: true });
+        if (hit?.type === "submit") return hit;
+        const scopeEl = getApplyScope();
+        const buttons = [
+          ...scopeEl.querySelectorAll(
+            'button, [role="button"], input[type="submit"], input[type="button"], a[role="button"]'
+          )
+        ].filter((el) => isElVisible(el) && !isSiteChromeControl(el));
+        const scored = [];
+        for (const btn of buttons) {
+          const text = elActionText(btn);
+          if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(btn)) continue;
+          const typeAttr = String(btn.getAttribute("type") || btn.type || "").toLowerCase();
+          const hint = `${btn.getAttribute("data-testid") || ""} ${btn.id || ""} ${btn.className || ""}`;
+          const isSubmit =
+            classifyActionButton(text) === "submit" ||
+            typeAttr === "submit" ||
+            /^\s*(submit|apply(\s+now)?|send(\s+application)?)\s*$/i.test(text) ||
+            /submit/i.test(hint);
+          if (!isSubmit) continue;
+          scored.push({
+            type: "submit",
+            el: btn,
+            text: text || "Submit",
+            score: actionButtonScore(btn, "submit") + (isElEnabled(btn) ? 20 : 0)
+          });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored[0] || null;
+      };
       for (let i = 0; i < 12; i += 1) {
-        action = findActionButton(null, { includeDisabledSubmit: true });
-        if (action?.type === "submit" && action.el && isElEnabled(action.el)) break;
-        if (action?.type === "submit" && action.el && i >= 2) break;
+        action = findSubmitOnly();
+        if (action?.el && isElEnabled(action.el)) break;
+        if (action?.el && i >= 2) break;
         await sleep(250);
       }
-      if (action?.type === "submit" && action.el && !isElEnabled(action.el)) {
+      if (action?.el && !isElEnabled(action.el)) {
         try {
           action.el.disabled = false;
           action.el.removeAttribute("disabled");

@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-14.builtin-apply.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-14.submit-click-only.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -2819,6 +2819,18 @@ async function runAutofillStep(
     return { ok: false, error: "No application tab found. Open the job application page first." };
   }
 
+  let tabId = tab.id;
+  let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
+  const ready = await isReadyToSubmit(tab.url || "");
+  if (!userWantsSubmit && probe?.best?.action?.type === "submit" && ready) {
+    userWantsSubmit = true;
+  }
+
+  // Panel Submit is click-only: never resolve PDFs, fill fields, or call AI.
+  if (userWantsSubmit) {
+    return clickPageSubmitOnly(tabId, { probe, pageUrl: tab.url || "" });
+  }
+
   // Pick the PDFs for the job on screen, not the last job generated.
   const resolvedDocs = await resolveUploadDocsForTab(tab.id, { explicitDocs: uploadDocs });
   if (resolvedDocs.mismatch) {
@@ -2827,14 +2839,7 @@ async function runAutofillStep(
   const docs = resolvedDocs.docs;
   const loc = await formatUploadDocsLocation(docs);
 
-  let tabId = tab.id;
-  let probe = await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false }));
-  const ready = await isReadyToSubmit(tab.url || "");
-  if (!userWantsSubmit && probe?.best?.action?.type === "submit" && ready) {
-    userWantsSubmit = true;
-  }
-
-  if (!userWantsSubmit && shouldUseJobCardApplyPath(tab.url || "", probe)) {
+  if (shouldUseJobCardApplyPath(tab.url || "", probe)) {
     if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
       return {
         ok: false,
@@ -2889,49 +2894,6 @@ async function runAutofillStep(
       extra +
       ` ${await getCostSummaryText()}`
     ).trim();
-  }
-
-  if (userWantsSubmit) {
-    // Submit is the last step, not the only one: anything the page still needs
-    // gets filled first, even when a previous pass already paused for review.
-    if (probe.needsFill) {
-      if (loc.summary) await setStatus(`Uploading from ${loc.summary}...`);
-      const fillRes = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
-      if (fillRes?.skipped || fillRes?.ok === false) return fillRes;
-      tabId = fillRes.tabId || tabId;
-    }
-    await setStatus("Autofill: clicking Submit...");
-    const liveProbe = await getApplyActionFromTab(tabId).catch(() => probe);
-    const clickRes = await sendMessageToTab(
-      tabId,
-      { type: "click_apply_action", preferredType: "submit" },
-      { attempts: 2, frameId: liveProbe?.best?.frameId }
-    ).catch((err) => ({ ok: false, error: String(err?.message || err) }));
-    if (!(clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit)) {
-      return {
-        ok: false,
-        error: clickRes?.error || "Could not click Submit. The application tab was left open."
-      };
-    }
-    if (clickRes?.navigateUrl) {
-      await navigateTabToUrl(tabId, clickRes.navigateUrl);
-    }
-    await clearReadyToSubmit();
-    const submitSite = detectSiteFromUrl(
-      (await chrome.tabs.get(tabId).catch(() => null))?.url || tab.url || ""
-    );
-    const finished = await finishSubmittedApplication(tabId, {
-      closeOnSuccess: isAutoSubmitAllowedSite(submitSite),
-      clickLabel: liveProbe?.best?.action?.text || "Submit"
-    });
-    return {
-      ok: true,
-      tabId: finished.tabId,
-      clicked: { type: "submit", ok: true, text: liveProbe?.best?.action?.text || "Submit" },
-      submitted: finished.status === "submitted",
-      button: describeAutofillButton(liveProbe, { readyToSubmit: false }),
-      status: finished.detail || "Clicked Submit."
-    };
   }
 
   const fillRes = await startAutofillOnCurrentPage(profileId, tabId, { uploadDocs: docs });
@@ -3053,6 +3015,51 @@ async function runAutofillStep(
 }
 
 /**
+ * Panel Submit: click only the page Submit / Apply control. No fill, no AI.
+ */
+async function clickPageSubmitOnly(tabId, { probe = null, pageUrl = "" } = {}) {
+  await ensureAutofillScript(tabId);
+  let liveProbe =
+    probe ||
+    (await getApplyActionFromTab(tabId).catch(() => ({ best: null, anyForm: false })));
+  const clickLabel = liveProbe?.best?.action?.text || "Submit";
+  await setStatus(`Submit: clicking "${clickLabel}" on the page...`);
+
+  const clickRes = await clickSubmitOnTab(tabId, {
+    frameId: liveProbe?.best?.frameId,
+    clickLabel,
+    settleMs: 0
+  });
+  if (!(clickRes?.clicked || clickRes?.navigateUrl || clickRes?.isSubmit)) {
+    return {
+      ok: false,
+      error: clickRes?.error || "Could not find a Submit / Apply button on this page.",
+      button: describeAutofillButton(liveProbe, { readyToSubmit: true })
+    };
+  }
+  if (clickRes?.navigateUrl) {
+    await navigateTabToUrl(tabId, clickRes.navigateUrl);
+  }
+  await clearReadyToSubmit();
+  const submitSite = detectSiteFromUrl(
+    (await chrome.tabs.get(tabId).catch(() => null))?.url || pageUrl || ""
+  );
+  const finished = await finishSubmittedApplication(tabId, {
+    closeOnSuccess: isAutoSubmitAllowedSite(submitSite),
+    clickLabel
+  });
+  liveProbe = await getApplyActionFromTab(finished.tabId || tabId).catch(() => liveProbe);
+  return {
+    ok: true,
+    tabId: finished.tabId,
+    clicked: { type: "submit", ok: true, text: clickLabel },
+    submitted: finished.status === "submitted",
+    button: describeAutofillButton(liveProbe, { readyToSubmit: false }),
+    status: finished.detail || `Clicked "${clickLabel}".`
+  };
+}
+
+/**
  * Panel Apply button: run the whole application (fill → Next → next page),
  * same engine as job-card Apply. Dice clicks Submit automatically.
  * Other ATS pause on Submit so a second Apply click sends the form.
@@ -3069,13 +3076,6 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
     };
   }
 
-  // PDFs for the job on screen — not whatever the last batch build left behind.
-  const resolvedDocs = await resolveUploadDocsForTab(tab.id);
-  if (resolvedDocs.mismatch) {
-    return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
-  }
-  const docs = resolvedDocs.docs;
-
   let probe = await getApplyActionFromTab(tab.id).catch(() => ({ best: null, anyForm: false }));
   const site = detectSiteFromUrl(tab.url || "");
   const ready = await isReadyToSubmit(tab.url || "");
@@ -3083,13 +3083,17 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
     String(preferredAction || "").toLowerCase() === "submit" ||
     (probe?.best?.action?.type === "submit" && ready);
 
-  if (wantsSubmit && probe?.best?.action?.type === "submit") {
-    return runAutofillStep(profileId, {
-      uploadDocs: docs,
-      clickAction: true,
-      preferredAction: "submit"
-    });
+  // Explicit Submit from the panel: click only — never fill or call AI.
+  if (wantsSubmit) {
+    return clickPageSubmitOnly(tab.id, { probe, pageUrl: tab.url || "" });
   }
+
+  // PDFs for the job on screen — not whatever the last batch build left behind.
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id);
+  if (resolvedDocs.mismatch) {
+    return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
+  }
+  const docs = resolvedDocs.docs;
 
   if (!probe?.anyForm && !docs?.resume?.base64 && !docs?.coverLetter?.base64) {
     return {
@@ -3832,9 +3836,12 @@ async function finishSubmittedApplication(
 }
 
 async function clickSubmitOnTab(tabId, { frameId, clickLabel = "Submit", settleMs = 1000 } = {}) {
-  await setStatus(`Auto Apply: on Submit page — waiting ${Math.round(settleMs / 1000)}s...`);
-  await sleepMs(settleMs);
-  await setStatus(`Auto Apply: clicking ${clickLabel}...`);
+  const waitMs = Math.max(0, Number(settleMs) || 0);
+  if (waitMs > 0) {
+    await setStatus(`Auto Apply: on Submit page — waiting ${Math.round(waitMs / 1000)}s...`);
+    await sleepMs(waitMs);
+  }
+  await setStatus(`Submit: clicking ${clickLabel}...`);
   let clickRes = await sendMessageToTab(
     tabId,
     { type: "click_apply_action", preferredType: "submit" },

@@ -18,7 +18,7 @@ export function extractSheetGid(url) {
 }
 
 /** Apps Script API versions that know the current sheet column layout. */
-export const CURRENT_SHEET_API_VERSION = "2026-09-12";
+export const CURRENT_SHEET_API_VERSION = "2026-09-14";
 
 function validateWebAppUrl(webAppUrl) {
   const endpoint = String(webAppUrl || "").trim();
