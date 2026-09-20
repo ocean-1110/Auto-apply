@@ -60,6 +60,10 @@
         <rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/>
         <path fill="none" stroke="currentColor" stroke-width="1.7" d="M6 16V6.8A1.8 1.8 0 0 1 7.8 5H16"/>
       </symbol>
+      <symbol id="i-save" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M6.5 5.5h9.2L18.5 8.3V18.5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1z"/>
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M8.5 5.5v4.5h7V5.5M8.5 19v-5h7v5"/>
+      </symbol>
       <symbol id="i-refresh" viewBox="0 0 24 24">
         <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.2 12a7.2 7.2 0 1 1-2.1-5.1L19.5 8.5"/>
         <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.8v3.7h-3.7"/>
@@ -148,6 +152,7 @@
                 <button type="button" id="filterGreenhouseJobs" class="chip-btn">Greenhouse</button>
                 <button type="button" id="filterWorkdayJobs" class="chip-btn">Workday</button>
                 <button type="button" id="filterIndeedJobs" class="chip-btn">Indeed</button>
+                <button type="button" id="filterZipRecruiterJobs" class="chip-btn">ZipRecruiter</button>
                 <button type="button" id="filterJobrightJobs" class="chip-btn">Jobright</button>
                 <button type="button" id="filterLinkedInJobs" class="chip-btn">LinkedIn</button>
                 <button type="button" id="filterOtherJobs" class="chip-btn">Others</button>
@@ -324,19 +329,36 @@
                     <span>JD link</span>
                     <input id="jdLink" type="url" placeholder="https://..." autocomplete="off" />
                   </label>
-                  <button type="button" id="copySheetRow" class="icon-btn" title="Copy sheet row">
-                    <svg class="btn-icon" aria-hidden="true"><use href="#i-copy"/></svg>
-                    <span class="btn-label">Copy</span>
+                  <div class="row-split-actions">
+                    <button type="button" id="copySheetRow" class="icon-btn" title="Copy sheet row to clipboard">
+                      <svg class="btn-icon" aria-hidden="true"><use href="#i-copy"/></svg>
+                      <span class="btn-label">Copy</span>
+                    </button>
+                    <button
+                      type="button"
+                      id="saveJobDetailsBtn"
+                      class="icon-btn icon-btn-accent"
+                      title="Save JD to the output folder (no resume required) and append a row to Google Sheet"
+                    >
+                      <svg class="btn-icon" aria-hidden="true"><use href="#i-save"/></svg>
+                      <span class="btn-label">Save</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="row-split" style="align-items: start">
+                  <label class="field grow">
+                    <span>Job description</span>
+                    <textarea
+                      id="jdText"
+                      placeholder="Paste the job description here..."
+                      rows="3"
+                    ></textarea>
+                  </label>
+                  <button type="button" id="pasteJd" class="icon-btn" title="Paste job description from clipboard" style="margin-top: 22px">
+                    <svg class="btn-icon" aria-hidden="true"><use href="#i-paste"/></svg>
+                    <span class="btn-label">Paste JD</span>
                   </button>
                 </div>
-                <label class="field">
-                  <span>Job description</span>
-                  <textarea
-                    id="jdText"
-                    placeholder="Paste the job description here..."
-                    rows="3"
-                  ></textarea>
-                </label>
               </div>
               <div id="primaryActions" class="primary-actions">
                 <div class="gen-options-row">
@@ -388,71 +410,6 @@
                 </div>
               </div>
             </div>
-          </section>
-
-          <section class="neo-card section" id="saveFolderCard">
-            <h2 class="section-title">Save folder</h2>
-            <p class="hint">
-              <strong>Add to list</strong> scrapes the open tab and queues the job for batch resume build (no generate / Apply).
-              <strong>Scrape &amp; Apply</strong> (or Alt+Shift+S) scrapes, generates, then runs Auto Apply.
-              HiringCafe: open the job details panel first.
-            </p>
-            <div class="scrape-actions">
-              <button type="button" id="pasteJd" class="icon-btn" title="Paste job description from clipboard">
-                <svg class="btn-icon" aria-hidden="true"><use href="#i-paste"/></svg>
-                <span class="btn-label">Paste JD</span>
-              </button>
-            </div>
-            <div class="row-split">
-              <label class="field grow">
-                <span>Output folder</span>
-                <input
-                  id="outputDirLabel"
-                  type="text"
-                  placeholder="No folder selected"
-                  autocomplete="off"
-                  readonly
-                />
-              </label>
-              <button type="button" id="selectOutputDir" class="icon-btn" title="Choose a folder on your PC">
-                <svg class="btn-icon" aria-hidden="true"><use href="#i-folder"/></svg>
-                <span class="btn-label">Folder</span>
-              </button>
-            </div>
-            <label class="field">
-              <span>Absolute path (for Copy path)</span>
-              <input
-                id="outputDirAbsPath"
-                type="text"
-                placeholder="e.g. D:\Bid\BR-AI\09-01W"
-                autocomplete="off"
-                spellcheck="false"
-              />
-            </label>
-            <label class="field">
-              <span>Resume filename</span>
-              <input
-                id="resumeFilenamePattern"
-                type="text"
-                placeholder="{name}_Resume"
-                autocomplete="off"
-                spellcheck="false"
-              />
-            </label>
-            <p class="hint" id="resumeFilenameHint">
-              Pattern for the saved PDF/HTML (extension added automatically). Tokens:
-              <code>{name}</code>, <code>{first}</code>, <code>{last}</code>,
-              <code>{company}</code>, <code>{title}</code>, <code>{date}</code>.
-              Example: <code id="resumeFilenameExample">{name}_Resume.pdf</code>
-            </p>
-            <p class="hint">
-              Chrome cannot read the full disk path. Paste the absolute path to your output folder
-              (File Explorer → click the address bar → copy, e.g. D:\Bid\BR-AI\09-01W). Copy path then
-              yields D:\Bid\BR-AI\09-01W\{job-folder} for Explorer. Without Absolute path, Copy path
-              is disabled — relative names like 09-01W\job-folder are not valid Windows locations.
-              Folder access can reset while a long generate runs in the background — click Unlock once
-              (choose Allow on every visit if Chrome offers it) so saves do not stall.
-            </p>
           </section>
 
           <details class="accordion" id="qaBankSection">

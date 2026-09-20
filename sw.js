@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-19.stop-after-fill.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-20.ziprecruiter-apply.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -2710,6 +2710,12 @@ async function tryAiApplyButton(
       }
       const text = String(b.text || "");
       if (
+        site === "ziprecruiter" &&
+        /^\s*(1-?click\s*apply|one-?click\s*apply|quick\s*apply|easy\s*apply)\s*$/i.test(text)
+      ) {
+        continue;
+      }
+      if (
         /\b(explore|get in touch|talk with|contact us|about us|corporate|governance|investors?|privacy|terms|sustainability|media hub|learn more|careers home|company overview)\b/i.test(
           text
         )
@@ -3231,6 +3237,7 @@ function isAllowedApplyNavUrl(url) {
     if (/(^|\.)indeed\.com$/i.test(host)) {
       return /\/(viewjob|apply|indeedapply|job)\b|jk=/i.test(path);
     }
+    if (/(^|\.)ziprecruiter\.com$/i.test(host)) return true;
     if (/(^|\.)jobgether\.com$/i.test(host)) return true;
     if (/(^|\.)builtin\.com$/i.test(host)) return true;
     if (/(^|\.)smartrecruiters\.com$/i.test(host)) return true;
@@ -3288,6 +3295,12 @@ function applicationSuccessFromUrl(url) {
       return "Application submitted (confirmation page).";
     }
     if (/(^|\.)indeed\.com$/i.test(host) && /\/apply\/(?:complete|success|submitted)|applicationSubmitted/i.test(path)) {
+      return "Application submitted (confirmation page).";
+    }
+    if (
+      /(^|\.)ziprecruiter\.com$/i.test(host) &&
+      /\/apply\/(?:complete|success|submitted|thank)|applicationSubmitted|be-seen-first/i.test(path)
+    ) {
       return "Application submitted (confirmation page).";
     }
     if (
@@ -3412,6 +3425,7 @@ async function waitBrieflyForApplyEntry(tabId, timeoutMs = APPLY_ENTRY_WAIT_MS) 
     probe = await getApplyActionFromTab(tabId).catch(() => probe);
     if (
       probe?.alreadyApplied ||
+      probe?.oneClickApply ||
       probe?.jobUnavailable ||
       probe?.applicationSuccess ||
       probeHasApplyEntry(probe)
@@ -3477,6 +3491,8 @@ function pickBestApplyAction(frameResults = []) {
     frameResults.find((f) => f?.jobUnavailable)?.jobUnavailable || "";
   const alreadyApplied =
     frameResults.find((f) => f?.alreadyApplied)?.alreadyApplied || "";
+  const oneClickApply =
+    frameResults.find((f) => f?.oneClickApply)?.oneClickApply || "";
   const applicationSuccess =
     frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess ||
     applicationSuccessFromUrl(best?.href || frameResults[0]?.href || "") ||
@@ -3524,6 +3540,7 @@ function pickBestApplyAction(frameResults = []) {
     blockedReason,
     jobUnavailable,
     alreadyApplied,
+    oneClickApply,
     applicationSuccess,
     emailVerification,
     emailVerificationText,
@@ -3983,6 +4000,14 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         knownTabIds.add(fresh.id);
         continue;
       }
+      if (
+        isUrlOnApplySite(prevUrl, "ziprecruiter") &&
+        !isUrlOnApplySite(newUrl, "ziprecruiter")
+      ) {
+        await chrome.tabs.remove(fresh.id).catch(() => {});
+        knownTabIds.add(fresh.id);
+        continue;
+      }
 
       const orig = await chrome.tabs.get(tabId).catch(() => null);
       const origUrl = orig?.url || "";
@@ -4011,7 +4036,7 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         const nextHost = new URL(tab.url).hostname.toLowerCase();
         const leftKnownAts =
           isAllowedApplyNavUrl(prevUrl) ||
-          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|smartrecruiters\.com|oraclecloud\.com|builtin\.com)$/i.test(
+          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|ziprecruiter\.com|smartrecruiters\.com|oraclecloud\.com|builtin\.com)$/i.test(
             prevHost
           );
         if (leftKnownAts && nextHost !== prevHost && !isPlausibleApplyDestination(tab.url)) {
@@ -4496,6 +4521,16 @@ async function runApplyImportedJobCore(
  * confirmation. Other ATS stop on the Submit page so you can review, then
  * click Submit in Ocean — the tab is never closed on a timeout.
  */
+function externalApplyStopDetail(site = "") {
+  if (site === "ziprecruiter") {
+    return "ZipRecruiter opened an external employer site. Automatic filling and submission stopped.";
+  }
+  if (site === "indeed") {
+    return "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+  }
+  return `${applySiteLabel(site) || "This site"} opened an external ATS. Automatic filling and submission stopped.`;
+}
+
 async function startMultiStepApplyOnTab(
   profileId,
   tabId = null,
@@ -4582,8 +4617,17 @@ async function startMultiStepApplyOnTab(
     }
     if (initialSite === "indeed" && liveNow?.url && !isUrlOnApplySite(liveNow.url, "indeed")) {
       summary.status = "skipped";
-      summary.detail =
-        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+      summary.detail = externalApplyStopDetail("indeed");
+      summary.tabId = currentTabId;
+      return summary;
+    }
+    if (
+      initialSite === "ziprecruiter" &&
+      liveNow?.url &&
+      !isUrlOnApplySite(liveNow.url, "ziprecruiter")
+    ) {
+      summary.status = "skipped";
+      summary.detail = externalApplyStopDetail("ziprecruiter");
       summary.tabId = currentTabId;
       return summary;
     }
@@ -4633,6 +4677,13 @@ async function startMultiStepApplyOnTab(
     if (probe.alreadyApplied) {
       summary.status = "already_applied";
       summary.detail = probe.alreadyApplied;
+      summary.tabId = currentTabId;
+      return summary;
+    }
+
+    if (probe.oneClickApply) {
+      summary.status = "needs_review";
+      summary.detail = probe.oneClickApply;
       summary.tabId = currentTabId;
       return summary;
     }
@@ -4721,8 +4772,7 @@ async function startMultiStepApplyOnTab(
         });
         if (clickRes?.externalRedirect && initialSite !== "builtin") {
           summary.status = "skipped";
-          summary.detail =
-            "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+          summary.detail = externalApplyStopDetail(initialSite);
           summary.tabId = currentTabId;
           return summary;
         }
@@ -4781,7 +4831,7 @@ async function startMultiStepApplyOnTab(
           probe = await waitBrieflyForApplyEntry(currentTabId, APPLY_ENTRY_WAIT_MS);
           lookedForEntry = true;
         }
-        if (probe.alreadyApplied || probe.jobUnavailable || probe.anyForm) {
+        if (probe.alreadyApplied || probe.oneClickApply || probe.jobUnavailable || probe.anyForm) {
           continue;
         }
         const retryUrl = (probe.applyUrls || []).find(
@@ -4845,8 +4895,13 @@ async function startMultiStepApplyOnTab(
         );
         if (clickRes?.externalRedirect && initialSite !== "builtin") {
           summary.status = "skipped";
-          summary.detail =
-            "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+          summary.detail = externalApplyStopDetail(initialSite);
+          summary.tabId = currentTabId;
+          return summary;
+        }
+        if (clickRes?.oneClickApply) {
+          summary.status = "needs_review";
+          summary.detail = clickRes.oneClickApply;
           summary.tabId = currentTabId;
           return summary;
         }
@@ -5200,8 +5255,7 @@ async function startMultiStepApplyOnTab(
       });
       if (clickRes?.externalRedirect && initialSite !== "builtin") {
         summary.status = "skipped";
-        summary.detail =
-          "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+        summary.detail = externalApplyStopDetail(initialSite);
         summary.tabId = currentTabId;
         return summary;
       }
@@ -5284,8 +5338,7 @@ async function startMultiStepApplyOnTab(
 
     if (clickRes?.externalRedirect && initialSite !== "builtin") {
       summary.status = "skipped";
-      summary.detail =
-        "Indeed Apply opens an external ATS. Automatic filling and submission stopped.";
+      summary.detail = externalApplyStopDetail(initialSite);
       summary.tabId = currentTabId;
       return summary;
     }
@@ -5338,8 +5391,16 @@ async function startMultiStepApplyOnTab(
 
     if (initialSite === "indeed" && summary.tabUrl && !isUrlOnApplySite(summary.tabUrl, "indeed")) {
       summary.status = "skipped";
-      summary.detail =
-        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+      summary.detail = externalApplyStopDetail("indeed");
+      return summary;
+    }
+    if (
+      initialSite === "ziprecruiter" &&
+      summary.tabUrl &&
+      !isUrlOnApplySite(summary.tabUrl, "ziprecruiter")
+    ) {
+      summary.status = "skipped";
+      summary.detail = externalApplyStopDetail("ziprecruiter");
       return summary;
     }
 
@@ -5379,8 +5440,16 @@ async function startMultiStepApplyOnTab(
 
     if (initialSite === "indeed" && summary.tabUrl && !isUrlOnApplySite(summary.tabUrl, "indeed")) {
       summary.status = "skipped";
-      summary.detail =
-        "Indeed redirected to an external ATS. Automatic filling and submission stopped.";
+      summary.detail = externalApplyStopDetail("indeed");
+      return summary;
+    }
+    if (
+      initialSite === "ziprecruiter" &&
+      summary.tabUrl &&
+      !isUrlOnApplySite(summary.tabUrl, "ziprecruiter")
+    ) {
+      summary.status = "skipped";
+      summary.detail = externalApplyStopDetail("ziprecruiter");
       return summary;
     }
 
@@ -5670,6 +5739,97 @@ function buildJdTxtContent({ jobTitle, companyName, jdLink, jdText }) {
     "",
     jdText || ""
   ].join("\n");
+}
+
+/**
+ * Save job details only: create the standard job folder with jd.txt (no resume),
+ * then append a row to Google Sheet when sheet settings are configured.
+ */
+async function saveJobDetailsOnly(profileId, jobMeta = {}) {
+  const jobTitle = String(jobMeta.jobTitle || "").trim();
+  const companyName = String(jobMeta.companyName || "").trim();
+  const jdLink = String(jobMeta.jdLink || "").trim();
+  const jdText = String(jobMeta.jdText || "").trim();
+
+  if (!jobTitle) throw new Error("Enter a job title first.");
+  if (!companyName) throw new Error("Enter a company name first.");
+  if (!jdText && !jdLink) {
+    throw new Error("Paste a job description or JD link first.");
+  }
+
+  const hasHandle = Boolean(await getOutputDirectoryHandle());
+  if (!hasHandle) {
+    throw new Error(
+      'No output folder selected. Click "Folder" under Scrape & save, then try Save again.'
+    );
+  }
+
+  const applicantInfo = profileId ? await getApplicantInfo(profileId).catch(() => ({})) : {};
+  const personName =
+    [applicantInfo?.firstName, applicantInfo?.lastName].filter(Boolean).join(" ").trim() ||
+    String(applicantInfo?.preferredName || "").trim() ||
+    "Candidate";
+
+  const reuseFolder = extractFolderNameFromSaveMeta(jobMeta.overwriteFolderName || "");
+  const folderName = reuseFolder || (await buildJobFolderName(jobMeta, personName));
+  const jdTxt = buildJdTxtContent({ jobTitle, companyName, jdLink, jdText });
+  const files = [{ name: "jd.txt", mimeType: "text/plain", encoding: "utf8", content: jdTxt }];
+
+  await setStatus(`Saving JD to ${folderName}...`);
+  const saved = await commitOutputBundle(folderName, files, {
+    importedJobId: jobMeta.importedJobId || ""
+  });
+  const savedDir = saved?.pathLabel || folderName;
+
+  try {
+    await chrome.storage.local.set({
+      last_job_title: jobTitle,
+      last_company_name: companyName,
+      last_jd_link: jdLink,
+      last_jd_text: jdText,
+      last_output_dir: folderName
+    });
+  } catch {
+    /* ignore */
+  }
+
+  let status = `Saved JD to ${savedDir} (jd.txt)`;
+  let sheetAppended = false;
+
+  if ((jobMeta.spreadsheetUrl || jobMeta.sheetsWebAppUrl) && !jobMeta.skipSheetAppend) {
+    await setStatus("Appending row to Google Sheet...");
+    try {
+      const sheetResult = await appendJobToSpreadsheet({
+        spreadsheetUrl: jobMeta.spreadsheetUrl,
+        webAppUrl: jobMeta.sheetsWebAppUrl,
+        sheetName: jobMeta.sheetName || "",
+        jobTitle,
+        companyName,
+        jdLink,
+        salaryMin: jobMeta.salaryMin || "",
+        salaryMax: jobMeta.salaryMax || "",
+        applicationStatus: jobMeta.trackApplicationStatus ? "JD Saved" : ""
+      });
+      const sheetLabel = sheetResult.sheetName
+        ? `"${sheetResult.sheetName}" row ${sheetResult.row}`
+        : `row ${sheetResult.row}`;
+      status = `${status} and appended to Google Sheet (${sheetLabel})`;
+      sheetAppended = true;
+    } catch (sheetErr) {
+      status = `${status}, but sheet append failed: ${String(sheetErr?.message || sheetErr)}`;
+    }
+  } else {
+    status = `${status}. Sheet not configured — open Edit profile to enable append.`;
+  }
+
+  await setStatus(status);
+  return {
+    ok: true,
+    status,
+    folderName,
+    pathLabel: savedDir,
+    sheetAppended
+  };
 }
 
 function enforceHeaderStructure(html) {
@@ -7159,6 +7319,36 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           button: describeAutofillButton({}),
           error: String(err?.message || err)
         });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "save_job_details") {
+    (async () => {
+      let saveRunToken = null;
+      try {
+        const busy = generationLockError("Ocean");
+        if (busy) {
+          safeSendResponse(sendResponse, { ok: false, error: busy });
+          return;
+        }
+        saveRunToken = acquireGenerationLock();
+        const profileId = String(message.profileId || "").trim();
+        const jobMeta = message.jobMeta && typeof message.jobMeta === "object" ? message.jobMeta : {};
+        const result = await saveJobDetailsOnly(profileId, jobMeta);
+        safeSendResponse(sendResponse, result);
+      } catch (err) {
+        const error = String(err?.message || err);
+        if (isCancelError(err)) {
+          await setStatus("Cancelled by user.");
+          safeSendResponse(sendResponse, { ok: false, error: "Cancelled by user." });
+        } else {
+          await setStatus(`Save failed: ${error}`);
+          safeSendResponse(sendResponse, { ok: false, error });
+        }
+      } finally {
+        await finishGenerationRun(saveRunToken);
       }
     })();
     return true;

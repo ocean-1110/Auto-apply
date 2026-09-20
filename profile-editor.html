@@ -338,6 +338,61 @@
         </p>
       </section>
 
+      <section class="card" id="saveFolderCard">
+        <h2 class="section-title">Save folder</h2>
+        <p class="hint">
+          Where resumes, cover letters, and JD files are written. Shared across profiles in this browser.
+        </p>
+        <div class="row-split" style="margin-bottom: 10px; gap: 8px; display: flex; flex-wrap: wrap; align-items: end">
+          <label class="field grow" style="flex: 1 1 220px; min-width: 0; margin-bottom: 0">
+            <span>Output folder</span>
+            <input
+              id="outputDirLabel"
+              type="text"
+              placeholder="No folder selected"
+              autocomplete="off"
+              readonly
+            />
+          </label>
+          <button type="button" id="selectOutputDir" class="secondary compact" title="Choose a folder on your PC">
+            Choose folder
+          </button>
+        </div>
+        <label class="field">
+          <span>Absolute path (for Copy path)</span>
+          <input
+            id="outputDirAbsPath"
+            type="text"
+            placeholder="e.g. D:\Bid\BR-AI\09-01W"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <label class="field">
+          <span>Resume filename</span>
+          <input
+            id="resumeFilenamePattern"
+            type="text"
+            placeholder="{name}_Resume"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <p class="hint" id="resumeFilenameHint">
+          Pattern for the saved PDF/HTML (extension added automatically). Tokens:
+          <code>{name}</code>, <code>{first}</code>, <code>{last}</code>,
+          <code>{company}</code>, <code>{title}</code>, <code>{date}</code>.
+          Example: <code id="resumeFilenameExample">{name}_Resume.pdf</code>
+        </p>
+        <p class="hint">
+          Chrome cannot read the full disk path. Paste the absolute path to your output folder
+          (File Explorer → click the address bar → copy, e.g. D:\Bid\BR-AI\09-01W). Copy path on the
+          main panel then yields D:\Bid\BR-AI\09-01W\{job-folder} for Explorer. Without Absolute path,
+          Copy path is disabled. Folder access can reset during long generates — use Unlock on the
+          main panel (prefer Allow on every visit) so saves do not stall.
+        </p>
+      </section>
+
       <section class="card">
         <h2 class="section-title">Login / signup credentials</h2>
         <p class="hint">

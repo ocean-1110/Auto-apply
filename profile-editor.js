@@ -23,6 +23,16 @@ import {
 import { closeHostWindow } from "./close-host.js";
 import { initIntegrationsSettings } from "./integrations-settings.js";
 import { parseProjectManifest } from "./project-manifest.js";
+import {
+  saveOutputDirectoryHandle,
+  getOutputDirectoryName,
+  getOutputDirectoryAbsolutePath,
+  setOutputDirectoryAbsolutePath,
+  unlockOutputDirectory
+} from "./fs-output.js";
+
+const RESUME_FILENAME_PATTERN_KEY = "resume_filename_pattern";
+const DEFAULT_RESUME_FILENAME_PATTERN = "{name}_Resume";
 
 const APPLICANT_FIELD_IDS = Object.keys(createEmptyApplicantInfo());
 
@@ -61,7 +71,12 @@ const els = {
   saveBtn: document.getElementById("saveBtn"),
   saveBtnBottom: document.getElementById("saveBtnBottom"),
   cancelBtn: document.getElementById("cancelBtn"),
-  cancelBtnBottom: document.getElementById("cancelBtnBottom")
+  cancelBtnBottom: document.getElementById("cancelBtnBottom"),
+  outputDirLabel: document.getElementById("outputDirLabel"),
+  outputDirAbsPath: document.getElementById("outputDirAbsPath"),
+  resumeFilenamePattern: document.getElementById("resumeFilenamePattern"),
+  resumeFilenameExample: document.getElementById("resumeFilenameExample"),
+  selectOutputDir: document.getElementById("selectOutputDir")
 };
 
 /** @type {{ mode: "new" | "edit", profileId: string | null, builtin: boolean }} */
@@ -70,6 +85,122 @@ let editorState = { mode: "new", profileId: null, builtin: false };
 function setStatus(message, isError = false) {
   els.status.textContent = message;
   els.status.style.color = isError ? "#fca5a5" : "#93c5fd";
+}
+
+function previewResumeFilename(pattern) {
+  const tokens = {
+    name: "Steven_Avon",
+    fullname: "Steven Avon",
+    first: "Steven",
+    last: "Avon",
+    company: "Acme",
+    title: "Engineer",
+    role: "Engineer",
+    date: new Date().toISOString().slice(0, 10)
+  };
+  let out = String(pattern || "").trim() || DEFAULT_RESUME_FILENAME_PATTERN;
+  out = out.replace(/\.(pdf|html)$/i, "");
+  out = out.replace(/\{([a-z_]+)\}/gi, (_, key) => {
+    const value = tokens[String(key || "").toLowerCase()];
+    return value != null ? String(value) : "";
+  });
+  out = out.replace(/\s+/g, "_").replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_");
+  out = out.replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "Resume";
+  return `${out}.pdf`;
+}
+
+function updateResumeFilenameExample() {
+  if (!els.resumeFilenameExample) return;
+  const pattern = els.resumeFilenamePattern?.value || DEFAULT_RESUME_FILENAME_PATTERN;
+  els.resumeFilenameExample.textContent = previewResumeFilename(pattern);
+}
+
+async function loadResumeFilenamePattern() {
+  const data = await chrome.storage.local.get(RESUME_FILENAME_PATTERN_KEY);
+  const raw = String(data[RESUME_FILENAME_PATTERN_KEY] || "").trim();
+  if (els.resumeFilenamePattern) {
+    els.resumeFilenamePattern.value = raw || DEFAULT_RESUME_FILENAME_PATTERN;
+  }
+  updateResumeFilenameExample();
+}
+
+async function persistResumeFilenamePattern() {
+  if (!els.resumeFilenamePattern) return;
+  let value = String(els.resumeFilenamePattern.value || "").trim();
+  if (!value) value = DEFAULT_RESUME_FILENAME_PATTERN;
+  els.resumeFilenamePattern.value = value;
+  await chrome.storage.local.set({ [RESUME_FILENAME_PATTERN_KEY]: value });
+  updateResumeFilenameExample();
+}
+
+async function refreshOutputDirLabel() {
+  const name = await getOutputDirectoryName();
+  if (els.outputDirLabel) {
+    els.outputDirLabel.value = name || "";
+    els.outputDirLabel.placeholder = name ? name : "No folder selected";
+  }
+  if (els.outputDirAbsPath) {
+    const abs = await getOutputDirectoryAbsolutePath();
+    els.outputDirAbsPath.value = abs || "";
+    els.outputDirAbsPath.placeholder = name
+      ? `Paste full path to "${name}" (e.g. D:\\Bid\\BR-AI\\${name})`
+      : "e.g. D:\\Bid\\BR-AI\\09-01W";
+  }
+}
+
+async function persistOutputAbsolutePathFromInput() {
+  if (!els.outputDirAbsPath) return "";
+  const path = await setOutputDirectoryAbsolutePath(els.outputDirAbsPath.value);
+  els.outputDirAbsPath.value = path;
+  return path;
+}
+
+async function selectOutputDirectory() {
+  if (typeof window.showDirectoryPicker !== "function") {
+    setStatus("Folder picker is not supported in this Chrome build.", true);
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({
+      id: "resume-bot-output",
+      mode: "readwrite",
+      startIn: "documents"
+    });
+    const name = await saveOutputDirectoryHandle(handle);
+    await unlockOutputDirectory({ interactive: true });
+    if (els.outputDirLabel) els.outputDirLabel.value = name;
+
+    const prevAbs = await getOutputDirectoryAbsolutePath();
+    let suggestion = prevAbs;
+    if (!suggestion) {
+      suggestion = `D:\\Bid\\BR-AI\\${name}`;
+    } else {
+      const leaf = suggestion.split(/[/\\]/).filter(Boolean).pop() || "";
+      if (leaf.toLowerCase() !== String(name).toLowerCase()) {
+        suggestion = `${suggestion.replace(/[\\/]+$/, "")}\\${name}`;
+      }
+    }
+    const typed = window.prompt(
+      `Chrome cannot read the full disk path.\n\nPaste the absolute path to the folder you just selected ("${name}"):`,
+      suggestion
+    );
+    if (typed != null && String(typed).trim()) {
+      const abs = await setOutputDirectoryAbsolutePath(typed);
+      if (els.outputDirAbsPath) els.outputDirAbsPath.value = abs;
+      setStatus(`Output folder set: ${abs || name}`);
+    } else {
+      setStatus(
+        `Output folder set: ${name}. Paste its absolute path below so Copy path works in Explorer.`
+      );
+    }
+    await refreshOutputDirLabel();
+  } catch (err) {
+    if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
+      setStatus("Folder selection canceled.");
+      return;
+    }
+    setStatus(`Folder selection failed: ${String(err?.message || err)}`, true);
+  }
 }
 
 function fillSelect(selectEl, options) {
@@ -289,6 +420,29 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+els.selectOutputDir?.addEventListener("click", () => {
+  selectOutputDirectory().catch((err) => setStatus(String(err?.message || err), true));
+});
+els.outputDirAbsPath?.addEventListener("change", () => {
+  persistOutputAbsolutePathFromInput()
+    .then((path) => {
+      if (path) setStatus(`Absolute path saved: ${path}`);
+    })
+    .catch((err) => setStatus(String(err?.message || err), true));
+});
+els.outputDirAbsPath?.addEventListener("blur", () => {
+  persistOutputAbsolutePathFromInput().catch(() => {});
+});
+els.resumeFilenamePattern?.addEventListener("input", () => updateResumeFilenameExample());
+els.resumeFilenamePattern?.addEventListener("change", () => {
+  persistResumeFilenamePattern().catch((err) => setStatus(String(err?.message || err), true));
+});
+els.resumeFilenamePattern?.addEventListener("blur", () => {
+  persistResumeFilenamePattern().catch(() => {});
+});
+
 loadEditor()
   .then(() => integrations.load())
+  .then(() => refreshOutputDirLabel())
+  .then(() => loadResumeFilenamePattern())
   .catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, true));

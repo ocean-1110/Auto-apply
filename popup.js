@@ -8,10 +8,8 @@ import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet, g
 import { formatAtsTooltip } from "./ats-score.js";
 import { getPresetForProfile } from "./sheet-presets.js";
 import {
-  saveOutputDirectoryHandle,
   getOutputDirectoryName,
   getOutputDirectoryAbsolutePath,
-  setOutputDirectoryAbsolutePath,
   buildResumeFolderAbsolutePath,
   normalizeAbsoluteDirectoryPath,
   flushPendingOutputToSelectedDirectory,
@@ -24,7 +22,7 @@ import {
   queryDirectoryPermission,
   probeDirectoryAccess
 } from "./fs-output.js";
-import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, parseImportedJobsCsvText, jobIdFromLink } from "./csv-jobs.js";
+import { isLinkedInSource, isDiceSource, isJobrightSource, isGreenhouseSource, isWorkdaySource, isIndeedSource, isZipRecruiterSource, parseImportedJobsCsvText, jobIdFromLink } from "./csv-jobs.js";
 import {
   AUTO_CAPTURE_ENABLED_KEY,
   LAST_CAPTURE_STATUS_KEY,
@@ -98,6 +96,7 @@ const resumeFilenameExampleEl = document.getElementById("resumeFilenameExample")
 const selectOutputDirBtn = document.getElementById("selectOutputDir");
 const aiQaSectionEl = document.getElementById("aiQaSection");
 const copySheetRowBtn = document.getElementById("copySheetRow");
+const saveJobDetailsBtn = document.getElementById("saveJobDetailsBtn");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
 const scrapeAndApplyBtn = document.getElementById("scrapeAndApplyBtn");
 const pasteJdBtn = document.getElementById("pasteJd");
@@ -152,6 +151,7 @@ const filterDiceJobsBtn = document.getElementById("filterDiceJobs");
 const filterGreenhouseJobsBtn = document.getElementById("filterGreenhouseJobs");
 const filterWorkdayJobsBtn = document.getElementById("filterWorkdayJobs");
 const filterIndeedJobsBtn = document.getElementById("filterIndeedJobs");
+const filterZipRecruiterJobsBtn = document.getElementById("filterZipRecruiterJobs");
 const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
 const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
@@ -542,95 +542,25 @@ function updateResumeFilenameExample() {
 }
 
 async function loadResumeFilenamePattern() {
-  const data = await chrome.storage.local.get(RESUME_FILENAME_PATTERN_KEY);
-  const raw = String(data[RESUME_FILENAME_PATTERN_KEY] || "").trim();
-  if (resumeFilenamePatternEl) {
-    resumeFilenamePatternEl.value = raw || DEFAULT_RESUME_FILENAME_PATTERN;
-  }
+  // Filename pattern is edited on Edit profile → Save folder.
   updateResumeFilenameExample();
 }
 
 async function persistResumeFilenamePattern() {
-  if (!resumeFilenamePatternEl) return;
-  let value = String(resumeFilenamePatternEl.value || "").trim();
-  if (!value) value = DEFAULT_RESUME_FILENAME_PATTERN;
-  resumeFilenamePatternEl.value = value;
-  await chrome.storage.local.set({ [RESUME_FILENAME_PATTERN_KEY]: value });
-  updateResumeFilenameExample();
+  /* no-op on main panel */
 }
 
 async function refreshOutputDirLabel() {
-  const name = await getOutputDirectoryName();
-  outputDirLabelEl.value = name || "";
-  outputDirLabelEl.placeholder = name ? name : "No folder selected";
-  if (outputDirAbsPathEl) {
-    const abs = await getOutputDirectoryAbsolutePath();
-    outputDirAbsPathEl.value = abs || "";
-    outputDirAbsPathEl.placeholder = name
-      ? `Paste full path to "${name}" (e.g. D:\\Bid\\BR-AI\\${name})`
-      : "e.g. D:\\Bid\\BR-AI\\09-01W";
-  }
+  // Folder settings live on Edit profile → Save folder.
   await refreshCopyResumePathBtn();
 }
 
 async function persistOutputAbsolutePathFromInput() {
-  if (!outputDirAbsPathEl) return "";
-  const path = await setOutputDirectoryAbsolutePath(outputDirAbsPathEl.value);
-  outputDirAbsPathEl.value = path;
-  await refreshCopyResumePathBtn();
-  return path;
+  return getOutputDirectoryAbsolutePath();
 }
 
 async function selectOutputDirectory() {
-  if (typeof window.showDirectoryPicker !== "function") {
-    setStatus("Folder picker is not supported in this Chrome build.");
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({
-      id: "resume-bot-output",
-      mode: "readwrite",
-      startIn: "documents"
-    });
-    const name = await saveOutputDirectoryHandle(handle);
-    // Picker already grants access; reaffirm so later silent saves work this session.
-    await unlockOutputDirectory({ interactive: true });
-    outputDirLabelEl.value = name;
-    awaitingFolderPermission = false;
-    hidePermissionBanner();
-
-    // Chrome only returns the leaf folder name — ask for the absolute path once.
-    const prevAbs = await getOutputDirectoryAbsolutePath();
-    let suggestion = prevAbs;
-    if (!suggestion) {
-      suggestion = `D:\\Bid\\BR-AI\\${name}`;
-    } else {
-      const leaf = suggestion.split(/[/\\]/).filter(Boolean).pop() || "";
-      if (leaf.toLowerCase() !== String(name).toLowerCase()) {
-        suggestion = `${suggestion.replace(/[\\/]+$/, "")}\\${name}`;
-      }
-    }
-    const typed = window.prompt(
-      `Chrome cannot read the full disk path.\n\nPaste the absolute path to the folder you just selected ("${name}"):`,
-      suggestion
-    );
-    if (typed != null && String(typed).trim()) {
-      const abs = await setOutputDirectoryAbsolutePath(typed);
-      if (outputDirAbsPathEl) outputDirAbsPathEl.value = abs;
-      setStatus(`Output folder set: ${abs || name}`);
-    } else {
-      setStatus(
-        `Output folder set: ${name}. Paste its absolute path below so Copy path works in Explorer.`
-      );
-    }
-    await refreshCopyResumePathBtn();
-  } catch (err) {
-    if (err && (err.name === "AbortError" || String(err.message || "").includes("abort"))) {
-      setStatus("Folder selection canceled.");
-      return;
-    }
-    setStatus(`Could not select folder: ${String(err.message || err)}`);
-  }
+  setStatus("Open Edit profile → Save folder to choose the output folder.", "error");
 }
 
 /**
@@ -646,7 +576,7 @@ async function unlockFolderForSession({ quiet = false } = {}) {
   }
   if (unlocked.status === "missing") {
     if (!quiet) {
-      setStatus(unlocked.error || 'Click "Select folder" first.', "error");
+      setStatus(unlocked.error || "Open Edit profile → Save folder to choose an output folder.", "error");
     }
     return false;
   }
@@ -830,7 +760,7 @@ async function refreshCopyResumePathBtn() {
     copyResumePathBtn.title = `Copy resume folder path: ${cachedResumeFolderPath}`;
   } else if (!hasAbsRoot) {
     copyResumePathBtn.title =
-      "Set Absolute path under Scrape & save (e.g. D:\\Bid\\BR-AI\\09-01W), then Copy path works in Explorer";
+      "Set Absolute path in Edit profile → Save folder (e.g. D:\\Bid\\BR-AI\\09-01W), then Copy path works in Explorer";
   } else {
     copyResumePathBtn.title = "Generate a resume first to copy its folder path";
   }
@@ -869,11 +799,11 @@ function reportCopiedPath(text) {
     return;
   }
   setStatus(
-    "That is not a full disk path. Set Absolute path under Scrape & save " +
+    "That is not a full disk path. Set Absolute path in Edit profile → Save folder " +
       "(e.g. D:\\Bid\\BR-AI\\09-01W), then click Copy path again.",
     "error"
   );
-  outputDirAbsPathEl?.focus();
+  editProfileBtn?.focus();
 }
 
 /**
@@ -894,10 +824,10 @@ function copyResumeFolderPath() {
       const hasAbsRoot = Boolean(await getOutputDirectoryAbsolutePath());
       if (!hasAbsRoot) {
         setStatus(
-          "Set Absolute path under Scrape & save first (e.g. D:\\Bid\\BR-AI\\09-01W), then click Copy path again.",
+          "Set Absolute path in Edit profile → Save folder first (e.g. D:\\Bid\\BR-AI\\09-01W), then click Copy path again.",
           "error"
         );
-        outputDirAbsPathEl?.focus();
+        editProfileBtn?.focus();
         return;
       }
       setStatus("No resume folder yet — generate a resume first.", "error");
@@ -1003,6 +933,7 @@ function displayJobSource(job) {
   if (isGreenhouseSource(source)) return "Greenhouse";
   if (isWorkdaySource(source)) return "Workday";
   if (isIndeedSource(source)) return "Indeed";
+  if (isZipRecruiterSource(source)) return "ZipRecruiter";
   if (isJobrightSource(source)) return "Jobright";
   if (isLinkedInSource(source)) return "LinkedIn";
   return source.charAt(0).toUpperCase() + source.slice(1);
@@ -1052,13 +983,14 @@ async function refreshImportedJobsFromStorage() {
 }
 
 function setImportedJobsFilter(filter, { persist = true } = {}) {
-  const allowed = ["all", "dice", "greenhouse", "workday", "indeed", "jobright", "linkedin", "others"];
+  const allowed = ["all", "dice", "greenhouse", "workday", "indeed", "ziprecruiter", "jobright", "linkedin", "others"];
   importedJobsFilter = allowed.includes(filter) ? filter : "all";
   filterAllJobsBtn?.classList.toggle("is-active", importedJobsFilter === "all");
   filterDiceJobsBtn?.classList.toggle("is-active", importedJobsFilter === "dice");
   filterGreenhouseJobsBtn?.classList.toggle("is-active", importedJobsFilter === "greenhouse");
   filterWorkdayJobsBtn?.classList.toggle("is-active", importedJobsFilter === "workday");
   filterIndeedJobsBtn?.classList.toggle("is-active", importedJobsFilter === "indeed");
+  filterZipRecruiterJobsBtn?.classList.toggle("is-active", importedJobsFilter === "ziprecruiter");
   filterJobrightJobsBtn?.classList.toggle("is-active", importedJobsFilter === "jobright");
   filterLinkedInJobsBtn?.classList.toggle("is-active", importedJobsFilter === "linkedin");
   filterOtherJobsBtn?.classList.toggle("is-active", importedJobsFilter === "others");
@@ -1132,6 +1064,7 @@ function importedJobMatchesFilter(job) {
   if (importedJobsFilter === "greenhouse") return isGreenhouseSource(source);
   if (importedJobsFilter === "workday") return isWorkdaySource(source);
   if (importedJobsFilter === "indeed") return isIndeedSource(source);
+  if (importedJobsFilter === "ziprecruiter") return isZipRecruiterSource(source);
   if (importedJobsFilter === "jobright") return isJobrightSource(source);
   if (importedJobsFilter === "linkedin") return isLinkedInSource(source);
   if (importedJobsFilter === "others") {
@@ -1141,7 +1074,8 @@ function importedJobMatchesFilter(job) {
       !isJobrightSource(source) &&
       !isGreenhouseSource(source) &&
       !isWorkdaySource(source) &&
-      !isIndeedSource(source)
+      !isIndeedSource(source) &&
+      !isZipRecruiterSource(source)
     );
   }
   return true;
@@ -2725,10 +2659,10 @@ async function collectBatchGenerateSettings() {
   const outputFolderName = (await getOutputDirectoryName()) || "";
   if (!outputFolderName) {
     setStatus(
-      "Select an output folder first (Select folder), then run batch resume build.",
+      "Select an output folder first (Edit profile → Save folder), then run batch resume build.",
       "error"
     );
-    selectOutputDirBtn?.focus();
+    editProfileBtn?.focus();
     return null;
   }
 
@@ -2786,6 +2720,113 @@ async function copySheetRow() {
   }
 }
 
+/**
+ * Save current Job fields as jd.txt in the standard output folder (no resume),
+ * and append a row to Google Sheet when integrations are configured.
+ */
+async function saveJobDetails() {
+  const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
+  const jobTitle = (jobTitleEl.value || "").trim();
+  const companyName = (companyNameEl.value || "").trim();
+  const jdLink = (jdLinkEl.value || "").trim();
+  const jdText = (jdTextEl.value || "").trim();
+  const sheet = await getSheetSettings();
+
+  if (!jobTitle) {
+    setStatus("Enter a job title first.", "error");
+    jobTitleEl.focus();
+    return;
+  }
+  if (!companyName) {
+    setStatus("Enter a company name first.", "error");
+    companyNameEl.focus();
+    return;
+  }
+  if (!jdText && !jdLink) {
+    setStatus("Paste a job description or JD link first.", "error");
+    jdTextEl.focus();
+    return;
+  }
+
+  const sheetError = sheetSettingsValidationError(sheet);
+  if (sheetError) {
+    setStatus(sheetError, "error");
+    return;
+  }
+
+  const outputFolderName = (await getOutputDirectoryName()) || "";
+  if (!outputFolderName) {
+    setStatus("Select an output folder first (Edit profile → Save folder), then Save.", "error");
+    editProfileBtn?.focus();
+    return;
+  }
+
+  const selJob =
+    (importedJobsSelectedId && importedJobsById[importedJobsSelectedId]) ||
+    scrapedJobMeta ||
+    {};
+  const importedJobId = String(importedJobsSelectedId || selJob.id || "").trim();
+  const overwriteFolder = resumeFolderNameForJob(selJob);
+
+  setBusy(true);
+  setStatus("Saving JD to output folder...", "running");
+  try {
+    await chrome.storage.local.set({
+      selected_profile_id: profileId,
+      last_job_title: jobTitle,
+      last_company_name: companyName,
+      last_jd_link: jdLink,
+      last_jd_text: jdText
+    });
+
+    const res = await chrome.runtime.sendMessage({
+      type: "save_job_details",
+      profileId,
+      jobMeta: {
+        jobTitle,
+        companyName,
+        jdLink,
+        jdText,
+        outputDir: outputFolderName,
+        spreadsheetUrl: sheet.spreadsheetUrl,
+        sheetName: sheet.sheetName,
+        sheetsWebAppUrl: sheet.sheetsWebAppUrl,
+        trackApplicationStatus: sheet.trackApplicationStatus,
+        importedJobId,
+        overwriteFolderName: overwriteFolder || "",
+        salaryMin: selJob.salaryMin || "",
+        salaryMax: selJob.salaryMax || "",
+        workArrangement: selJob.workArrangement || "",
+        employmentType: selJob.employmentType || "",
+        datePosted: selJob.datePosted || ""
+      }
+    });
+
+    if (!res?.ok) {
+      throw new Error(res?.error || "Save failed.");
+    }
+
+    if (importedJobId) {
+      await patchImportedJobLocally(importedJobId, {
+        resumeFolder: res.folderName || overwriteFolder || "",
+        statusDetail: res.status || "JD saved.",
+        jobTitle: jobTitle || undefined,
+        companyName: companyName || undefined,
+        jdLink: jdLink || undefined,
+        jdText: jdText || undefined
+      });
+    }
+
+    if (res.pathLabel) showSaveBanner(res.pathLabel);
+    await refreshCopyResumePathBtn();
+    setStatus(res.status || "JD saved.", "done");
+  } catch (err) {
+    setStatus(`Save failed: ${String(err?.message || err)}`, "error");
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function collectJobMetaOrShowError() {
   const profileId = profileSelectEl.value || DEFAULT_PROFILE_ID;
   const templateId = templateSelectEl.value || DEFAULT_TEMPLATE_ID;
@@ -2819,8 +2860,8 @@ async function collectJobMetaOrShowError() {
 
   const outputFolderName = (await getOutputDirectoryName()) || "";
   if (!outputFolderName) {
-    setStatus("Select an output folder first (Select folder), then generate.", "error");
-    selectOutputDirBtn?.focus();
+    setStatus("Select an output folder first (Edit profile → Save folder), then generate.", "error");
+    editProfileBtn?.focus();
     return null;
   }
 
@@ -2864,6 +2905,7 @@ async function collectJobMetaOrShowError() {
 function setBusy(busy) {
   if (generateResumeBtn) generateResumeBtn.disabled = busy;
   if (autofillBtn) autofillBtn.disabled = busy;
+  if (saveJobDetailsBtn) saveJobDetailsBtn.disabled = busy;
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
   if (scrapePageBtn) scrapePageBtn.disabled = busy;
   if (scrapeAndApplyBtn) scrapeAndApplyBtn.disabled = busy;
@@ -3322,7 +3364,7 @@ for (const el of [jobTitleEl, companyNameEl, jdLinkEl, jdTextEl].filter(Boolean)
 wireAccordion(aiQaSectionEl, "ui_ai_qa_section_open");
 wireAccordion(qaBankSectionEl, "ui_qa_bank_section_open");
 
-selectOutputDirBtn.addEventListener("click", () => {
+selectOutputDirBtn?.addEventListener("click", () => {
   selectOutputDirectory().catch((err) => setStatus(String(err.message || err)));
 });
 outputDirAbsPathEl?.addEventListener("change", () => {
@@ -3361,6 +3403,9 @@ scrapeAndApplyBtn?.addEventListener("click", () => {
   );
 });
 copySheetRowBtn.addEventListener("click", copySheetRow);
+saveJobDetailsBtn?.addEventListener("click", () => {
+  saveJobDetails().catch((err) => setStatus(String(err?.message || err), "error"));
+});
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
 stopGenerateBtn?.addEventListener("click", () => {
   generationStartPending = false;
@@ -3425,6 +3470,7 @@ filterDiceJobsBtn?.addEventListener("click", () => setImportedJobsFilter("dice")
 filterGreenhouseJobsBtn?.addEventListener("click", () => setImportedJobsFilter("greenhouse"));
 filterWorkdayJobsBtn?.addEventListener("click", () => setImportedJobsFilter("workday"));
 filterIndeedJobsBtn?.addEventListener("click", () => setImportedJobsFilter("indeed"));
+filterZipRecruiterJobsBtn?.addEventListener("click", () => setImportedJobsFilter("ziprecruiter"));
 filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jobright"));
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));

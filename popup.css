@@ -692,6 +692,18 @@ textarea:focus {
   min-width: 0;
 }
 
+.row-split-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.row-split-actions .icon-btn {
+  width: auto;
+}
+
 .scrape-actions {
   display: flex;
   flex-wrap: wrap;

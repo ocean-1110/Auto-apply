@@ -187,6 +187,7 @@ function inferSourceFromUrl(url, explicit) {
   if (raw.includes("hiringcafe.com") || raw.includes("hiring.cafe")) return "hiringcafe";
   if (raw.includes("myworkdayjobs.com") || raw.includes("workdayjobs.com")) return "workday";
   if (raw.includes("indeed.com")) return "indeed";
+  if (raw.includes("ziprecruiter.com")) return "ziprecruiter";
   if (raw.includes("jobgether.com")) return "jobgether";
   if (raw.includes("smartrecruiters.com")) return "smartrecruiters";
   if (raw.includes("zohorecruit.com") || raw.includes("recruit.zoho.")) return "zohorecruit";
@@ -216,6 +217,10 @@ export function isWorkdaySource(source) {
 
 export function isIndeedSource(source) {
   return String(source || "").trim().toLowerCase() === "indeed";
+}
+
+export function isZipRecruiterSource(source) {
+  return String(source || "").trim().toLowerCase() === "ziprecruiter";
 }
 
 function buildJdText({ description, keySkills, prependKeySkills }) {

@@ -36,6 +36,14 @@ export const ATS_ADAPTERS = [
     stepBudget: 12
   },
   {
+    id: "ziprecruiter",
+    label: "ZipRecruiter",
+    hostPatterns: [/(^|\.)ziprecruiter\.com$/i],
+    // Never auto-submit: 1-Click Apply sends immediately; form flows pause at Submit.
+    autoSubmitAllowed: false,
+    stepBudget: 12
+  },
+  {
     id: "workday",
     label: "Workday",
     hostPatterns: [/(^|\.)myworkdayjobs\.com$/i, /(^|\.)workdayjobs\.com$/i],

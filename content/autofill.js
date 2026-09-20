@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-20.dice-apply-complete.1";
+  const SCRIPT_BUILD = "2026-09-20.ziprecruiter-apply.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -3944,6 +3944,14 @@
     }
   }
 
+  function isZipRecruiterPage(url = location.href) {
+    try {
+      return /(^|\.)ziprecruiter\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
   function isBuiltInAuthPage() {
     return isBuiltInPage() && Boolean(document.querySelector('input[type="password"]'));
   }
@@ -3984,6 +3992,7 @@
     if (isJobrightPage(url)) return "jobright";
     if (isJobgetherPage(url)) return "jobgether";
     if (isBuiltInPage(url)) return "builtin";
+    if (isZipRecruiterPage(url)) return "ziprecruiter";
     if (isSmartRecruitersPage(url)) return "smartrecruiters";
     if (isZohoRecruitPage(url)) return "zohorecruit";
     if (isOracleCloudPage(url)) return "oraclecloud";
@@ -4010,6 +4019,7 @@
       if (site === "greenhouse") return /(^|\.)greenhouse\.io$/i.test(target.hostname);
       if (site === "jobgether") return /(^|\.)jobgether\.com$/i.test(target.hostname);
       if (site === "builtin") return /(^|\.)builtin\.com$/i.test(target.hostname);
+      if (site === "ziprecruiter") return /(^|\.)ziprecruiter\.com$/i.test(target.hostname);
       if (site === "smartrecruiters") return /(^|\.)smartrecruiters\.com$/i.test(target.hostname);
       if (site === "zohorecruit") {
         return /(^|\.)zohorecruit\.com$/i.test(target.hostname) || /(^|\.)recruit\.zoho\./i.test(target.hostname);
@@ -4342,6 +4352,10 @@
     ) {
       isApplicationForm = false;
     }
+    // ZipRecruiter JD page is not the application form until a multi-step flow opens.
+    if (isZipRecruiterPage() && identityFields < 2 && !hasFileInput && fillableCount < 2) {
+      isApplicationForm = false;
+    }
     if (isBuiltInAuthPage()) isApplicationForm = true;
     if (
       (isSmartRecruitersPage() || isZohoRecruitPage() || isOracleCloudPage()) &&
@@ -4361,7 +4375,11 @@
       hasFileInput,
       blockedReason: detectPageBlocker(),
       jobUnavailable: detectJobUnavailable(),
-      alreadyApplied: detectDiceAlreadyApplied() || detectJobrightAlreadyApplied(),
+      alreadyApplied:
+        detectDiceAlreadyApplied() ||
+        detectJobrightAlreadyApplied() ||
+        detectZipRecruiterAlreadyApplied(),
+      oneClickApply: detectZipRecruiterOneClickOnly(),
       applyUrls: collectApplyUrlCandidates()
     };
   }
@@ -4716,6 +4734,9 @@
     /\b(cancel|close|dismiss|skip|not now|maybe later|show ad|show ads|advert|sponsored|cookie|subscribe|sign in|log in|register|learn more|see more|next job|previous job|watch|play video|explore|get in touch|talk with|contact us|about us|corporate|governance|investors?|privacy|terms|sustainability|media hub|company overview|news(room)?|press|suppliers?|human rights|public policy)\b/i;
   const EASY_APPLY_TEXT_RE =
     /^\s*(easy\s*apply|1-?click apply|one-?click apply|quick apply)\s*$/i;
+  /** ZipRecruiter labels that submit immediately with the saved resume — never auto-click. */
+  const ZIPRECRUITER_ONE_CLICK_RE =
+    /^\s*(1-?click\s*apply|one-?click\s*apply|quick\s*apply|easy\s*apply)\s*$/i;
   const APPLY_ONLY_TEXT_RE = /^\s*(apply(\s+now)?|apply with dice)\s*$/i;
   const ALREADY_APPLIED_TEXT_RE = /^\s*applied\s*$/i;
   const EASY_ENTRY_RE =
@@ -5103,6 +5124,60 @@
       if (ALREADY_APPLIED_TEXT_RE.test(text) || /^\s*application submitted\s*$/i.test(text)) {
         return "Already applied on Jobright (marked Applied).";
       }
+    }
+    return "";
+  }
+
+  /** ZipRecruiter job detail: CTA already shows Applied. */
+  function detectZipRecruiterAlreadyApplied() {
+    if (!isZipRecruiterPage()) return "";
+    for (const el of visibleActionControls()) {
+      const text = elActionText(el);
+      if (ALREADY_APPLIED_TEXT_RE.test(text) || /^\s*application submitted\s*$/i.test(text)) {
+        return "Already applied on ZipRecruiter (marked Applied).";
+      }
+    }
+    const body = cleanLabelText(document.body?.innerText || "").slice(0, 2000);
+    if (/\byou(?:'|’)ve already applied\b|\balready applied\b/i.test(body)) {
+      return "Already applied on ZipRecruiter.";
+    }
+    return "";
+  }
+
+  /**
+   * True when the only ZipRecruiter apply CTA is 1-Click / Quick Apply
+   * (instant submit with saved resume) — never auto-click those.
+   */
+  function detectZipRecruiterOneClickOnly() {
+    if (!isZipRecruiterPage()) return "";
+    try {
+      if (/\/apply\b|\/application\b/i.test(location.pathname || "")) return "";
+    } catch {
+      /* ignore */
+    }
+    const controls = visibleActionControls();
+    let sawOneClick = false;
+    let sawSafeApply = false;
+    for (const el of controls) {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""}`;
+      if (ENTRY_JUNK_RE.test(text) || !text || text.length > 48) continue;
+      if (ZIPRECRUITER_ONE_CLICK_RE.test(text) || ZIPRECRUITER_ONE_CLICK_RE.test(hint)) {
+        sawOneClick = true;
+        continue;
+      }
+      if (
+        APPLY_NOW_RE.test(text) ||
+        APPLY_ONLY_TEXT_RE.test(text) ||
+        /^\s*(continue(\s+to)?\s*apply|start\s+application|apply\s+with\s+ziprecruiter)\s*$/i.test(
+          text
+        )
+      ) {
+        sawSafeApply = true;
+      }
+    }
+    if (sawOneClick && !sawSafeApply) {
+      return "ZipRecruiter 1-Click / Quick Apply would submit immediately — stopped before clicking.";
     }
     return "";
   }
@@ -5504,6 +5579,48 @@
     return scored[0] || null;
   }
 
+  /**
+   * ZipRecruiter job detail:
+   * - Never return 1-Click / Quick Apply (instant submit).
+   * - Prefer Apply Now / Continue / Apply for native form (Route B) or external (Route C).
+   */
+  function findZipRecruiterApplyButton() {
+    if (!isZipRecruiterPage()) return null;
+    dismissBlockingModalsOnce();
+    const controls = visibleActionControls();
+    const scored = [];
+    for (const el of controls) {
+      const text = elActionText(el);
+      const hint = `${el.getAttribute?.("title") || ""} ${el.getAttribute?.("aria-label") || ""} ${el.id || ""} ${el.className || ""}`;
+      if (!text || text.length > 48) continue;
+      if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(el)) continue;
+      if (ALREADY_APPLIED_TEXT_RE.test(text)) continue;
+      // Route A — never treat instant-submit CTAs as clickable entry.
+      if (ZIPRECRUITER_ONE_CLICK_RE.test(text) || ZIPRECRUITER_ONE_CLICK_RE.test(hint)) continue;
+
+      const isApplyNow = APPLY_NOW_RE.test(text) || APPLY_NOW_RE.test(hint);
+      const isContinue =
+        /^\s*(continue(\s+to)?\s*apply|start\s+application|apply\s+with\s+ziprecruiter)\s*$/i.test(
+          text
+        );
+      const isApply = APPLY_ONLY_TEXT_RE.test(text);
+      if (!isApplyNow && !isContinue && !isApply) continue;
+
+      let score = isApplyNow ? 120 : isContinue ? 110 : 80;
+      if (/apply/i.test(hint)) score += 15;
+      try {
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= 72 && rect.height >= 28) score += 20;
+        if (rect.top < 280 && rect.left > window.innerWidth * 0.35) score += 30;
+      } catch {
+        /* ignore */
+      }
+      scored.push({ type: "entry", el, text: text || "Apply", score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0] || null;
+  }
+
   /** Jobright job detail: the "APPLY NOW" CTA that hands off to the employer ATS. */
   function findJobrightApplyButton() {
     if (!isJobrightPage()) return null;
@@ -5696,6 +5813,10 @@
 
   function findEasyApplyEntryButton() {
     dismissBlockingModalsOnce();
+    const zipRecruiterApply = findZipRecruiterApplyButton();
+    if (zipRecruiterApply) return zipRecruiterApply;
+    // Route A: only 1-Click exists — do not fall through to generic Easy Apply matcher.
+    if (isZipRecruiterPage()) return null;
     const builtinApply = findBuiltInApplyButton();
     if (builtinApply) return builtinApply;
     const jobrightApply = findJobrightApplyButton();
@@ -5900,7 +6021,7 @@
         if (isMarketingOrCorporateHref(u.href)) return false;
         return true;
       }
-      if (/(^|\.)(greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|smartrecruiters\.com|oraclecloud\.com|zohorecruit\.com|indeed\.com|dice\.com)$/i.test(host)) {
+      if (/(^|\.)(greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|smartrecruiters\.com|oraclecloud\.com|zohorecruit\.com|indeed\.com|dice\.com|ziprecruiter\.com)$/i.test(host)) {
         return true;
       }
       return /\/(apply|application|job-applications|job|jobs|career|careers|position|requisition)\b/i.test(path);
@@ -6242,6 +6363,47 @@
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
     await sleep(400);
     await dismissBlockingModals();
+    if (isZipRecruiterPage()) {
+      const oneClick = detectZipRecruiterOneClickOnly();
+      if (oneClick) {
+        return { ok: false, clicked: false, oneClickApply: oneClick };
+      }
+      const target = findZipRecruiterApplyButton();
+      if (!target?.el) {
+        return { ok: false, clicked: false, navigateUrl: "", openInNewTab: false };
+      }
+      const href =
+        target.el.href ||
+        target.el.getAttribute?.("href") ||
+        target.el.getAttribute?.("formaction") ||
+        "";
+      if (href && !isSameSiteApplyUrl(href, "ziprecruiter")) {
+        return {
+          ok: false,
+          clicked: false,
+          externalRedirect: true,
+          externalUrl: new URL(href, location.href).toString()
+        };
+      }
+      const res = await clickKeepingSameTab(target.el, { preferNewTab: false });
+      await sleep(1200);
+      // If Apply opened an off-site employer tab/window, treat as Route C.
+      if (res.navigateUrl && !isSameSiteApplyUrl(res.navigateUrl, "ziprecruiter")) {
+        return {
+          ok: false,
+          clicked: Boolean(res.clicked),
+          externalRedirect: true,
+          externalUrl: res.navigateUrl
+        };
+      }
+      return {
+        ok: Boolean(res.clicked || res.navigateUrl),
+        clicked: Boolean(res.clicked),
+        navigateUrl: res.navigateUrl || "",
+        openInNewTab: Boolean(res.openInNewTab),
+        text: target.text || elActionText(target.el) || "Apply"
+      };
+    }
     if (isBuiltInPage()) {
       const target = findBuiltInApplyButton();
       const easyApply = target && /\beasy\s*apply\b/i.test(target.text || "");
@@ -6382,8 +6544,12 @@
     // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
     if (!probe.isApplicationForm) {
       const alreadyApplied =
-        probe.alreadyApplied || detectDiceAlreadyApplied() || detectJobrightAlreadyApplied();
-      const entry = alreadyApplied ? null : findEasyApplyEntryButton();
+        probe.alreadyApplied ||
+        detectDiceAlreadyApplied() ||
+        detectJobrightAlreadyApplied() ||
+        detectZipRecruiterAlreadyApplied();
+      const oneClickApply = probe.oneClickApply || detectZipRecruiterOneClickOnly();
+      const entry = alreadyApplied || oneClickApply ? null : findEasyApplyEntryButton();
       return {
         ok: true,
         href: location.href,
@@ -6396,6 +6562,7 @@
         blockedReason: probe.blockedReason || "",
         jobUnavailable: probe.jobUnavailable || "",
         alreadyApplied: alreadyApplied || "",
+        oneClickApply: oneClickApply || "",
         applicationSuccess: detectApplicationSuccess(),
         action: entry ? { type: "entry", text: entry.text } : null,
         needsFill: false,
@@ -6433,6 +6600,7 @@
       blockedReason: probe.blockedReason || "",
       jobUnavailable: probe.jobUnavailable || "",
       alreadyApplied: "",
+      oneClickApply: "",
       applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
       needsFill,
@@ -6455,6 +6623,7 @@
         isSubmit: false,
         externalRedirect: Boolean(entryRes?.externalRedirect),
         externalUrl: entryRes?.externalUrl || "",
+        oneClickApply: entryRes?.oneClickApply || "",
         action:
           entryRes?.clicked || entryRes?.navigateUrl || entryRes?.alreadyOpen
             ? { type: "entry", text: entryRes.text || "" }
@@ -6593,9 +6762,9 @@
       action.el?.closest?.("form")?.getAttribute?.("action") ||
       "";
     if (
-      isIndeedPage() &&
+      (isIndeedPage() || isZipRecruiterPage()) &&
       actionHref &&
-      !isSameSiteApplyUrl(actionHref, "indeed") &&
+      !isSameSiteApplyUrl(actionHref, isIndeedPage() ? "indeed" : "ziprecruiter") &&
       !isBuiltInPage()
     ) {
       return {
