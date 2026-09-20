@@ -1,26 +1,116 @@
 {
   "manifest_version": 3,
-  "name": "Resume GPT Builder",
-  "description": "Generate tailored resumes by automating open ChatGPT tab.",
-  "version": "1.0.0",
-  "permissions": ["storage", "downloads", "clipboardRead", "scripting", "tabs", "activeTab", "debugger"],
-  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "name": "Ocean",
+  "description": "Ocean — Auto Application App. Generate tailored resumes and cover letters, then autofill job applications.",
+  "version": "1.6.6",
+  "permissions": ["storage", "downloads", "clipboardRead", "clipboardWrite", "tabs", "scripting", "debugger", "offscreen", "notifications", "alarms", "sidePanel"],
+  "host_permissions": [
+    "https://api.openai.com/*",
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "sw.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://boards.greenhouse.io/*",
+        "https://job-boards.greenhouse.io/*",
+        "https://*.greenhouse.io/*",
+        "https://jobs.lever.co/*",
+        "https://*.lever.co/*",
+        "https://*.indeed.com/*",
+        "https://indeed.com/*",
+        "https://www.dice.com/*",
+        "https://*.dice.com/*",
+        "https://jobright.ai/*",
+        "https://*.jobright.ai/*",
+        "https://hiringcafe.com/*",
+        "https://*.hiringcafe.com/*",
+        "https://hiring.cafe/*",
+        "https://*.hiring.cafe/*",
+        "https://*.myworkdayjobs.com/*",
+        "https://*.wd1.myworkdayjobs.com/*",
+        "https://*.wd5.myworkdayjobs.com/*",
+        "https://*.workdayjobs.com/*",
+        "https://*.icims.com/*",
+        "https://*.taleo.net/*",
+        "https://*.successfactors.com/*",
+        "https://*.bamboohr.com/*",
+        "https://*.ashbyhq.com/*",
+        "https://jobgether.com/*",
+        "https://*.jobgether.com/*",
+        "https://builtin.com/*",
+        "https://*.builtin.com/*",
+        "https://jobs.smartrecruiters.com/*",
+        "https://*.smartrecruiters.com/*",
+        "https://*.zohorecruit.com/*",
+        "https://recruit.zoho.com/*",
+        "https://*.recruit.zoho.com/*",
+        "https://*.oraclecloud.com/*"
+      ],
+      "js": [
+        "content/scrapers/shared.js",
+        "content/scrapers/schema.js",
+        "content/scrapers/jobright.js",
+        "content/scrapers/dice.js",
+        "content/scrapers/greenhouse.js",
+        "content/scrapers/hiringcafe.js",
+        "content/scrapers/runner.js",
+        "content/autofill.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "icons": {
-    "16": "icons/j-icon.svg",
-    "32": "icons/j-icon.svg",
-    "48": "icons/j-icon.svg",
-    "128": "icons/j-icon.svg"
+    "16": "icons/ocean-icon.svg",
+    "32": "icons/ocean-icon.svg",
+    "48": "icons/ocean-icon.svg",
+    "128": "icons/ocean-icon.svg"
   },
   "action": {
-    "default_title": "Resume GPT Builder",
-    "default_popup": "popup.html",
+    "default_title": "Ocean — Auto Application App (Alt+J)",
     "default_icon": {
-      "16": "icons/j-icon.svg",
-      "32": "icons/j-icon.svg"
+      "16": "icons/ocean-icon.svg",
+      "32": "icons/ocean-icon.svg"
+    }
+  },
+  "side_panel": {
+    "default_path": "popup.html?mode=sidebar"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+J",
+        "mac": "Alt+J"
+      },
+      "description": "Open Ocean Auto Application App panel"
+    },
+    "scrape_and_apply": {
+      "suggested_key": {
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
+      },
+      "description": "Scrape the open job, generate a resume, then Apply"
+    },
+    "generate_docs": {
+      "suggested_key": {
+        "default": "Alt+Shift+G",
+        "mac": "Alt+Shift+G"
+      },
+      "description": "Generate resume (and cover letter unless resume-only)"
+    },
+    "easy_apply": {
+      "suggested_key": {
+        "default": "Alt+Shift+E",
+        "mac": "Alt+Shift+E"
+      },
+      "description": "Apply: fill the form and continue the whole application"
     }
   }
 }

@@ -161,6 +161,44 @@ export function toResumeHtml(rawText) {
 </html>`;
 }
 
+export function toCoverLetterHtml(rawText) {
+  const lines = String(rawText || "")
+    .split(/\n+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const paragraphs = lines.length
+    ? lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("\n")
+    : "<p></p>";
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cover Letter</title>
+  <style>
+    @page { size: A4; margin: 18mm; }
+    body {
+      font-family: "Times New Roman", Times, serif;
+      color: #000;
+      font-size: 11pt;
+      line-height: 1.45;
+      margin: 0;
+      background: #ffffff;
+    }
+    p {
+      margin: 0 0 12px 0;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  ${paragraphs}
+</body>
+</html>`;
+}
+
 function escapePdfText(text) {
   const ascii = text
     .replace(/[^\x20-\x7E]/g, " ")

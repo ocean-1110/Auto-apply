@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Preview — Ocean</title>
+    <link rel="stylesheet" href="preview.css" />
+  </head>
+  <body>
+    <svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-prev" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M14.5 6 8.5 12l6 6"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.2 12a7.2 7.2 0 1 1-2.1-5.1L19.5 8.5"/>
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M19.5 4.8v3.7h-3.7"/>
+      </symbol>
+      <symbol id="i-save" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M6.5 5.5h9.2L18.5 8.3V18.5a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1z"/>
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M8.5 5.5v4.5h7V5.5M8.5 19v-5h7v5"/>
+      </symbol>
+      <symbol id="i-apply" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" d="M5 12 20 5l-6.5 14-2.2-5.3L5 12z"/>
+      </symbol>
+      <symbol id="i-generate" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M12 4.5 13.2 9 17.5 10.2 13.2 11.4 12 16l-1.2-4.6L6.5 10.2 10.8 9 12 4.5zM18.2 15.2l.6 2.2 2.2.6-2.2.6-.6 2.2-.6-2.2-2.2-.6 2.2-.6.6-2.2z"/>
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M4 8.2A1.8 1.8 0 0 1 5.8 6.4h4.2l1.6 1.8h6.6A1.8 1.8 0 0 1 20 10v7.2a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 17.2V8.2z"/>
+      </symbol>
+    </svg>
+
+    <main class="page">
+      <header class="top-bar">
+        <img src="icons/ocean-icon.svg" alt="Ocean" class="brand-icon" />
+        <div class="brand-copy">
+          <p class="hype">Ocean</p>
+          <h1>Preview</h1>
+          <p class="lede" id="jobHint">Generate a resume to preview it here.</p>
+        </div>
+        <section id="atsPreviewBadge" class="ats-badge" hidden title="Final ATS score for the current resume">
+          <span class="ats-kicker">ATS</span>
+          <strong id="atsPreviewValue">—</strong>
+        </section>
+      </header>
+      <div class="page-back-row">
+        <button type="button" id="closeBtn" class="icon-btn" title="Back">
+          <svg class="btn-icon" aria-hidden="true"><use href="#i-prev"/></svg>
+          <span class="btn-label">Back</span>
+        </button>
+      </div>
+
+      <section class="neo-card doc-card">
+        <div class="doc-toolbar">
+          <div class="tabs" role="tablist" aria-label="Document">
+            <button type="button" id="tabResume" class="tab is-active" role="tab" aria-selected="true">Resume</button>
+            <button type="button" id="tabCover" class="tab" role="tab" aria-selected="false">Cover letter</button>
+          </div>
+          <label class="field template-field">
+            <span>Template</span>
+            <select id="templateSelect"></select>
+          </label>
+          <div class="doc-actions">
+            <button type="button" id="refreshBtn" class="icon-btn" title="Reload the latest generated documents">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span class="btn-label">Refresh</span>
+            </button>
+            <button type="button" id="saveBtn" class="icon-btn icon-btn-accent" hidden title="Render PDFs and save to the output folder">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-save"/></svg>
+              <span class="btn-label">Save</span>
+            </button>
+            <button type="button" id="openFolderBtn" class="icon-btn icon-btn-success" hidden title="Open the saved resume folder">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-folder"/></svg>
+              <span class="btn-label">Open folder</span>
+            </button>
+            <button type="button" id="applyBtn" class="icon-btn icon-btn-hot" hidden title="Apply to this job (same as Apply on the job card)">
+              <svg class="btn-icon" aria-hidden="true"><use href="#i-apply"/></svg>
+              <span class="btn-label">Apply</span>
+            </button>
+          </div>
+        </div>
+
+        <p id="pendingBanner" class="banner banner-info" hidden>
+          Preview mode — PDFs are not saved yet. Review below, then Save.
+        </p>
+        <p id="genBanner" class="banner banner-warn" hidden>Generating resume… this preview will update when it is ready.</p>
+        <p id="emptyState" class="empty" hidden></p>
+        <p id="atsPreviewDetail" class="ats-preview-detail" hidden></p>
+
+        <div class="doc-stage">
+          <iframe id="previewFrame" class="preview-frame" title="Document preview"></iframe>
+        </div>
+      </section>
+
+      <section id="revisePanel" class="neo-card revise-panel" hidden>
+        <label class="revise-label" for="revisePrompt">
+          Update this resume
+          <span class="revise-hint">Looks at the preview first, then describe the change. Uses the current resume, JD, and your instructions.</span>
+        </label>
+        <textarea
+          id="revisePrompt"
+          rows="3"
+          placeholder="e.g. Emphasize nCino and Copado in the most recent role. Shorten the summary to 3 lines."
+        ></textarea>
+        <div class="revise-actions">
+          <button type="button" id="regenerateBtn" class="icon-btn icon-btn-accent" title="Regenerate with these instructions">
+            <svg class="btn-icon" aria-hidden="true"><use href="#i-generate"/></svg>
+            <span class="btn-label">Revise</span>
+          </button>
+          <p id="reviseStatus" class="revise-status" hidden></p>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="preview.js"></script>
+  </body>
+</html>

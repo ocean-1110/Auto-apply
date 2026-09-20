@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Ocean">
+  <defs>
+    <linearGradient id="oceanSky" x1="20" y1="8" x2="108" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#5cbcff"/>
+      <stop offset="55%" stop-color="#1a8cff"/>
+      <stop offset="100%" stop-color="#0b6fd9"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="128" height="128" rx="28" ry="28" fill="url(#oceanSky)"/>
+  <path
+    d="M18 78c14-12 28-12 42 0s28 12 42 0"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="9"
+    stroke-linecap="round"
+    opacity="0.95"
+  />
+  <path
+    d="M18 96c14-12 28-12 42 0s28 12 42 0"
+    fill="none"
+    stroke="#d8efff"
+    stroke-width="7"
+    stroke-linecap="round"
+    opacity="0.9"
+  />
+  <circle cx="92" cy="36" r="12" fill="#ffffff" opacity="0.95"/>
+</svg>

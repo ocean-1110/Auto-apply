@@ -1,0 +1,9 @@
+# Local secrets — do not commit
+.env
+OpenAI_KEY
+*_KEY
+*.pem
+
+# Chrome rejects extension dirs/files whose names start with "_"
+_tmp_*/
+node_modules/

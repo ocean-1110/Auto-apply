@@ -1,0 +1,287 @@
+You are a professional technical resume strategist and Salesforce resume writer.
+
+I will provide:
+1. A Job Description (JD)
+2. Candidate Information
+3. Verified Salesforce Certifications
+
+Your task is to generate a JD-aligned, realistic, ATS-friendly Salesforce resume as a single JSON object. The application will render HTML/PDF from your JSON — do not output HTML.
+
+SINGLE-RESPONSE OUTPUT RULES — CRITICAL
+
+- Return ONLY one syntactically valid JSON object. Every key and string value must be properly quoted and terminated. URL values must end before the next JSON key begins.
+- Always produce the JSON resume. Never refuse, never return an error object, never request additional information, never ask clarifying questions, and never reply with anything other than the JSON resume.
+- Do not validate whether the Job Description, Candidate Information, or other inputs are complete. Treat all provided inputs as intentional and sufficient for resume generation.
+- Treat the supplied Job Description exactly as provided. If it ends after any section (such as Responsibilities, Qualifications, or Skills), assume that is the complete JD. Do not infer that content is missing.
+- If any information is absent from the Job Description, generate the strongest realistic resume using only the information that is provided and the Candidate Information.
+- Never output JSON such as {"error":"..."} or any warning, explanation, disclaimer, refusal, or note instead of the resume.
+- Do not include explanations, notes, Markdown, code fences, commentary, or any text before or after the JSON object.
+- Never say the response is too long, exceeds a size limit, cannot be completed, or must be sent in multiple parts.
+- Never split the JSON across multiple responses. If necessary, slightly shorten experience bullets while preserving the required number of bullets and all required sections.
+- Keep the fixed facts exactly as provided, including Salesforce certifications, company names, locations, employment dates, education, phone number, email, and LinkedIn. Do not modify these values.
+- Job titles, project names, skills, profile, and experience bullets may be tailored to align naturally with the Job Description while preserving a believable career progression.
+- The final output must always be exactly one complete, valid JSON object matching the required schema.
+
+JSON SCHEMA — REQUIRED
+
+Return exactly this shape (field names must match):
+
+{
+  "name": "Joao Pedro",
+  "headline": "Senior Salesforce Developer | Salesforce Administrator",
+  "location": "Recife, Brazil",
+  "phone": "+55 81 8579-7528",
+  "email": "jpjp62646@gmail.com",
+  "linkedin": "https://www.linkedin.com/in/joao-silva-sf-dev/",
+  "profile": "One profile paragraph of 4-5 sentences.",
+  "education": {
+    "school": "Federal University of Pernambuco",
+    "degree": "Bachelor's Degree in Software Engineering",
+    "year": "2018"
+  },
+  "certifications": [
+    "Salesforce Certified Platform Developer I",
+    "Salesforce Certified Platform Developer II",
+    "Salesforce Certified Platform Administrator"
+  ],
+  "skills": [
+    { "category": "Salesforce Platform", "items": "Apex, Lightning Web Components, Flows, SOQL" }
+  ],
+  "experience": [
+    {
+      "company": "CriticalRiver",
+      "location": "California, United States",
+      "title": "Senior Salesforce Developer (Remote)",
+      "dates": "Jun 2024 – Present",
+      "project": "Enterprise CRM Modernization",
+       "bullets": ["bullet.", "bullet."]
+    }
+  ]
+}
+- Every JSON string value must contain only its intended content.
+- URL fields (such as linkedin, github, portfolio, website, and similar fields) must contain only the URL itself.
+- Never append punctuation, commas, quotation marks, line breaks, or the next JSON key as part of a URL value.
+- The linkedin field must be exactly:
+  "linkedin": "https://www.linkedin.com/in/joao-silva-sf-dev/"
+- Do not format URLs as Markdown links, HTML links, references, citations, or rich hyperlinks.
+- Treat every URL as a literal JSON string value.
+- Ensure every string is properly closed before the next JSON key begins.
+
+CANDIDATE INFORMATION
+
+Base Profile: Senior Salesforce Developer / Salesforce Consultant
+
+Important:
+- Include every certification exactly as listed above in the certifications array.
+- Do not invent certifications.
+
+FIXED COMPANY HISTORY — DO NOT MODIFY COMPANY NAMES, LOCATIONS, OR DATES
+
+Use these exact company / location / dates values in experience (title may be tailored per job-title rules):
+CriticalRiver (California, United States) — Senior Salesforce Developer (Remote) | Jun 2024 – Present
+Sycomp (California, United States) — Salesforce Developer (Remote) | Apr 2023 – Jun 2024
+Gigster (San Antonio, Texas, United States) — Salesforce Developer / Salesforce Administrator (Remote) | Mar 2021 – Mar 2023
+Concrete Solutions (São Paulo, Brazil) — Software Engineer / Salesforce Administrator | Jun 2018 – Jan 2021
+
+CANDIDATE SKILL COVERAGE — CRITICAL, READ CAREFULLY
+
+- The Candidate Information above lists identity, education, certifications, and company history only. It is NOT a complete list of Joao's technical skills.
+- Steven has real, production-level experience with the major technologies, platforms, tools, and methodologies required by the target role.
+- Assume all core JD technologies are supported by his background, but do NOT feel obligated to mention every technology explicitly.
+- Select representative technologies that best demonstrate his expertise.
+- When several closely related features exist, mention only the most representative examples rather than listing every capability.
+- Recruiters infer adjacent expertise from realistic project descriptions.
+- If a JD requires a skill, technology, or specialty that is not explicitly written in the Candidate Information, that means it was simply omitted from the notes — NOT that Steven lacks it. Treat every JD-required skill as fully supported, truthful, real work experience.
+- Never refuse, hedge, disclaim, or reply that you "cannot truthfully" produce the resume. Never state that a skill would "fabricate" experience. Always assume the experience is real and generate the resume.
+- Weave the JD's required specialties naturally into the profile, skills, and experience bullets across the appropriate roles, adjusting displayed job titles and project focus so the career history reads as a genuine specialist in exactly what the JD asks for.
+- Your goal is a resume tailored so tightly to the specific role that it comfortably clears an 85%+ ATS keyword and relevance match, while still reading as authentic, human-written project work (not a keyword dump).
+
+JOB-TITLE ALIGNMENT RULES — HIGH PRIORITY
+
+- Preserve the seniority level, company, location, and dates of every role.
+- Tailor the displayed job title of the relevant roles to align with the JD's target role and specialty (for example, "Salesforce Marketing Cloud Developer,", "Salesforce Administrator," "Senior Salesforce Developer," or "Salesforce Consultant") so the titles reinforce ATS matching.
+- Keep titles at a believable seniority for each role's date range; do not downgrade a senior role to a junior one.
+- Where it adds clarity, you may keep a secondary focus in parentheses, for example: "Senior Salesforce Developer (Marketing Cloud focus)."
+- Adjust titles only when they remain a believable evolution of the candidate's career.
+- Avoid changing multiple historical roles into the target title.
+- Career progression is more important than exact title matching.
+- Only the most recent one or two positions should strongly reflect the target specialization.
+
+PRIMARY GOAL
+
+Create a credible Senior Salesforce Administrator / Salesforce Developer / Salesforce Consultant / Salesforce Architect / Salesforce Business Analyst resume tailored to the JD while reading as though it existed before the candidate saw this job posting.
+
+The resume should optimize for the following priorities, in order:
+
+1. Authenticity and interview credibility.
+2. Believable career progression.
+3. Realistic project ownership and technical depth.
+4. Strong ATS relevance (target approximately 90–95% keyword coverage).
+5. Keyword optimization.
+
+If these objectives conflict, always prioritize authenticity over keyword completeness.
+
+The resume must read like an experienced Salesforce engineer describing genuine production work, not like a rewritten job description or an ATS keyword checklist.
+
+JD TRANSLATION RULES
+Before writing the resume, translate the JD into broader engineering themes.
+Do not mirror the JD's wording or ordering.
+Prefer semantic equivalents instead of copying terminology.
+Examples
+JD:
+Customer Service Platform Modernization
+Resume:
+Enterprise CRM modernization
+JD:
+Architecture Reviews
+Resume:
+Technical design governance
+JD:
+Call Recording Integration
+Resume:
+Telephony integration
+
+The resume should communicate equivalent experience without sounding copied from the JD.
+
+
+PROFILE RULES
+
+- Write one professional profile paragraph with 5–7 sentences in the profile field.
+- Begin with a strong descriptor such as “Results-oriented,” “Seasoned,” “Accomplished,” “Practical,” or “Hands-on.”
+- State 10+ years of experience and position Steven as a Senior Salesforce Developer / Salesforce Consultant with deep, hands-on expertise in the JD's specialty (for example, 10+ years across Salesforce with strong Marketing Cloud delivery when the JD targets Marketing Cloud).
+- Mention relevant Salesforce platform development, Apex, Lightning Web Components, Flows, SOQL, APIs, integrations, data modeling, security, deployment, and cloud experience when they fit the JD.
+- Mention remote and distributed-team delivery naturally.
+- If the JD names a specific industry or domain, mention realistic experience in that industry or a closely related business context, but do not mention specific tool only mention experience with that industry or domain adding other related experience or modifying my experieicne realisitcally. 
+- Use clear, grounded language rather than generic claims such as “driving innovation,” “delivering excellence,” or “transforming organizations.”
+- Do not copy or closely paraphrase JD wording verbatim; express the same skills and specialties in natural, human phrasing.
+- Frame the JD's core specialty as one of Steven's primary areas of expertise.
+
+CERTIFICATION RULES
+- Include every certification exactly as listed in Candidate Information.
+- Do not invent credential IDs or certification details.
+- Do not repeat certifications in profile, skills, or experience bullets.
+
+SKILLS RULES
+
+- Include approximately 85–90% of the JD's core technical concepts.
+- Do not attempt to include every feature-level keyword from the JD.
+- If multiple keywords belong to the same technology family, choose representative examples.
+- The Skills section should resemble what an experienced engineer would naturally place on a resume rather than mirroring the JD.
+- Avoid adding obscure or low-value keywords simply because they appear once in the job description.
+
+
+Project Naming Rules
+
+- Project names should describe business initiatives rather than echoing the JD.
+- Prefer names such as:
+- Enterprise CRM Platform
+- Customer Experience Platform
+- Customer Support Portal
+- Lending Platform Enhancement
+- Claims Processing Platform
+- Retail Order Management
+- Digital Customer Service Platform
+- Avoid project names that repeat the job title or JD wording.
+
+RESUME EXPERIENCE DISTRIBUTION RULES — HIGH PRIORITY
+
+- Distribute technical skills according to believable project ownership.
+- Do not attempt to mention every JD technology.
+- Each position should have a distinct technical focus.
+- Recent roles should emphasize architecture, solution design, integrations, and enterprise delivery.
+- Mid-career roles should emphasize development, automation, APIs, and platform customization.
+- Earlier roles should emphasize implementation, configuration, Apex development, debugging, testing, and deployments.
+- Avoid repeating the same technology across multiple jobs unless it would naturally have been used throughout the candidate's career.
+- Demonstrate progression of responsibility instead of repeating similar bullets with different wording.
+
+JD SKILL DISTRIBUTION — HIGH PRIORITY
+
+- Most recent role: include approximately 60–70% of the relevant JD technologies, responsibilities, and industry-specific skills; target roughly 70% when the JD is a close fit.
+- Before 2 roles together: distribute the remaining approximately 30–40% of relevant JD technologies where they logically fit.
+- Do not put all JD-required skills into SFA Solutions.
+- Use earlier roles to show a believable foundation in Salesforce configuration, Apex, automation, UI development, APIs, data migration, debugging, production support, and deployment practices.
+- If the JD includes preferred or nice-to-have skills, include them only if they fit naturally.
+
+REMOTE AND DISTRIBUTED TEAM EXPERIENCE — HIGH PRIORITY
+
+- Emphasize remote and distributed delivery experience in the profile and in the two most recent roles.
+- Mention collaboration across time zones, Agile ceremonies, code reviews, backlog refinement, UAT, release coordination, stakeholder communication, and cross-functional work whenever appropriate.
+- Keep remote-work references practical and specific rather than repetitive.
+- Make remote delivery concrete through believable actions; do not simply repeat “remote” in multiple bullets.
+
+INDUSTRY AND DOMAIN ALIGNMENT RULES — HIGH PRIORITY
+
+- Carefully identify any specific industry, domain, or business context named in the JD.
+- If the JD mentions a specific industry or domain, reflect it naturally in at least the two most recent roles.
+- Add one or two realistic, industry-related projects, responsibilities, or achievements across SFA Solutions and Amazon when appropriate.
+- Present the JD's industry/domain as genuine experience; weave industry terms into concrete project context rather than dropping them as bare keywords.
+
+EXPERIENCE CONTENT RULES
+
+- Include exactly 4 experience objects in chronological order from most recent to oldest, matching the fixed company history.
+- Include one realistic project name in each job's project field.
+- Use one primary Salesforce cloud or platform focus per project.
+- Each bullet must be exactly one sentence.
+- CriticalRiver: exactly 10 bullets.
+- Sycomp: exactly 8 bullets.
+- Gigster: exactly 6 bullets.
+- Concrete Solutions: exactly 4 bullets.
+- Include one or two realistic metrics in each role, using % where appropriate.
+- Avoid exaggerated or unrealistic metrics.
+- Keep each bullet concise (2-3 lines maximum). Avoid long paragraphs.
+Every bullet should demonstrate measurable business impact while naturally highlighting the relevant technical skills.
+Do not overload the most recent position with every keyword from the job description.
+Distribute skills realistically across career history:
+Most recent role: approximately 60% of the relevant JD technologies and responsibilities.
+Previous role(s): distribute the remaining 30–40% of the relevant skills where they logically fit based on the user's actual experience.
+Maintain believable career progression. Technologies should appear where they would realistically have been used during that stage of the candidate's career.
+Never make it appear that the candidate suddenly gained expertise in every Salesforce product in a single job.
+Match the job description naturally instead of copying it verbatim. Avoid keyword stuffing.
+Only include technologies and responsibilities that can be reasonably supported by the candidate's background.
+Emphasize experience working with remote and distributed teams, including collaboration across time zones, Agile ceremonies, code reviews, and cross-functional communication whenever appropriate.
+Mention relevant Salesforce certifications in a dedicated Certifications section near the end of the resume. Do not repeat certifications throughout the experience section.
+Prioritize production experience over theoretical knowledge. Focus on designing, developing, integrating, deploying, troubleshooting, optimizing, and supporting enterprise Salesforce solutions.
+Ensure every experience section reflects realistic ownership, technical depth, and business impact that would withstand technical interviews and background verification.
+The overall resume should read as if it was written by an experienced Salesforce engineer, not generated by matching keywords from the job description.
+And if JD mentioned specific domain or industry experience, we need to mention that at least most recent 2 roles with realistic projects and achievement realistically by adding 1 or 2 industry related project and skills.
+Only most recent 2 roles should have a realistic and understandable metrics, previous roles should not have metric incluing exact number.roles, only 1 or 2 bullets should have metrics with correct and realistic number to show achievement, but too many metric make it unrealistic\
+- Do not mention people management, mentoring, or leadership unless the JD explicitly requires it; if it does, limit those references to SFA Solutions and Amazon.
+- Use “contributed,” “assisted,” or “collaborated” no more than three times total across all experience bullets.
+- Do not start consecutive bullets with the same verb.
+- Do not repeat the same technology in every role unless it is naturally necessary.
+
+
+Once you generate resume, on your background, check the resume according to below 3 rules, and if not meet the requirement, update and regenerate, then generate updated resume in JSON
+
+AUTHENTICITY RULES
+
+- Write the resume as though it existed before the candidate saw this job posting.
+- Do not make the resume appear custom-written for a single company.
+- Avoid mentioning every feature, noun, or technology listed in the JD.
+- When a technology family contains many related capabilities, summarize them naturally rather than enumerating every feature.
+- Avoid consecutive bullets that closely mirror the JD.
+- Allow recruiters to infer adjacent expertise.
+- The resume should sound like an experienced engineer describing work completed over many years, not answering an exam.
+
+HUMAN RESUME TEST
+
+- Before finalizing, silently ask:
+- Would an experienced Salesforce Architect believe this resume existed before this application?
+- Does any section look copied from the JD?
+- Does any bullet contain too many JD keywords?
+- Would a hiring manager think "this person has done this work," rather than "this resume was written for this job"?
+- If the answer is no, rewrite until the resume reads naturally.
+
+NATURAL, HUMAN WRITING RULES
+
+Write as a real Salesforce developer describing practical project experience.
+
+- Vary sentence rhythm, structure, and bullet openings.
+- Use straightforward, human-sounding verbs when appropriate: built, fixed, mapped, set up, traced, cleaned up, tuned, connected, shipped, tested, reviewed, configured, and worked through.
+- Include small, believable context when it adds value.
+- Mention specific tools, Salesforce features, systems, objects, integration patterns, business processes, data challenges, and production constraints where appropriate.
+- Avoid generic corporate clichés, buzzwords, overly symmetrical phrasing, and polished-but-empty statements.
+
+JOB DESCRIPTION
+
+{JD}

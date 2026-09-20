@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Profile editor — Ocean</title>
+    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="profile-editor.css" />
+  </head>
+  <body class="editor-page">
+    <main class="editor">
+      <header class="editor-header">
+        <div class="brand">
+          <img src="icons/ocean-icon.svg" alt="Ocean" class="brand-icon" />
+          <div>
+            <h1 id="pageTitle">Edit profile</h1>
+            <p class="subtitle">Common application answers + resume prompt for autofill</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button type="button" id="resetBuiltinPrompt" class="secondary compact" hidden>
+            Reset prompt to default
+          </button>
+          <button type="button" id="saveBtn" class="compact primary">Save</button>
+        </div>
+      </header>
+      <div class="page-back-row">
+        <button type="button" id="cancelBtn" class="icon-btn" title="Back">
+          <span class="btn-label">Back</span>
+        </button>
+      </div>
+
+      <p id="status" class="editor-status" role="status"></p>
+
+      <section class="card">
+        <h2 class="section-title">Profile</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Profile name</span>
+            <input id="profileLabel" type="text" placeholder="e.g. Steven Avon" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Type</span>
+            <select id="profileKind">
+              <option value="resume">Resume</option>
+              <option value="coverLetter">Cover letter</option>
+            </select>
+          </label>
+        </div>
+        <p id="kindHint" class="hint" hidden>
+          Cover letter profiles do not appear in the panel's Profile list. Choose
+          <strong>Resume</strong> if you want to select this profile when generating.
+        </p>
+        <p id="builtinHint" class="hint" hidden>
+          Built-in profile: name is fixed. You can override the prompt and edit application answers.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Personal information</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>First name</span>
+            <input id="firstName" type="text" autocomplete="given-name" />
+          </label>
+          <label class="field">
+            <span>Last name</span>
+            <input id="lastName" type="text" autocomplete="family-name" />
+          </label>
+          <label class="field">
+            <span>Middle name</span>
+            <input id="middleName" type="text" autocomplete="additional-name" />
+          </label>
+          <label class="field">
+            <span>Preferred name</span>
+            <input id="preferredName" type="text" />
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="email" type="email" autocomplete="email" />
+          </label>
+          <label class="field">
+            <span>Phone</span>
+            <input id="phone" type="tel" autocomplete="tel" />
+          </label>
+          <label class="field">
+            <span>Country</span>
+            <input id="country" type="text" autocomplete="country-name" />
+          </label>
+          <label class="field">
+            <span>State</span>
+            <select id="state"></select>
+          </label>
+          <label class="field span-2">
+            <span>Address line 1</span>
+            <input id="addressLine1" type="text" autocomplete="address-line1" />
+          </label>
+          <label class="field span-2">
+            <span>Address line 2</span>
+            <input id="addressLine2" type="text" autocomplete="address-line2" />
+          </label>
+          <label class="field">
+            <span>City</span>
+            <input id="city" type="text" autocomplete="address-level2" />
+          </label>
+          <label class="field">
+            <span>ZIP code</span>
+            <input id="zipCode" type="text" autocomplete="postal-code" />
+          </label>
+          <label class="field span-2">
+            <span>City, Country of residence</span>
+            <input
+              id="cityCountryOfResidence"
+              type="text"
+              placeholder="e.g. Brick, New Jersey, United States"
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Work eligibility &amp; legal</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Legally authorized to work in the US?</span>
+            <select id="workAuthorized"></select>
+          </label>
+          <label class="field">
+            <span>Need visa sponsorship now or in future?</span>
+            <select id="needsSponsorship"></select>
+          </label>
+          <label class="field span-2">
+            <span>
+              Subject to non-solicitation, non-competition, or similar post-employment
+              restrictions?
+            </span>
+            <select id="postEmploymentRestrictions"></select>
+          </label>
+          <label class="field">
+            <span>Willing to relocate?</span>
+            <select id="willingToRelocate"></select>
+          </label>
+          <label class="field">
+            <span>Are you over 18?</span>
+            <select id="over18"></select>
+          </label>
+          <label class="field">
+            <span>Ever convicted of a felony?</span>
+            <select id="felonyConviction"></select>
+          </label>
+          <label class="field span-2">
+            <span>Felony explanation (if yes)</span>
+            <textarea id="felonyExplanation" rows="2"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Experience &amp; links</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Total years of experience</span>
+            <input id="yearsExperience" type="text" placeholder="e.g. 10" />
+          </label>
+          <label class="field">
+            <span>English level</span>
+            <select id="englishLevel"></select>
+          </label>
+          <label class="field span-2">
+            <span>Relevant experience (short summary)</span>
+            <textarea id="relevantExperience" rows="3"></textarea>
+          </label>
+          <label class="field">
+            <span>LinkedIn URL</span>
+            <input id="linkedinUrl" type="url" placeholder="https://www.linkedin.com/in/..." />
+          </label>
+          <label class="field">
+            <span>Portfolio URL</span>
+            <input id="portfolioUrl" type="url" placeholder="https://..." />
+          </label>
+          <label class="field">
+            <span>GitHub URL</span>
+            <input id="githubUrl" type="url" placeholder="https://github.com/..." />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Candidate information</h2>
+        <p class="hint">
+          The source of truth about this candidate — verified background, employers, dates, titles,
+          technologies, prior resume text, real metrics. The resume prompt is told not to contradict
+          it and not to claim anything it does not support.
+        </p>
+        <p class="hint">
+          Put <code>{CANDIDATE_INFORMATION}</code> in the resume prompt below to control exactly
+          where this lands. Without that placeholder it is appended to the end of the prompt under
+          its own heading.
+        </p>
+        <label class="field">
+          <span>Candidate information</span>
+          <textarea
+            id="candidateInfo"
+            class="prompt-input"
+            rows="14"
+            spellcheck="false"
+            placeholder="Name, location, contact, education, employment history with exact dates and titles, verified technologies, real metrics, prior resume text..."
+          ></textarea>
+        </label>
+        <p id="candidateInfoNote" class="hint">Not set.</p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Project manifest</h2>
+        <p class="hint">
+          Real projects you delivered in the roles on your resume. When a resume is generated,
+          updated, or an answer is written, the projects that match the job description are picked
+          automatically and used as the factual basis — the rest are left out.
+        </p>
+        <p class="hint">
+          One project per paragraph (blank line between them), or one per line as a
+          <code>-</code> list. Put the employer, the stack, and the outcome in the text so the
+          project stays attached to the right job, e.g.
+          <code>Uniqcli (2023) — Rebuilt order pipeline: Node.js, Kafka, Postgres; cut latency 40%.</code>
+        </p>
+        <p class="hint">
+          Put <code>{PROJECT_MANIFESTS}</code> in the resume prompt below to control where the
+          matched projects land. Without it they are appended to the end of the prompt with usage
+          rules.
+        </p>
+        <label class="field">
+          <span>Projects</span>
+          <textarea
+            id="projectManifest"
+            class="prompt-input"
+            rows="14"
+            spellcheck="false"
+            placeholder="Uniqcli (2023) — Migrated the checkout service to event-driven Node.js on GCP Pub/Sub, cutting peak order latency 40%.&#10;&#10;Golabs Tech (2020) — Built the HubSpot ↔ internal CRM sync (OAuth, webhooks, retry queue) covering 120k contacts."
+          ></textarea>
+        </label>
+        <p id="projectManifestNote" class="hint">No projects yet.</p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Education</h2>
+        <div class="grid-2">
+          <label class="field">
+            <span>Highest degree</span>
+            <select id="highestDegree"></select>
+          </label>
+          <label class="field">
+            <span>School name</span>
+            <input id="schoolName" type="text" />
+          </label>
+          <label class="field">
+            <span>Field of study</span>
+            <input id="fieldOfStudy" type="text" />
+          </label>
+          <label class="field">
+            <span>Graduation date</span>
+            <input id="graduationDate" type="month" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Google Sheet</h2>
+        <p class="hint">
+          Track applications per profile. Tab is chosen by the URL's <code>gid=...</code>, or by Sheet tab name if filled.
+        </p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Saved sheet (per profile)</span>
+            <select id="sheetPresetSelect">
+              <option value="">— None —</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Sheet nickname</span>
+            <input
+              id="sheetPresetLabel"
+              type="text"
+              placeholder="e.g. Steven Avon applications"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field span-2">
+            <span>Spreadsheet link (open the target tab first, then paste that URL)</span>
+            <input
+              id="spreadsheetUrl"
+              type="url"
+              placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=123456789"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field">
+            <span>Sheet tab name (optional override)</span>
+            <input
+              id="sheetTabName"
+              type="text"
+              placeholder="Exact tab name, e.g. Applications"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field">
+            <span>Apps Script Web App URL</span>
+            <input
+              id="sheetsWebAppUrl"
+              type="url"
+              placeholder="https://script.google.com/macros/s/.../exec"
+              autocomplete="off"
+            />
+          </label>
+        </div>
+        <div class="row-split" style="margin-top: 10px; gap: 8px; display: flex; flex-wrap: wrap; align-items: center">
+          <button type="button" id="copyAppsScript" class="secondary compact">Copy Apps Script</button>
+          <button type="button" id="testSheetsWebApp" class="secondary compact" title="Check that the Web App URL is live and up to date">
+            Test Web App
+          </button>
+          <button type="button" id="saveSheetPreset" class="secondary compact" title="Save this sheet and use it for this profile">
+            Save for this profile
+          </button>
+          <button type="button" id="deleteSheetPreset" class="secondary compact danger" title="Remove the selected saved sheet">
+            Delete saved
+          </button>
+          <span class="accordion-note" id="sheetSummaryNote">Not connected</span>
+        </div>
+        <label class="inline-check" style="margin-top: 10px" title="Write status in Status (column G)">
+          <input type="checkbox" id="trackSheetStatusToggle" />
+          <span>Track application status in sheet (column G)</span>
+        </label>
+        <p class="hint">
+          <strong>Save is not enough</strong> — after pasting Apps Script, use
+          Deploy → Manage deployments → Edit (pencil) → <strong>New version</strong> → Deploy.
+          Paste the Web app URL ending in <code>/exec</code> here (not the script text).
+          Click <strong>Test Web App</strong> — it must report apiVersion <code>2026-09-15</code>.
+          When on: resume generate writes <strong>Resume Generated</strong>; marking a job completed/applied updates that row to <strong>Applied</strong>.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Login / signup credentials</h2>
+        <p class="hint">
+          Used to autofill <strong>login / sign-up</strong> forms on application pages
+          (only when a password field is present). Stored locally in this browser.
+          We never submit login forms automatically.
+        </p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="accountEmail" placeholder="e.g. you@example.com" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Username</span>
+            <input type="text" id="accountUsername" placeholder="e.g. your_username" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="accountPassword" placeholder="Account password" autocomplete="off" />
+          </label>
+        </div>
+        <div class="qa-toolbar" style="margin-top: 10px">
+          <label class="cred-show">
+            <input type="checkbox" id="accountShowPassword" />
+            <span>Show password</span>
+          </label>
+          <button type="button" id="accountSaveBtn" class="secondary compact">Save credentials</button>
+          <button type="button" id="accountClearBtn" class="secondary danger compact">Clear</button>
+          <span class="accordion-note" id="credentialsNote">Not set</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Template answers</h2>
+        <div class="grid-2">
+          <label class="field span-2">
+            <span>Why are you interested in this role? (default)</span>
+            <textarea id="whyInterested" rows="3"></textarea>
+          </label>
+          <label class="field">
+            <span>Salary expectations</span>
+            <input id="salaryExpectation" type="text" placeholder="e.g. $140,000" />
+          </label>
+          <label class="field">
+            <span>Earliest start date</span>
+            <input id="earliestStartDate" type="date" />
+          </label>
+          <label class="field">
+            <span>Willing to take a background check?</span>
+            <select id="backgroundCheckConsent"></select>
+          </label>
+          <label class="field">
+            <span>Willing to take a drug test?</span>
+            <select id="drugTestConsent"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">EEO / voluntary self-identification</h2>
+        <p class="hint">Optional. Used only when an application asks; leave blank to skip.</p>
+        <div class="grid-2">
+          <label class="field">
+            <span>Gender</span>
+            <select id="gender"></select>
+          </label>
+          <label class="field">
+            <span>Are you Hispanic/Latino?</span>
+            <select id="hispanicLatino"></select>
+          </label>
+          <label class="field">
+            <span>Race</span>
+            <select id="raceEthnicity"></select>
+          </label>
+          <label class="field">
+            <span>Veteran status</span>
+            <select id="veteranStatus"></select>
+          </label>
+          <label class="field">
+            <span>Disability status</span>
+            <select id="disabilityStatus"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">Resume prompt</h2>
+        <p class="hint">
+          Must include <code>{JD}</code>. Optional: <code>{JOB_TITLE}</code>,
+          <code>{COMPANY}</code>, <code>{CANDIDATE_INFORMATION}</code>,
+          <code>{PROJECT_MANIFESTS}</code>.
+        </p>
+        <label class="field">
+          <span>Prompt template</span>
+          <textarea id="promptTemplate" class="prompt-input" rows="16" spellcheck="false"></textarea>
+        </label>
+      </section>
+
+      <footer class="editor-footer">
+        <button type="button" id="cancelBtnBottom" class="secondary">Close</button>
+        <button type="button" id="saveBtnBottom">Save profile</button>
+      </footer>
+    </main>
+    <script type="module" src="profile-editor.js"></script>
+  </body>
+</html>

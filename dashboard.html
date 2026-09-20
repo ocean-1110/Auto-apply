@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Application dashboard — Ocean</title>
+    <link rel="stylesheet" href="dashboard.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Ocean</p>
+          <h1>Application dashboard</h1>
+          <p class="lede">Jobs applied, pipeline status, and how each profile is performing.</p>
+        </div>
+        <div class="hero-actions">
+          <label class="filter">
+            <span>Profile</span>
+            <select id="profileFilter">
+              <option value="">All profiles</option>
+            </select>
+          </label>
+          <label class="filter">
+            <span>Apply date</span>
+            <select id="dateFilter">
+              <option value="all">All time</option>
+              <option value="today">Today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d" selected>Last 30 days</option>
+            </select>
+          </label>
+          <label class="filter">
+            <span>Category</span>
+            <select id="categoryFilter">
+              <option value="all">All statuses</option>
+              <option value="applied">Applied</option>
+              <option value="ready">Ready to submit</option>
+              <option value="review">Needs review / skipped</option>
+              <option value="progress">In progress</option>
+              <option value="queued">Queued</option>
+              <option value="failed">Failed</option>
+              <option value="blocked">Closed / blocked</option>
+            </select>
+          </label>
+          <label class="filter filter-search">
+            <span>Search</span>
+            <input type="search" id="searchFilter" placeholder="Title or company…" autocomplete="off" />
+          </label>
+          <button type="button" id="refreshBtn" class="ghost">Refresh</button>
+        </div>
+      </header>
+      <div class="page-back-row">
+        <button type="button" id="closeBtn" class="ghost">Back</button>
+      </div>
+
+      <section class="stats" id="statCards"></section>
+
+      <section class="split">
+        <article class="panel">
+          <div class="panel-head">
+            <h2>By profile</h2>
+            <p>Status mix for each resume profile</p>
+          </div>
+          <div id="profileGrid" class="profile-grid"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Sources</h2>
+            <p>Where captured jobs came from</p>
+          </div>
+          <div id="sourceBars" class="bars"></div>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Recent activity</h2>
+          <p id="activityHint">Latest applications and queue updates</p>
+        </div>
+        <div class="table-wrap">
+          <table class="jobs-table">
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Company</th>
+                <th>Profile</th>
+                <th>Source</th>
+                <th>Status</th>
+                <th>Applied</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody id="jobsBody"></tbody>
+          </table>
+        </div>
+        <p id="emptyState" class="empty" hidden>No jobs yet. Capture or import roles, then apply from the extension.</p>
+      </section>
+    </div>
+    <script type="module" src="dashboard.js"></script>
+  </body>
+</html>
