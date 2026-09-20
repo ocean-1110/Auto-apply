@@ -6,12 +6,10 @@ This extension injects a selected profile's resume prompt + JD into your already
 
 - Pick a resume profile (built-in or ones you add in the UI)
 - Fill job title, company name, JD link, and JD text
-- Saves into `Downloads / [output folder] / [company name - job title] /`:
-  - `jd.txt`
-  - `Steven_Resume.json` (structured resume content from ChatGPT)
-  - `Steven_Resume.html` (rendered locally from that JSON)
-  - `Steven_Resume.pdf` (printed from the HTML)
-  - `Cover Letter.pdf` (generated next via the **CoverLetter** prompt)
+- Saves into `Downloads / [output folder] / [id - first - company - role] /`:
+    - `jd.txt`
+    - `{name}_Resume.html` / `{name}_Resume.pdf` by default (pattern editable in **Save folder → Resume filename**)
+    - `Cover_Letter.pdf`
 - **Copy row for spreadsheet** — copies a tab-separated row to paste into Google Sheets
 - Optionally appends to Google Sheets via Apps Script
 
@@ -154,8 +152,8 @@ Chrome cannot write to a spreadsheet from the share/edit link alone. You need a 
 
 The spreadsheet URL's `gid` selects the sheet tab. After a resume is generated, the extension
 appends a row as:
-`No | Created Date | Title | Company | Link | Salary | JD | Apply Status`
-(Salary looks like `$120000 - $150000`; JD is left blank). Duplicate checks use the **Link**
+`No | Application Date | Title | Company | URL | Salary | Status`
+(Salary looks like `$120000 - $150000`). Duplicate checks use the **URL**
 column through the same web app.
 
 If you update the Apps Script later, use **Deploy → Manage deployments → Edit → New version**.
@@ -192,7 +190,8 @@ Scheduled captures also show a Chrome notification with the same summary.
 | Shortcut | Action |
 |----------|--------|
 | **Alt+J** | Open extension panel |
-| **Alt+Shift+S** | Scrape open job → generate → Auto Apply |
+| **Alt+Shift+S** | Scrape open job → generate → Auto Apply (same as **Scrape & Apply**) |
+| **Add to list** (popup) | Scrape open job into the job list only — no generate/apply (use Batch Resumes later) |
 | **Alt+Shift+G** | Generate resume (& cover letter unless “generate only resume” is checked) |
 | **Alt+Shift+E** | Auto Apply on current page (any ATS; stops before Submit) |
 | **Ctrl+Enter** | Generate (while panel is focused) |

@@ -293,6 +293,7 @@ export function parseImportedJobsCsvText(csvText) {
     const salaryMin = fieldByCanon(row, headerIndex, "salary_min").trim();
     const salaryMax = fieldByCanon(row, headerIndex, "salary_max").trim();
     const datePosted = fieldByCanon(row, headerIndex, "date_posted").trim();
+    const applicationStatus = fieldByCanon(row, headerIndex, "status").trim();
 
     if (!jdLink || isHeaderLikeUrl(jdLink)) {
       skipped += 1;
@@ -345,7 +346,8 @@ export function parseImportedJobsCsvText(csvText) {
       employmentType,
       salaryMin,
       salaryMax,
-      datePosted
+      datePosted,
+      csvStatus: applicationStatus
     });
   }
 

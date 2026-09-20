@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-14.submit-click-only.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-19.stop-after-fill.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -2008,11 +2008,46 @@ async function pauseAtSubmitForReview(tabId, summary, clickLabel = "Submit") {
   }
   summary.status = "ready_for_review";
   summary.detail =
-    `Filled the form and focused "${focusedLabel}". Review the fields, then click Submit in Ocean to send the application. Nothing was submitted yet.`;
+    `Filled the form and highlighted "${focusedLabel}". Review the fields, then click Submit in Ocean to send the application. Nothing was submitted yet.`;
   summary.tabId = tabId;
   await setStatus(
-    `Ready for your confirmation — review the form, then click Submit in Ocean to press "${focusedLabel}".`
+    `Form filled. Highlighted "${focusedLabel}" on the page — review it, then click Submit in Ocean.`
   );
+  return summary;
+}
+
+/**
+ * Form is filled and we are not clicking Next/Submit ourselves.
+ * Highlight the best Apply / Next / Submit control and stop so the user
+ * can confirm which button to use instead of looping the filler.
+ */
+async function pauseFilledAskHighlight(tabId, summary, probe = null) {
+  const live = await chrome.tabs.get(tabId).catch(() => null);
+  await markReadyToSubmit(live?.url || summary.tabUrl || "");
+  let label = String(probe?.best?.action?.text || "").trim();
+  let kind = String(probe?.best?.action?.type || "").trim();
+  try {
+    await ensureAutofillScript(tabId);
+    const frames = await sendMessageToAllFrames(
+      tabId,
+      { type: "highlight_apply_action" },
+      { attempts: 1 }
+    );
+    const hit = (frames || []).find((f) => f?.highlighted && f?.text);
+    if (hit) {
+      label = hit.text;
+      kind = hit.type || kind;
+    }
+  } catch {
+    /* highlight is best-effort */
+  }
+  const shown = label || (kind === "submit" ? "Submit" : kind === "next" ? "Next" : "Apply / Submit");
+  summary.status = "ready_for_review";
+  summary.detail = label
+    ? `Form filled. Highlighted "${shown}" on the page — confirm it is the Apply / Submit button, then click Submit in Ocean. Filling stopped.`
+    : "Form filled. Could not find an Apply / Submit button to highlight — point it out on the page, then click Submit in Ocean. Filling stopped.";
+  summary.tabId = tabId;
+  await setStatus(summary.detail);
   return summary;
 }
 
@@ -3054,6 +3089,7 @@ async function clickPageSubmitOnly(tabId, { probe = null, pageUrl = "" } = {}) {
     tabId: finished.tabId,
     clicked: { type: "submit", ok: true, text: clickLabel },
     submitted: finished.status === "submitted",
+    applyStatus: finished.status === "submitted" ? "submitted" : "needs_review",
     button: describeAutofillButton(liveProbe, { readyToSubmit: false }),
     status: finished.detail || `Clicked "${clickLabel}".`
   };
@@ -3137,6 +3173,7 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
   return {
     ok: true,
     ...ea,
+    applyStatus: ea.status || "",
     button: describeAutofillButton(after, { readyToSubmit: readyForReview }),
     status
   };
@@ -4065,6 +4102,76 @@ async function finalizeImportedJobAsApplied(importedJobId, {
 }
 
 /**
+ * Mirror panel Apply/Submit outcomes onto the selected imported job card.
+ */
+async function syncImportedJobAfterPanelApply(importedJobId, profileId, result = {}, preferredAction = "") {
+  const id = String(importedJobId || "").trim();
+  if (!id) return;
+  const jobs = await getImportedJobsById();
+  const job = jobs[id];
+  if (!job) return;
+
+  const jobMeta = {
+    jobTitle: job.jobTitle || "",
+    companyName: job.companyName || "",
+    jdLink: job.jdLink || job.url || ""
+  };
+  const site = detectSiteFromUrl(jobMeta.jdLink);
+  const detail = String(result.status || result.detail || "").trim();
+  const status = String(result.applyStatus || result.status || "")
+    .trim()
+    .toLowerCase();
+  const wantsSubmit = String(preferredAction || "").toLowerCase() === "submit";
+  const submitted =
+    Boolean(result.submitted) ||
+    status === "submitted" ||
+    status === "completed" ||
+    (wantsSubmit && /clicked|submit/i.test(detail) && status !== "needs_review");
+
+  if (submitted || status === "already_applied") {
+    await finalizeImportedJobAsApplied(id, {
+      profileId,
+      jobMeta,
+      site,
+      detail: detail || (status === "already_applied" ? "Already applied." : "Submitted from Ocean.")
+    });
+    return;
+  }
+
+  if (status === "unavailable") {
+    await setImportedJobStatus(id, {
+      status: "unavailable",
+      statusDetail: detail || "Job no longer available.",
+      profileId
+    });
+    return;
+  }
+
+  if (
+    status === "ready_for_review" ||
+    result.button?.actionType === "submit" ||
+    result.button?.readyToSubmit
+  ) {
+    await setImportedJobStatus(id, {
+      status: "ready_for_review",
+      statusDetail: detail || "Ready to submit — review the form, then click Submit.",
+      profileId,
+      markAttempt: true
+    });
+    return;
+  }
+
+  if (status === "needs_review" || status === "failed" || status === "skipped") {
+    await setImportedJobStatus(id, {
+      status: status === "failed" ? "failed" : "needs_review",
+      statusDetail: detail || "Needs review.",
+      profileId,
+      markAttempt: true
+    });
+  }
+}
+
+/**
  * Open a job URL, ensure resume PDFs, run Auto Apply, and mark status.
  * Used by single Apply and Batch Apply.
  */
@@ -4831,7 +4938,6 @@ async function startMultiStepApplyOnTab(
     summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
 
     if (Number(fillRes?.uploadedCount || 0) > 0) {
-      // Dice: 0.5s then Next. Other ATS: short beat to accept the PDF.
       await sleepMs(500);
     }
 
@@ -4843,35 +4949,23 @@ async function startMultiStepApplyOnTab(
       uploadsBusy: false
     }));
 
-    // Do not click Next while the step still has empty fields or an in-flight upload
-    // (Dice shows "Leave site?" and can bounce to profile/settings).
-    // Skip this when Submit is already on the page — Dice will auto-submit;
-    // other ATS pause so you can review and click Submit in Ocean.
-    if (
-      (probe.uploadsBusy || probe.needsFill) &&
-      probe.best?.action?.type !== "submit" &&
-      !probe.diceSubmitPage
-    ) {
-      // Dice upload page: one short recheck only — do not spin for seconds.
-      const maxWaits = site === "dice" ? 1 : 12;
-      const waitMs = site === "dice" ? 500 : 500;
-      for (let wait = 0; wait < maxWaits; wait += 1) {
-        await sleepMs(waitMs);
-        if (probe.needsFill && !probe.uploadsBusy) {
-          await setStatus("Auto Apply: finishing remaining fields before Next...");
-          const again = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
-          summary.filled += Number(again?.filledCount || 0);
-          summary.uploaded += Number(again?.uploadedCount || 0);
-          summary.aiFilled += Number(again?.aiFilledCount || 0);
-          summary.choiceFilled += Number(again?.choiceFilledCount || 0);
-          summary.bankHits += Number(again?.bankHits || 0);
-        } else if (site !== "dice") {
-          await setStatus("Auto Apply: waiting for file upload to finish...");
-        }
-        probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
-        if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
-        if (!probe.uploadsBusy && !probe.needsFill) break;
+    // Dice only: one short recheck for an in-flight upload, then auto-advance.
+    // Every other site fills this step once. A leftover blank used to look
+    // like "still needs fill" and restart the AI filler in a loop.
+    if (site === "dice" && (probe.uploadsBusy || probe.needsFill) && !probe.applicationSuccess) {
+      await sleepMs(500);
+      if (probe.needsFill && !probe.uploadsBusy) {
+        await setStatus("Auto Apply: finishing remaining fields before Next...");
+        const again = await startAutofillOnCurrentPage(profileId, currentTabId, {
+          uploadDocs: runUploadDocs
+        });
+        summary.filled += Number(again?.filledCount || 0);
+        summary.uploaded += Number(again?.uploadedCount || 0);
+        summary.aiFilled += Number(again?.aiFilledCount || 0);
+        summary.choiceFilled += Number(again?.choiceFilledCount || 0);
+        summary.bankHits += Number(again?.bankHits || 0);
       }
+      probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
     }
 
     // Dice: only poll for Submit when we are on the final step (or no Next yet).
@@ -4959,27 +5053,28 @@ async function startMultiStepApplyOnTab(
     }
 
     // Dice last page: Submit may appear a beat after fill. Keep polling briefly
-    // instead of stopping with "ready for review". Workday Review prefers Submit.
+    // instead of stopping with "ready for review".
     // Skip when Next/Continue is already the right action (e.g. upload step).
     if (
+      site === "dice" &&
       (!probe.best || probe.best.action?.type !== "submit") &&
-      (site === "dice" || liveSite === "workday") &&
       probe.anyForm &&
       probe.best?.action?.type !== "next" &&
       probe.best?.action?.type !== "review"
     ) {
-      await setStatus(
-        liveSite === "workday"
-          ? "Auto Apply: waiting for Submit on the Workday Review step..."
-          : "Auto Apply: waiting for Submit on the last page..."
-      );
+      await setStatus("Auto Apply: waiting for Submit on the last page...");
       for (let i = 0; i < 8; i += 1) {
-        await sleepMs(liveSite === "workday" ? 450 + 100 * i : 400);
+        await sleepMs(400);
         probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
         if (probe.applicationSuccess || probe.best?.action?.type === "submit") break;
         if (probe.best?.action?.type === "next" || probe.best?.action?.type === "review") break;
-        if (liveSite === "workday" && probe.best && !probe.workdayWizard?.isReview) break;
       }
+    }
+
+    // Non-Dice: one fill per step, then stop and highlight Apply / Submit.
+    // The old path asked AI to click a button and kept calling the filler.
+    if (site !== "dice") {
+      return pauseFilledAskHighlight(currentTabId, summary, probe);
     }
 
     if (!probe.best) {
@@ -5392,6 +5487,64 @@ function sanitizePathSegment(value, fallback = "untitled") {
   return cleaned || fallback;
 }
 
+const RESUME_FILENAME_PATTERN_KEY = "resume_filename_pattern";
+const DEFAULT_RESUME_FILENAME_PATTERN = "{name}_Resume";
+
+function lastNameFromPerson(personName) {
+  const parts = String(personName || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length <= 1) return parts[0] || "Candidate";
+  return parts[parts.length - 1];
+}
+
+/**
+ * Build the resume file stem (no extension) from a user pattern.
+ * Tokens: {name} {first} {last} {company} {title}|{role} {date}
+ */
+function buildResumeFileBaseFromPattern(
+  pattern,
+  { personName = "", companyName = "", jobTitle = "" } = {}
+) {
+  const name = String(personName || "").trim() || "Candidate";
+  const first = firstNameFromPerson(name);
+  const last = lastNameFromPerson(name);
+  const nameUnderscore = name.replace(/\s+/g, "_");
+  const company = String(companyName || "").trim() || "Company";
+  const title = String(jobTitle || "").trim() || "Role";
+  const date = new Date().toISOString().slice(0, 10);
+  const tokens = {
+    name: nameUnderscore,
+    fullname: name,
+    first,
+    last,
+    company,
+    title,
+    role: title,
+    date
+  };
+
+  let out = String(pattern || "").trim() || DEFAULT_RESUME_FILENAME_PATTERN;
+  out = out.replace(/\.(pdf|html)$/i, "");
+  out = out.replace(/\{([a-z_]+)\}/gi, (_, key) => {
+    const value = tokens[String(key || "").toLowerCase()];
+    return value != null ? String(value) : "";
+  });
+  out = out.replace(/\s+/g, "_");
+  return sanitizePathSegment(out, "Resume");
+}
+
+async function getResumeFilenamePattern() {
+  try {
+    const stored = await chrome.storage.local.get(RESUME_FILENAME_PATTERN_KEY);
+    const raw = String(stored[RESUME_FILENAME_PATTERN_KEY] || "").trim();
+    return raw || DEFAULT_RESUME_FILENAME_PATTERN;
+  } catch {
+    return DEFAULT_RESUME_FILENAME_PATTERN;
+  }
+}
+
 function joinDownloadPath(...parts) {
   return parts
     .map((part) => String(part || "").replace(/^\/+|\/+$/g, "").replace(/\\/g, "/"))
@@ -5777,7 +5930,12 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
   // the next id in the sequence.
   const reuseFolder = extractFolderNameFromSaveMeta(jobMeta.overwriteFolderName || "");
   const folderName = reuseFolder || (await buildJobFolderName(jobMeta, personName));
-  const resumeFileBase = sanitizePathSegment(personName.replace(/\s+/g, "_") || "Resume", "Resume");
+  const filenamePattern = await getResumeFilenamePattern();
+  const resumeFileBase = buildResumeFileBaseFromPattern(filenamePattern, {
+    personName,
+    companyName: jobMeta.companyName || "",
+    jobTitle: jobMeta.jobTitle || ""
+  });
 
   const jdTxt = buildJdTxtContent({
     jobTitle: jobMeta.jobTitle || "",
@@ -5789,13 +5947,13 @@ async function buildResumeFileBundle(rawText, resumeData, jobMeta = {}) {
   const files = [
     { name: "jd.txt", mimeType: "text/plain", encoding: "utf8", content: jdTxt },
     {
-      name: `${resumeFileBase}_Resume.html`,
+      name: `${resumeFileBase}.html`,
       mimeType: "text/html",
       encoding: "utf8",
       content: html
     },
     {
-      name: `${resumeFileBase}_Resume.pdf`,
+      name: `${resumeFileBase}.pdf`,
       mimeType: "application/pdf",
       encoding: "base64",
       content: pdfBase64
@@ -6191,7 +6349,7 @@ async function saveResumeAndCoverLetter(
   });
   const savedDir = saved?.pathLabel || "";
   const docs = saved?.docs || pickUploadDocsFromBundle(folderName, files);
-  let status = `Saved to ${savedDir} (${resumeFileBase}_Resume.pdf${
+  let status = `Saved to ${savedDir} (${resumeFileBase}.pdf${
     coverLetterCreated ? " + Cover_Letter.pdf" : ""
   } + jd.txt + HTML)${coverLetterWarning}`;
 
@@ -6224,7 +6382,7 @@ async function saveResumeAndCoverLetter(
     status,
     folderName,
     docs,
-    resumeFileName: docs?.resume?.fileName || `${resumeFileBase}_Resume.pdf`,
+    resumeFileName: docs?.resume?.fileName || `${resumeFileBase}.pdf`,
     coverLetterFileName: docs?.coverLetter?.fileName || (coverLetterCreated ? "Cover_Letter.pdf" : "")
   };
 }
@@ -6960,27 +7118,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           return;
         }
 
-        const importedJobId = String(message.importedJobId || "").trim();
-        if (
-          importedJobId &&
-          preferredAction.toLowerCase() === "submit" &&
-          (result.submitted || /submit/i.test(String(result.status || "")))
-        ) {
+        let importedJobId = String(message.importedJobId || "").trim();
+        if (!importedJobId) {
+          const selected = await chrome.storage.local.get(IMPORTED_JOBS_SELECTED_ID_KEY);
+          importedJobId = String(selected[IMPORTED_JOBS_SELECTED_ID_KEY] || "").trim();
+        }
+        if (importedJobId) {
           try {
-            const jobs = await getImportedJobsById();
-            const job = jobs[importedJobId];
-            if (job) {
-              await finalizeImportedJobAsApplied(importedJobId, {
-                profileId,
-                jobMeta: {
-                  jobTitle: job.jobTitle || "",
-                  companyName: job.companyName || "",
-                  jdLink: job.jdLink || job.url || ""
-                },
-                site: detectSiteFromUrl(job.jdLink || job.url || ""),
-                detail: result.status || "Submitted from Ocean."
-              });
-            }
+            await syncImportedJobAfterPanelApply(importedJobId, profileId, result, preferredAction);
           } catch {
             /* best-effort card update */
           }

@@ -18,7 +18,7 @@ export function extractSheetGid(url) {
 }
 
 /** Apps Script API versions that know the current sheet column layout. */
-export const CURRENT_SHEET_API_VERSION = "2026-09-14";
+export const CURRENT_SHEET_API_VERSION = "2026-09-15";
 
 function validateWebAppUrl(webAppUrl) {
   const endpoint = String(webAppUrl || "").trim();
@@ -171,10 +171,10 @@ export class JobAlreadyOnSheetError extends Error {
 }
 
 /**
- * Tab-separated row matching sheet columns A–H:
- * No | Created Date | Title | Company | Link | Salary | JD | Apply Status
+ * Tab-separated row matching sheet columns A–G:
+ * No | Application Date | Title | Company | URL | Salary | Status
  * Paste into the first cell of an empty row in Google Sheets.
- * No and JD are left blank for manual paste; Salary uses "$min - $max".
+ * No is left blank for manual paste; Salary uses "$min - $max".
  */
 export function buildSheetRowTsv({
   jobTitle,
@@ -192,7 +192,6 @@ export function buildSheetRowTsv({
     companyName || "",
     jdLink || "",
     formatSalaryRange(salaryMin, salaryMax),
-    "", // JD — intentionally blank
     applicationStatus || ""
   ];
   return cells.join("\t");
@@ -201,7 +200,7 @@ export function buildSheetRowTsv({
 /**
  * Appends one row via the deployed Apps Script web app.
  * Uses text/plain body to avoid CORS preflight issues with Google Apps Script.
- * Optional applicationStatus writes column H (Apply Status) when track-status is enabled.
+ * Optional applicationStatus writes column G (Status) when track-status is enabled.
  */
 export async function appendJobToSpreadsheet({
   spreadsheetUrl,
@@ -268,7 +267,7 @@ export async function appendJobToSpreadsheet({
 }
 
 /**
- * Update column H (Apply Status) for an existing row matched by job Link (column E).
+ * Update column G (Status) for an existing row matched by job URL (column E).
  */
 export async function updateJobStatusInSpreadsheet({
   spreadsheetUrl,

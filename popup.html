@@ -152,6 +152,26 @@
                 <button type="button" id="filterLinkedInJobs" class="chip-btn">LinkedIn</button>
                 <button type="button" id="filterOtherJobs" class="chip-btn">Others</button>
               </div>
+              <div class="job-list-tools">
+                <input
+                  type="search"
+                  id="jobListSearch"
+                  class="job-list-search"
+                  placeholder="Search title or company…"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <div class="job-status-filters" role="group" aria-label="Filter imported jobs by status">
+                  <button type="button" id="statusFilterAll" class="chip-btn is-active" data-status="all">All</button>
+                  <button type="button" id="statusFilterQueued" class="chip-btn" data-status="queued">Queued</button>
+                  <button type="button" id="statusFilterResume" class="chip-btn" data-status="resume_ready">Resume ready</button>
+                  <button type="button" id="statusFilterReady" class="chip-btn" data-status="ready">Ready</button>
+                  <button type="button" id="statusFilterReview" class="chip-btn" data-status="review">Skipped</button>
+                  <button type="button" id="statusFilterApplied" class="chip-btn" data-status="applied">Applied</button>
+                  <button type="button" id="statusFilterFailed" class="chip-btn" data-status="failed">Failed</button>
+                  <button type="button" id="statusFilterBlocked" class="chip-btn" data-status="blocked">Closed</button>
+                </div>
+              </div>
               <p id="importStatus" class="import-status" role="status"></p>
 
               <div class="jobs-batch-bar">
@@ -357,9 +377,13 @@
                       <span class="btn-label">Apply</span>
                     </button>
                   </div>
-                  <button type="button" id="scrapePageBtn" class="icon-btn icon-btn-accent" title="Scrape the open job tab into the list (site auto-detected from URL). On Dice: generate then Apply. (Alt+Shift+S)">
+                  <button type="button" id="scrapePageBtn" class="icon-btn icon-btn-accent" title="Scrape the open job tab and add it to the job list only (no generate / Apply). Then use Batch Resumes. (Add to list)">
                     <svg class="btn-icon" aria-hidden="true"><use href="#i-scrape"/></svg>
-                    <span class="btn-label">Scrape</span>
+                    <span class="btn-label">Add to list</span>
+                  </button>
+                  <button type="button" id="scrapeAndApplyBtn" class="icon-btn" title="Scrape the open job, generate the resume, then Auto Apply. (Alt+Shift+S)">
+                    <svg class="btn-icon" aria-hidden="true"><use href="#i-send"/></svg>
+                    <span class="btn-label">Scrape &amp; Apply</span>
                   </button>
                 </div>
               </div>
@@ -369,9 +393,9 @@
           <section class="neo-card section" id="saveFolderCard">
             <h2 class="section-title">Save folder</h2>
             <p class="hint">
-              Scrape uses the open tab URL to pick the extractor automatically (no site dropdown).
-              Most sites: adds the job to the list for batch resume build.
-              Dice: generates the resume then Apply. HiringCafe: open the job details panel first.
+              <strong>Add to list</strong> scrapes the open tab and queues the job for batch resume build (no generate / Apply).
+              <strong>Scrape &amp; Apply</strong> (or Alt+Shift+S) scrapes, generates, then runs Auto Apply.
+              HiringCafe: open the job details panel first.
             </p>
             <div class="scrape-actions">
               <button type="button" id="pasteJd" class="icon-btn" title="Paste job description from clipboard">
@@ -405,6 +429,22 @@
                 spellcheck="false"
               />
             </label>
+            <label class="field">
+              <span>Resume filename</span>
+              <input
+                id="resumeFilenamePattern"
+                type="text"
+                placeholder="{name}_Resume"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+            <p class="hint" id="resumeFilenameHint">
+              Pattern for the saved PDF/HTML (extension added automatically). Tokens:
+              <code>{name}</code>, <code>{first}</code>, <code>{last}</code>,
+              <code>{company}</code>, <code>{title}</code>, <code>{date}</code>.
+              Example: <code id="resumeFilenameExample">{name}_Resume.pdf</code>
+            </p>
             <p class="hint">
               Chrome cannot read the full disk path. Paste the absolute path to your output folder so
               Copy path can produce e.g. D:\Bid\BR-AI\09-01W\{job-folder}\.

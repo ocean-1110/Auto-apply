@@ -4,7 +4,7 @@ import {
   deleteCustomProfile
 } from "./profiles.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
-import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet } from "./sheets.js";
+import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet, getExistingJobLinks, normalizeSheetJobLink } from "./sheets.js";
 import { formatAtsTooltip } from "./ats-score.js";
 import { getPresetForProfile } from "./sheet-presets.js";
 import {
@@ -34,10 +34,14 @@ import {
 import {
   readJobStatusMemory,
   applyRememberedStatus,
+  lookupJobStatus,
+  companyTitleKey,
+  collectAppliedCompanyTitleKeys,
   rememberJobStatus,
   rememberJobStatuses
 } from "./job-status-memory.js";
 import { getQaCount } from "./qa-store.js";
+import { getApplicationLog } from "./application-log.js";
 import { appendApplicationEvent } from "./application-log.js";
 import { getPendingQaCount } from "./pending-qa.js";
 import { setGeneratedDocsForJob, getGeneratedDocsForJob } from "./upload-assets.js";
@@ -89,10 +93,13 @@ const jdLinkEl = document.getElementById("jdLink");
 const jdTextEl = document.getElementById("jdText");
 const outputDirLabelEl = document.getElementById("outputDirLabel");
 const outputDirAbsPathEl = document.getElementById("outputDirAbsPath");
+const resumeFilenamePatternEl = document.getElementById("resumeFilenamePattern");
+const resumeFilenameExampleEl = document.getElementById("resumeFilenameExample");
 const selectOutputDirBtn = document.getElementById("selectOutputDir");
 const aiQaSectionEl = document.getElementById("aiQaSection");
 const copySheetRowBtn = document.getElementById("copySheetRow");
 const scrapePageBtn = document.getElementById("scrapePageBtn");
+const scrapeAndApplyBtn = document.getElementById("scrapeAndApplyBtn");
 const pasteJdBtn = document.getElementById("pasteJd");
 const resumeOnlyToggleEl = document.getElementById("resumeOnlyToggle");
 const atsRewriteToggleEl = document.getElementById("atsRewriteToggle");
@@ -148,6 +155,8 @@ const filterIndeedJobsBtn = document.getElementById("filterIndeedJobs");
 const filterJobrightJobsBtn = document.getElementById("filterJobrightJobs");
 const filterLinkedInJobsBtn = document.getElementById("filterLinkedInJobs");
 const filterOtherJobsBtn = document.getElementById("filterOtherJobs");
+const jobListSearchEl = document.getElementById("jobListSearch");
+const jobStatusFilterBtns = [...document.querySelectorAll(".job-status-filters .chip-btn")];
 const selectAllJobsEl = document.getElementById("selectAllJobs");
 const batchSelectionNoteEl = document.getElementById("batchSelectionNote");
 const batchRemoveBtn = document.getElementById("batchRemoveBtn");
@@ -180,6 +189,8 @@ let importedJobsOrder = [];
 let importedJobsSelectedId = null;
 let importedJobsVersion = 0;
 let importedJobsFilter = "all";
+let importedJobsStatusFilter = "all";
+let importedJobsSearchQuery = "";
 const importedJobsChecked = new Set();
 let capturePollRunning = false;
 let panelPollTimer = null;
@@ -491,6 +502,61 @@ async function persistJobFields() {
     last_jd_link: jdLinkEl.value,
     last_jd_text: jdTextEl.value
   });
+}
+
+const RESUME_FILENAME_PATTERN_KEY = "resume_filename_pattern";
+const DEFAULT_RESUME_FILENAME_PATTERN = "{name}_Resume";
+
+function previewResumeFilename(pattern) {
+  const person = "Steven_Avon";
+  const first = "Steven";
+  const last = "Avon";
+  const company = String(companyNameEl?.value || "").trim() || "Acme";
+  const title = String(jobTitleEl?.value || "").trim() || "Engineer";
+  const date = new Date().toISOString().slice(0, 10);
+  const tokens = {
+    name: person,
+    fullname: "Steven Avon",
+    first,
+    last,
+    company: company.replace(/\s+/g, "_"),
+    title: title.replace(/\s+/g, "_"),
+    role: title.replace(/\s+/g, "_"),
+    date
+  };
+  let out = String(pattern || "").trim() || DEFAULT_RESUME_FILENAME_PATTERN;
+  out = out.replace(/\.(pdf|html)$/i, "");
+  out = out.replace(/\{([a-z_]+)\}/gi, (_, key) => {
+    const value = tokens[String(key || "").toLowerCase()];
+    return value != null ? String(value) : "";
+  });
+  out = out.replace(/\s+/g, "_").replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_");
+  out = out.replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "Resume";
+  return `${out}.pdf`;
+}
+
+function updateResumeFilenameExample() {
+  if (!resumeFilenameExampleEl) return;
+  const pattern = resumeFilenamePatternEl?.value || DEFAULT_RESUME_FILENAME_PATTERN;
+  resumeFilenameExampleEl.textContent = previewResumeFilename(pattern);
+}
+
+async function loadResumeFilenamePattern() {
+  const data = await chrome.storage.local.get(RESUME_FILENAME_PATTERN_KEY);
+  const raw = String(data[RESUME_FILENAME_PATTERN_KEY] || "").trim();
+  if (resumeFilenamePatternEl) {
+    resumeFilenamePatternEl.value = raw || DEFAULT_RESUME_FILENAME_PATTERN;
+  }
+  updateResumeFilenameExample();
+}
+
+async function persistResumeFilenamePattern() {
+  if (!resumeFilenamePatternEl) return;
+  let value = String(resumeFilenamePatternEl.value || "").trim();
+  if (!value) value = DEFAULT_RESUME_FILENAME_PATTERN;
+  resumeFilenamePatternEl.value = value;
+  await chrome.storage.local.set({ [RESUME_FILENAME_PATTERN_KEY]: value });
+  updateResumeFilenameExample();
 }
 
 async function refreshOutputDirLabel() {
@@ -965,7 +1031,65 @@ function setImportedJobsFilter(filter, { persist = true } = {}) {
   renderImportedJobs();
 }
 
+function setImportedJobsStatusFilter(filter, { persist = true } = {}) {
+  const allowed = [
+    "all",
+    "queued",
+    "resume_ready",
+    "ready",
+    "review",
+    "applied",
+    "failed",
+    "blocked",
+    "progress"
+  ];
+  importedJobsStatusFilter = allowed.includes(filter) ? filter : "all";
+  for (const btn of jobStatusFilterBtns) {
+    btn.classList.toggle("is-active", btn.dataset.status === importedJobsStatusFilter);
+  }
+  if (persist) {
+    chrome.storage.local
+      .set({ imported_jobs_status_filter: importedJobsStatusFilter })
+      .catch(() => {});
+  }
+  renderImportedJobs();
+}
+
+function jobHasResumeReady(job) {
+  if (!job) return false;
+  if (job.hasGeneratedResume) return true;
+  if (resumeFolderNameForJob(job)) return true;
+  if (Number(job.atsScore) > 0) return true;
+  if (String(job.resumeFileName || "").trim()) return true;
+  return false;
+}
+
+/** Sidebar status buckets used by the category chips. */
+function importedJobStatusCategory(job) {
+  const s = String(job?.status || "").trim();
+  if (s === "completed") return "applied";
+  if (s === "unavailable") return "blocked";
+  if (s === "failed" || s === "check_failed") return "failed";
+  if (s === "ready_for_review") return "ready";
+  if (s === "needs_review") return "review";
+  if (["opening", "generating", "opening_form", "filling"].includes(s)) return "progress";
+  if (jobHasResumeReady(job)) return "resume_ready";
+  return "queued";
+}
+
+function importedJobMatchesSearch(job) {
+  const q = String(importedJobsSearchQuery || "").trim().toLowerCase();
+  if (!q) return true;
+  const title = String(job?.jobTitle || "").toLowerCase();
+  const company = String(job?.companyName || "").toLowerCase();
+  return title.includes(q) || company.includes(q);
+}
+
 function importedJobMatchesFilter(job) {
+  if (!importedJobMatchesSearch(job)) return false;
+  if (importedJobsStatusFilter !== "all" && importedJobStatusCategory(job) !== importedJobsStatusFilter) {
+    return false;
+  }
   const source = String(job?.source || "").trim().toLowerCase();
   if (importedJobsFilter === "dice") return isDiceSource(source);
   if (importedJobsFilter === "greenhouse") return isGreenhouseSource(source);
@@ -1403,8 +1527,11 @@ function renderImportedJobs() {
   }
 
   if (!visibleCount) {
-    importedJobsListEl.innerHTML =
-      '<p class="import-status" style="margin:0">No pending jobs match this filter.</p>';
+    const hasSearchOrStatus =
+      Boolean(String(importedJobsSearchQuery || "").trim()) || importedJobsStatusFilter !== "all";
+    importedJobsListEl.innerHTML = hasSearchOrStatus
+      ? '<p class="import-status" style="margin:0">No jobs match this search or status filter.</p>'
+      : '<p class="import-status" style="margin:0">No pending jobs match this filter.</p>';
     updateBatchBar();
     return;
   }
@@ -1418,6 +1545,7 @@ async function removeImportedJob(jobId) {
   const job = importedJobsById[jobId];
   if (!job) return;
   const now = Date.now();
+  await rememberJobStatus(job).catch(() => {});
   const byId = { ...importedJobsById };
   delete byId[jobId];
   const order = importedJobsOrder.filter((id) => id !== jobId);
@@ -1650,10 +1778,203 @@ async function checkSelectedJobsAvailability() {
 }
 
 /**
- * Add CSV jobs to the persisted queue. Existing jobs keep their apply/resume
- * status so a later import (or Chrome restart) does not wipe progress, and jobs
- * that were removed from the list earlier come back with their archived status
- * instead of a fresh "imported".
+ * Replace the job queue with a new CSV/sheet import.
+ * The visible list becomes ONLY actionable new roles — skipped / duplicate /
+ * already-applied / already-on-sheet rows are excluded from storage entirely.
+ */
+async function replaceImportedJobsFromCsv(jobs) {
+  const now = Date.now();
+  const stored = await chrome.storage.local.get([
+    "imported_jobs_by_id",
+    "spreadsheet_url",
+    "sheets_web_app_url",
+    "sheets_sheet_name"
+  ]);
+  const previousById =
+    stored.imported_jobs_by_id && typeof stored.imported_jobs_by_id === "object"
+      ? stored.imported_jobs_by_id
+      : importedJobsById || {};
+
+  // Archive whatever is currently queued so re-imports can detect prior outcomes.
+  await rememberJobStatuses(Object.values(previousById)).catch(() => {});
+  const statusMemory = await readJobStatusMemory();
+  const appliedCompanyTitles = collectAppliedCompanyTitleKeys(
+    statusMemory,
+    Object.values(previousById)
+  );
+
+  const sheetLinks = new Set();
+  const addLinkKeys = (url, into) => {
+    const raw = String(url || "").trim();
+    if (!raw) return;
+    for (const key of [
+      normalizeJobLink(raw).toLowerCase(),
+      normalizeSheetJobLink(raw).toLowerCase()
+    ]) {
+      if (key) into.add(key);
+    }
+    try {
+      const u = new URL(normalizeJobLink(raw) || raw);
+      const bare = `${u.hostname}${u.pathname}`.replace(/\/+$/, "").toLowerCase();
+      if (bare) into.add(bare);
+    } catch {
+      /* ignore */
+    }
+  };
+  const linkIsKnown = (url, into) => {
+    const probe = new Set();
+    addLinkKeys(url, probe);
+    for (const key of probe) {
+      if (into.has(key)) return true;
+    }
+    return false;
+  };
+
+  const spreadsheetUrl = String(stored.spreadsheet_url || "").trim();
+  const webAppUrl = String(stored.sheets_web_app_url || "").trim();
+  const sheetName = String(stored.sheets_sheet_name || "").trim();
+  if (spreadsheetUrl && webAppUrl) {
+    try {
+      const links = await getExistingJobLinks({ spreadsheetUrl, webAppUrl, sheetName });
+      for (const link of links || []) addLinkKeys(link, sheetLinks);
+    } catch {
+      /* sheet lookup is best-effort for dedupe */
+    }
+  }
+
+  // Also treat application-log "completed" URLs as already worked.
+  try {
+    const log = await getApplicationLog();
+    for (const event of log || []) {
+      if (String(event?.status || "") !== "completed") continue;
+      addLinkKeys(event.jdLink, sheetLinks);
+      const ct = companyTitleKey({
+        companyName: event.companyName,
+        jobTitle: event.jobTitle
+      });
+      if (ct) appliedCompanyTitles.add(ct);
+    }
+  } catch {
+    /* best-effort */
+  }
+
+  const doneStatuses = new Set(["completed", "unavailable", "already_applied"]);
+  const csvDoneStatusRe =
+    /^(applied|completed|already\s*applied|closed|unavailable|no longer available|filled|expired|rejected|withdrawn)$/i;
+
+  const byId = {};
+  const order = [];
+  const seenInFile = new Set();
+  const seenCompanyTitlesInFile = new Set();
+  const seenLinksInFile = new Set();
+  let imported = 0;
+  let skippedDone = 0;
+  let skippedOnSheet = 0;
+  let skippedCompanyTitle = 0;
+  let skippedCsvStatus = 0;
+  let duplicateIds = 0;
+
+  for (const job of jobs) {
+    const id = String(job.id || "").trim();
+    if (!id) continue;
+    if (seenInFile.has(id)) {
+      duplicateIds += 1;
+      continue;
+    }
+    seenInFile.add(id);
+
+    const linkRaw = job.jdLink || job.url || "";
+    const ctKey = companyTitleKey(job);
+    const csvStatus = String(job.csvStatus || job.applicationStatus || "").trim();
+
+    // Sheet/CSV already marked applied or closed — never put in the work queue.
+    if (csvStatus && csvDoneStatusRe.test(csvStatus)) {
+      skippedCsvStatus += 1;
+      if (ctKey) appliedCompanyTitles.add(ctKey);
+      addLinkKeys(linkRaw, sheetLinks);
+      continue;
+    }
+
+    const remembered = lookupJobStatus(statusMemory, job);
+    const rememberedStatus = String(remembered?.status || "").trim();
+    if (doneStatuses.has(rememberedStatus)) {
+      skippedDone += 1;
+      if (ctKey) appliedCompanyTitles.add(ctKey);
+      addLinkKeys(linkRaw, sheetLinks);
+      continue;
+    }
+    if (linkRaw && linkIsKnown(linkRaw, sheetLinks)) {
+      skippedOnSheet += 1;
+      if (ctKey) appliedCompanyTitles.add(ctKey);
+      continue;
+    }
+    // Same company + same title as an already-applied role → skip (other titles OK).
+    if (ctKey && appliedCompanyTitles.has(ctKey)) {
+      skippedCompanyTitle += 1;
+      continue;
+    }
+    if (ctKey && seenCompanyTitlesInFile.has(ctKey)) {
+      skippedCompanyTitle += 1;
+      continue;
+    }
+    const linkKey = normalizeJobLink(linkRaw).toLowerCase();
+    if (linkKey && seenLinksInFile.has(linkKey)) {
+      duplicateIds += 1;
+      continue;
+    }
+
+    const { csvStatus: _csvStatus, applicationStatus: _appStatus, ...jobFields } = job;
+    byId[id] = {
+      ...jobFields,
+      status: "imported",
+      attempts: 0,
+      statusDetail: "",
+      createdAt: now,
+      updatedAt: now
+    };
+    order.push(id);
+    if (ctKey) seenCompanyTitlesInFile.add(ctKey);
+    if (linkKey) seenLinksInFile.add(linkKey);
+    imported += 1;
+  }
+
+  // Work-queue only: never keep prior roles in storage after a sheet/CSV import.
+  const checked = order.slice();
+  await chrome.storage.local.set({
+    imported_jobs_by_id: byId,
+    imported_jobs_order: order,
+    imported_jobs_selected_id: null,
+    imported_jobs_checked_ids: checked,
+    imported_jobs_version: now,
+    imported_jobs_status_filter: "all",
+    imported_jobs_search: ""
+  });
+
+  importedJobsById = byId;
+  importedJobsOrder = order;
+  importedJobsSelectedId = null;
+  importedJobsSearchQuery = "";
+  if (jobListSearchEl) jobListSearchEl.value = "";
+  importedJobsChecked.clear();
+  for (const id of checked) importedJobsChecked.add(id);
+  importedJobsVersion = now;
+  setImportedJobsStatusFilter("all", { persist: false });
+  renderImportedJobs();
+
+  return {
+    imported,
+    skippedDone,
+    skippedOnSheet,
+    skippedCompanyTitle,
+    skippedCsvStatus,
+    duplicateIds,
+    replaced: Object.keys(previousById).length
+  };
+}
+
+/**
+ * @deprecated Prefer replaceImportedJobsFromCsv for CSV Import.
+ * Kept for scrape/capture paths that intentionally merge into the queue.
  */
 async function mergeImportedJobs(jobs) {
   const now = Date.now();
@@ -1717,7 +2038,6 @@ async function mergeImportedJobs(jobs) {
     ? stored.imported_jobs_checked_ids.map(String)
     : [...importedJobsChecked];
   const checkedSet = new Set(checked);
-  // Don't re-check jobs whose archived outcome says there is nothing left to do.
   const doneStatuses = new Set(["completed", "unavailable"]);
   for (const id of seenInFile) {
     if (byId[id] && !doneStatuses.has(String(byId[id].status || ""))) checkedSet.add(id);
@@ -2075,12 +2395,15 @@ async function loadSettings() {
     "qa_learn_enabled",
     "ai_form_plan_enabled",
     "imported_jobs_filter",
+    "imported_jobs_status_filter",
+    "imported_jobs_search",
     "scraped_job_meta",
     "generate_resume_only",
     "preview_mode_enabled",
     "ats_rewrite_enabled",
     "ui_panel_mode",
-    "last_ats_report"
+    "last_ats_report",
+    RESUME_FILENAME_PATTERN_KEY
   ]);
   scrapedJobMeta = data.scraped_job_meta || null;
 
@@ -2090,6 +2413,11 @@ async function loadSettings() {
   companyNameEl.value = data.last_company_name || "";
   jdLinkEl.value = data.last_jd_link || "";
   jdTextEl.value = data.last_jd_text || "";
+  if (resumeFilenamePatternEl) {
+    const pattern = String(data[RESUME_FILENAME_PATTERN_KEY] || "").trim();
+    resumeFilenamePatternEl.value = pattern || DEFAULT_RESUME_FILENAME_PATTERN;
+    updateResumeFilenameExample();
+  }
   await applySheetPresetForProfile(profileSelectEl.value);
   await refreshAtsBadge();
 
@@ -2114,6 +2442,9 @@ async function loadSettings() {
   }
   updateGenerateButtonLabel();
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
+  setImportedJobsStatusFilter(data.imported_jobs_status_filter || "all", { persist: false });
+  importedJobsSearchQuery = String(data.imported_jobs_search || "");
+  if (jobListSearchEl) jobListSearchEl.value = importedJobsSearchQuery;
   refreshQaBank().catch(() => {});
   refreshCaptureStatus().catch(() => {});
   refreshAutofillButtonLabel().catch(() => {});
@@ -2257,10 +2588,17 @@ async function upsertScrapedJobIntoList(d, { site = "", tabUrl = "" } = {}) {
   return id;
 }
 
-async function scrapeCurrentJobPage() {
+/**
+ * Scrape the open job tab.
+ * @param {{ continueApply?: boolean }} [opts]
+ *   continueApply false (default): add job details to the imported list only.
+ *   continueApply true: generate resume then Auto Apply (Alt+Shift+S / Scrape & Apply).
+ */
+async function scrapeCurrentJobPage({ continueApply = false } = {}) {
   setStatus("Scraping the open job page...", "running");
   setBusy(true);
   if (scrapePageBtn) scrapePageBtn.disabled = true;
+  if (scrapeAndApplyBtn) scrapeAndApplyBtn.disabled = true;
   try {
     const siteId = "auto";
     const res = await chrome.runtime.sendMessage({ type: "scrape_current_page", siteId });
@@ -2290,67 +2628,50 @@ async function scrapeCurrentJobPage() {
       site: scrapedSite,
       tabUrl: res.tabUrl || ""
     });
+    setSidebarMode("imported");
 
-    let scrapeHost = "";
-    try {
-      scrapeHost = new URL(String(res.tabUrl || d.jdLink || "")).hostname;
-    } catch {
-      scrapeHost = "";
-    }
-    const onDice = isDiceSource(scrapedSite) || /(^|\.)dice\.com$/i.test(scrapeHost);
-
-    // Non-Dice: add to the job list only so you can batch-build resumes later.
-    // Dice: keep scrape → generate → Apply (handles the full Easy Apply flow).
-    if (!onDice) {
-      const siteLabel = scrapedSite ? ` (${scrapedSite})` : "";
-      if (!jobId) {
-        setStatus(
-          `Scraped${siteLabel}: ${d.jobTitle || "job"}, but there is no job URL to add to the list.`,
-          "error"
-        );
-        return;
-      }
-      if (!d.companyName) {
-        setStatus(
-          `Added to job list${siteLabel}: ${d.jobTitle || "job"} — company missing; fill it before batch build.`,
-          "error"
-        );
-        companyNameEl.focus();
-        return;
-      }
+    const siteLabel = scrapedSite ? ` (${scrapedSite})` : "";
+    if (!jobId) {
       setStatus(
-        `Added to job list${siteLabel}: ${d.jobTitle || "job"} @ ${d.companyName}. Select it for batch resume build when ready.`
+        `Scraped${siteLabel}: ${d.jobTitle || "job"}, but there is no job URL to add to the list.`,
+        "error"
       );
       return;
     }
-
     if (!d.companyName) {
       setStatus(
-        `Scraped ${d.jobTitle || "job"}, but company name was missing — enter the company before generating.`,
+        `Added to job list${siteLabel}: ${d.jobTitle || "job"} — company missing; fill it before batch build.`,
         "error"
       );
       companyNameEl.focus();
       return;
     }
 
-    const site = scrapedSite ? ` (${scrapedSite})` : "";
-    setStatus(`Scraped${site}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`, "running");
+    // Default: queue only — batch resume build / Apply later from the job list.
+    if (!continueApply) {
+      setStatus(
+        `Added to job list${siteLabel}: ${d.jobTitle || "job"} @ ${d.companyName}. Use Batch Resumes when ready.`
+      );
+      return;
+    }
+
+    setStatus(
+      `Scraped${siteLabel}: ${d.jobTitle || "job"} @ ${d.companyName}. Generating resume…`,
+      "running"
+    );
 
     const gen = await startGenerationAndWait();
     if (!gen.ok) return;
 
     setStatus("Resume saved. Applying (same as the job-card Apply button)…", "running");
     setBusy(true);
-    if (jobId) {
-      await applyImportedJob(jobId);
-    } else {
-      setStatus("Resume saved, but this scrape has no job URL — use Apply on the job card.", "error");
-    }
+    await applyImportedJob(jobId);
   } catch (err) {
     setStatus(`Scrape failed: ${String(err.message || err)}`, "error");
   } finally {
     setBusy(false);
     if (scrapePageBtn) scrapePageBtn.disabled = false;
+    if (scrapeAndApplyBtn) scrapeAndApplyBtn.disabled = false;
   }
 }
 
@@ -2421,7 +2742,7 @@ async function copySheetRow() {
   try {
     await navigator.clipboard.writeText(tsv);
     setStatus(
-      "Sheet row copied (Created Date → Apply Status). Click column A of an empty row in Sheets, then paste (Ctrl+V)."
+      "Sheet row copied (No → Status). Click column A of an empty row in Sheets, then paste (Ctrl+V)."
     );
   } catch {
     setStatus("Clipboard write failed. Try again after focusing the popup.");
@@ -2507,6 +2828,8 @@ function setBusy(busy) {
   if (generateResumeBtn) generateResumeBtn.disabled = busy;
   if (autofillBtn) autofillBtn.disabled = busy;
   if (generateAiAnswerBtn) generateAiAnswerBtn.disabled = busy;
+  if (scrapePageBtn) scrapePageBtn.disabled = busy;
+  if (scrapeAndApplyBtn) scrapeAndApplyBtn.disabled = busy;
   if (batchGenerateBtn && busy) batchGenerateBtn.disabled = true;
   if (batchApplyBtn && busy) batchApplyBtn.disabled = true;
   if (batchRemoveBtn && busy) batchRemoveBtn.disabled = true;
@@ -2762,11 +3085,13 @@ async function runAutofillOnCurrentPage({ quiet = false } = {}) {
   setBusy(true);
   try {
     await chrome.storage.local.set({ selected_profile_id: profileId });
+    const selectedImportedId = String(importedJobsSelectedId || "").trim();
     const res = await chrome.runtime.sendMessage({
       type: "autofill_current_page",
       profileId,
       clickAction: true,
-      preferredAction
+      preferredAction,
+      importedJobId: selectedImportedId
     });
     if (!res?.ok) {
       throw new Error(res?.error || "Apply failed.");
@@ -2973,10 +3298,30 @@ outputDirAbsPathEl?.addEventListener("change", () => {
 outputDirAbsPathEl?.addEventListener("blur", () => {
   persistOutputAbsolutePathFromInput().catch(() => {});
 });
+resumeFilenamePatternEl?.addEventListener("input", () => {
+  updateResumeFilenameExample();
+});
+resumeFilenamePatternEl?.addEventListener("change", () => {
+  persistResumeFilenamePattern()
+    .then(() => setStatus(`Resume filename pattern saved.`))
+    .catch((err) => setStatus(String(err.message || err)));
+});
+resumeFilenamePatternEl?.addEventListener("blur", () => {
+  persistResumeFilenamePattern().catch(() => {});
+});
+jobTitleEl?.addEventListener("input", () => updateResumeFilenameExample());
+companyNameEl?.addEventListener("input", () => updateResumeFilenameExample());
 
 pasteJdBtn?.addEventListener("click", pasteJdFromClipboard);
 scrapePageBtn?.addEventListener("click", () => {
-  scrapeCurrentJobPage().catch((err) => setStatus(String(err.message || err)));
+  scrapeCurrentJobPage({ continueApply: false }).catch((err) =>
+    setStatus(String(err.message || err))
+  );
+});
+scrapeAndApplyBtn?.addEventListener("click", () => {
+  scrapeCurrentJobPage({ continueApply: true }).catch((err) =>
+    setStatus(String(err.message || err))
+  );
 });
 copySheetRowBtn.addEventListener("click", copySheetRow);
 generateResumeBtn.addEventListener("click", generateResumeAndCoverLetter);
@@ -3046,6 +3391,20 @@ filterIndeedJobsBtn?.addEventListener("click", () => setImportedJobsFilter("inde
 filterJobrightJobsBtn?.addEventListener("click", () => setImportedJobsFilter("jobright"));
 filterLinkedInJobsBtn?.addEventListener("click", () => setImportedJobsFilter("linkedin"));
 filterOtherJobsBtn?.addEventListener("click", () => setImportedJobsFilter("others"));
+for (const btn of jobStatusFilterBtns) {
+  btn.addEventListener("click", () => setImportedJobsStatusFilter(btn.dataset.status || "all"));
+}
+let jobListSearchTimer = null;
+jobListSearchEl?.addEventListener("input", () => {
+  clearTimeout(jobListSearchTimer);
+  jobListSearchTimer = setTimeout(() => {
+    importedJobsSearchQuery = String(jobListSearchEl.value || "");
+    chrome.storage.local
+      .set({ imported_jobs_search: importedJobsSearchQuery })
+      .catch(() => {});
+    renderImportedJobs();
+  }, 180);
+});
 selectAllJobsEl?.addEventListener("change", () => {
   const visible = visibleImportedJobIds();
   if (selectAllJobsEl.checked) {
@@ -3134,12 +3493,38 @@ csvFileInputEl?.addEventListener("change", async () => {
       return;
     }
 
-    const mergeRes = await mergeImportedJobs(parsed.jobs);
+    const mergeRes = await replaceImportedJobsFromCsv(parsed.jobs);
 
+    const excluded =
+      (mergeRes.skippedDone || 0) +
+      (mergeRes.skippedOnSheet || 0) +
+      (mergeRes.skippedCompanyTitle || 0) +
+      (mergeRes.skippedCsvStatus || 0) +
+      (mergeRes.duplicateIds || 0) +
+      (parsed.duplicateUrls || 0) +
+      (parsed.skipped || 0);
+    const skipParts = [];
+    if (mergeRes.skippedDone) skipParts.push(`${mergeRes.skippedDone} already applied/closed`);
+    if (mergeRes.skippedCsvStatus) {
+      skipParts.push(`${mergeRes.skippedCsvStatus} marked applied/closed in file`);
+    }
+    if (mergeRes.skippedOnSheet) skipParts.push(`${mergeRes.skippedOnSheet} already on sheet`);
+    if (mergeRes.skippedCompanyTitle) {
+      skipParts.push(`${mergeRes.skippedCompanyTitle} same company+title`);
+    }
+    if (mergeRes.duplicateIds || parsed.duplicateUrls) {
+      skipParts.push(
+        `${(parsed.duplicateUrls || 0) + (mergeRes.duplicateIds || 0)} duplicate(s) in file`
+      );
+    }
+    if (parsed.skipped) skipParts.push(`${parsed.skipped} invalid row(s)`);
     const summary =
-      `Added ${mergeRes.imported} new job(s) from ${parsed.format || "CSV"} export. ` +
-      `${mergeRes.alreadyQueued} already in the list (status kept). ` +
-      `Ignored ${parsed.skipped} invalid row(s), ${(parsed.duplicateUrls || 0) + mergeRes.duplicateIds} duplicate(s).`;
+      `${mergeRes.imported} job(s) to work on` +
+      (mergeRes.replaced ? ` (replaced previous list of ${mergeRes.replaced})` : "") +
+      `.` +
+      (excluded
+        ? ` Excluded from list: ${skipParts.join(", ") || `${excluded} row(s)`}.`
+        : "");
     setStatus(`CSV import complete. ${summary}`);
     if (importStatusEl) importStatusEl.textContent = summary;
 
@@ -3324,7 +3709,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       try {
         if (cmd === "scrape_and_apply") {
-          await scrapeCurrentJobPage();
+          await scrapeCurrentJobPage({ continueApply: true });
         } else if (cmd === "generate_docs") {
           await generateResumeAndCoverLetter();
         } else if (cmd === "easy_apply") {

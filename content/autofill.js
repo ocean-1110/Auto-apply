@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-14.submit-click-only.1";
+  const SCRIPT_BUILD = "2026-09-19.stop-after-fill.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -4710,6 +4710,49 @@
     }
   }
 
+  function clearActionHighlight() {
+    document.getElementById("resume-bot-action-highlight")?.remove();
+  }
+
+  /** Outline the control the user should click next (Apply / Next / Submit). */
+  function highlightActionElement(el) {
+    clearActionHighlight();
+    if (!el || !el.getBoundingClientRect) return;
+    scrollElIntoView(el);
+    const box = document.createElement("div");
+    box.id = "resume-bot-action-highlight";
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      if (!r.width && !r.height) {
+        box.remove();
+        return;
+      }
+      box.style.cssText = [
+        "position:fixed",
+        `top:${Math.max(0, r.top - 4)}px`,
+        `left:${Math.max(0, r.left - 4)}px`,
+        `width:${r.width + 8}px`,
+        `height:${r.height + 8}px`,
+        "border:3px solid #e11d48",
+        "border-radius:8px",
+        "box-shadow:0 0 0 4px rgba(225,29,72,0.25)",
+        "pointer-events:none",
+        "z-index:2147483646",
+        "transition:top 0.15s,left 0.15s,width 0.15s,height 0.15s"
+      ].join(";");
+    };
+    place();
+    document.documentElement.appendChild(box);
+    const onMove = () => place();
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    setTimeout(() => {
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+      box.remove();
+    }, 20000);
+  }
+
   function getDiceWizardRoot() {
     if (!isDiceApplicationPath()) return null;
     const selectors = [
@@ -7864,9 +7907,9 @@
     if (message?.type === "focus_submit_button") {
       try {
         const action = findActionButton(null, { includeDisabledSubmit: true });
-        const el = action?.type === "submit" ? action.el : null;
+        const el = action?.el || null;
         if (el) {
-          scrollElIntoView(el);
+          highlightActionElement(el);
           try {
             el.focus?.({ preventScroll: true });
           } catch {
@@ -7883,6 +7926,31 @@
           });
         } else {
           sendResponse({ ok: true, focused: false, text: "" });
+        }
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message || err) });
+      }
+      return true;
+    }
+    if (message?.type === "highlight_apply_action") {
+      try {
+        const probe = probeApplicationForm();
+        let action = null;
+        if (probe.isApplicationForm) {
+          action = findActionButton(null, { includeDisabledSubmit: true });
+        } else {
+          action = findEasyApplyEntryButton();
+        }
+        if (action?.el) {
+          highlightActionElement(action.el);
+          sendResponse({
+            ok: true,
+            highlighted: true,
+            type: action.type || "",
+            text: action.text || elActionText(action.el) || ""
+          });
+        } else {
+          sendResponse({ ok: true, highlighted: false, type: "", text: "" });
         }
       } catch (err) {
         sendResponse({ ok: false, error: String(err?.message || err) });

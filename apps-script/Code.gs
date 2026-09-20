@@ -9,26 +9,20 @@
  *    - Execute as: Me
  *    - Who has access: Anyone
  * 5. Copy the Web App URL into the extension
- * 6. In the extension, paste the spreadsheet URL that includes that tab's gid
- *    (open the tab first, then copy the browser URL), or set Sheet tab name
+ * 6. In the spreadsheet URL include that tab's gid, or set Sheet tab name
  *
- * After generation, the extension appends:
- *   spreadsheetId, sheetGid, sheetName, jobLink, jobTitle, companyName,
- *   applicationDate, salary (or salaryMin/salaryMax), applicationStatus
- *
- * Row order matches sheet headers:
- *   A No | B Created Date | C Title | D Company | E Link | F Salary | G JD | H Apply Status
+ * Column order (A–G):
+ *   A No | B Application Date | C Title | D Company | E URL | F Salary | G Status
  *
  * - Salary is one cell, e.g. "$120000 - $150000"
- * - JD (column G) is left blank on purpose
- * - Apply Status (column H) is written when track-status is enabled
- * - Duplicate checks and status updates match on Link (column E)
- *
- * Rows are written on the selected tab, in the first empty cell of column A.
+ * - Status is written when track-status is enabled
+ * - Duplicate checks and status updates match on URL (column E)
+ * - New rows always append below the last used row (never rewrite row 1)
  */
-var API_VERSION = "2026-09-14";
+var API_VERSION = "2026-09-15";
 var LINK_COLUMN = 5;
-var STATUS_COLUMN = 8;
+var STATUS_COLUMN = 7;
+var DATA_COLUMNS = 7;
 
 function jsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(
@@ -72,12 +66,18 @@ function getTargetSheet(spreadsheet, sheetGid, sheetName) {
   return spreadsheet.getSheets()[0];
 }
 
+/**
+ * Sheet.getRange(row, column, numRows, numColumns) — 3rd/4th args are sizes.
+ */
 function getColumnValues(sheet, columnIndex) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 1) return [];
-  return sheet.getRange(1, columnIndex, lastRow, 1).getDisplayValues().map(function (row) {
-    return String(row[0] || "").trim();
-  });
+  return sheet
+    .getRange(1, columnIndex, lastRow, 1)
+    .getDisplayValues()
+    .map(function (row) {
+      return String(row[0] || "").trim();
+    });
 }
 
 function getColumnAValues(sheet) {
@@ -93,20 +93,26 @@ function getJobLinks(sheet) {
   });
 }
 
-/** First empty row in column A — matches pasting under the last numbered row. */
-function findNextEmptyRowInColumnA(sheet) {
-  var values = getColumnAValues(sheet);
-  for (var i = values.length - 1; i >= 0; i -= 1) {
-    if (values[i] !== "") return i + 2; // 1-based next row
-  }
-  return 1;
+/**
+ * Always append under the lowest used row on the sheet.
+ * Do not scan for "first empty A" — blank No cells would rewrite row 1.
+ */
+function findAppendRow(sheet) {
+  var lastRow = sheet.getLastRow();
+  return lastRow < 1 ? 1 : lastRow + 1;
 }
 
+/**
+ * Next serial for column A. Only accepts plain integers up to 6 digits so
+ * dates like 9/15/2026 never become 9152026.
+ */
 function nextSerialNo(sheet) {
   var values = getColumnAValues(sheet);
   var max = 0;
   for (var i = 0; i < values.length; i += 1) {
-    var n = parseInt(String(values[i]).replace(/[^\d]/g, ""), 10);
+    var raw = String(values[i] || "").trim();
+    if (!/^\d{1,6}$/.test(raw)) continue;
+    var n = parseInt(raw, 10);
     if (!isNaN(n) && n > max) max = n;
   }
   return max + 1;
@@ -160,7 +166,7 @@ function resolveSalary_(data) {
 }
 
 function appendJobRow(sheet, data) {
-  var row = findNextEmptyRowInColumnA(sheet);
+  var row = findAppendRow(sheet);
   var status = String(data.applicationStatus || "").trim();
   var cells = [
     nextSerialNo(sheet),
@@ -169,11 +175,12 @@ function appendJobRow(sheet, data) {
     data.companyName || "",
     data.jobLink || "",
     resolveSalary_(data),
-    "", // JD — intentionally blank
     status
   ];
-  // Sheet.getRange(row, column, numRows, numColumns) — 3rd/4th args are sizes, not lastRow/lastCol.
-  sheet.getRange(row, 1, 1, STATUS_COLUMN).setValues([cells]);
+  // Sheet.getRange(row, column, numRows, numColumns)
+  sheet.getRange(row, 1, 1, DATA_COLUMNS).setValues([cells]);
+  // Keep No as plain text/number, not a huge coerced value.
+  sheet.getRange(row, 1).setNumberFormat("0");
   return {
     ok: true,
     apiVersion: API_VERSION,

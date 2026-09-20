@@ -21,6 +21,32 @@
               <option value="">All profiles</option>
             </select>
           </label>
+          <label class="filter">
+            <span>Apply date</span>
+            <select id="dateFilter">
+              <option value="all">All time</option>
+              <option value="today">Today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d" selected>Last 30 days</option>
+            </select>
+          </label>
+          <label class="filter">
+            <span>Category</span>
+            <select id="categoryFilter">
+              <option value="all">All statuses</option>
+              <option value="applied">Applied</option>
+              <option value="ready">Ready to submit</option>
+              <option value="review">Needs review / skipped</option>
+              <option value="progress">In progress</option>
+              <option value="queued">Queued</option>
+              <option value="failed">Failed</option>
+              <option value="blocked">Closed / blocked</option>
+            </select>
+          </label>
+          <label class="filter filter-search">
+            <span>Search</span>
+            <input type="search" id="searchFilter" placeholder="Title or company…" autocomplete="off" />
+          </label>
           <button type="button" id="refreshBtn" class="ghost">Refresh</button>
         </div>
       </header>
@@ -61,6 +87,7 @@
                 <th>Profile</th>
                 <th>Source</th>
                 <th>Status</th>
+                <th>Applied</th>
                 <th>Updated</th>
               </tr>
             </thead>

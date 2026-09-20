@@ -42,6 +42,15 @@ function normalizeText(value) {
     .replace(/\s+/g, " ");
 }
 
+/** Stable company + title key for duplicate detection across URLs/sources. */
+export function companyTitleKey(job) {
+  if (!job || typeof job !== "object") return "";
+  const company = normalizeText(job.companyName);
+  const title = normalizeText(job.jobTitle);
+  if (!company || !title) return "";
+  return `${company}|${title}`;
+}
+
 /**
  * All keys a job may be filed under, most specific first.
  * The link is the stable identity across sources; the id and company+title are
@@ -54,9 +63,8 @@ export function jobStatusKeys(job) {
   if (link) keys.push(`url:${link}`);
   const id = String(job.id || "").trim();
   if (id) keys.push(`id:${id}`);
-  const company = normalizeText(job.companyName);
-  const title = normalizeText(job.jobTitle);
-  if (company && title) keys.push(`ct:${company}|${title}`);
+  const ct = companyTitleKey(job);
+  if (ct) keys.push(`ct:${ct}`);
   return keys;
 }
 
@@ -158,6 +166,26 @@ export function lookupJobStatus(memory, job) {
     if (hit && typeof hit === "object" && hit.status) return hit;
   }
   return null;
+}
+
+const APPLIED_STATUSES = new Set(["completed", "unavailable", "already_applied"]);
+
+/**
+ * Company|title keys for roles already applied / closed.
+ * Same company with a different title is allowed; same company+title is a duplicate.
+ */
+export function collectAppliedCompanyTitleKeys(memory = {}, extraJobs = []) {
+  const keys = new Set();
+  const add = (job) => {
+    if (!job || typeof job !== "object") return;
+    const status = String(job.status || "").trim();
+    if (!APPLIED_STATUSES.has(status)) return;
+    const ct = companyTitleKey(job);
+    if (ct) keys.add(ct);
+  };
+  for (const rec of Object.values(memory || {})) add(rec);
+  for (const job of Array.isArray(extraJobs) ? extraJobs : []) add(job);
+  return keys;
 }
 
 /**

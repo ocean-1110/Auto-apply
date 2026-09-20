@@ -164,7 +164,8 @@ export function buildDashboardStats({ jobs = [], profiles = [], log = [] } = {})
     if (appliedAt >= dayStart && row.group === "applied") appliedToday += 1;
   }
 
-  const recent = [...rows].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 40);
+  const sortedRows = [...rows].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const recent = sortedRows.slice(0, 40);
 
   return {
     totals,
@@ -174,6 +175,7 @@ export function buildDashboardStats({ jobs = [], profiles = [], log = [] } = {})
     appliedToday,
     byProfile: [...byProfile.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label)),
     bySource,
+    rows: sortedRows,
     recent,
     generatedAt: now
   };

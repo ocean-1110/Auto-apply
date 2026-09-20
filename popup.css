@@ -844,6 +844,40 @@ textarea:focus {
   font-size: 12px;
 }
 
+.job-list-tools {
+  display: grid;
+  gap: 8px;
+}
+
+.job-list-search {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line, #d8e0ef);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.job-list-search:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent, #4f46e5) 35%, transparent);
+  outline-offset: 1px;
+}
+
+.job-status-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.job-status-filters .chip-btn {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
 .jobs-batch-bar {
   display: flex;
   flex-wrap: wrap;

@@ -93,6 +93,26 @@ h1 {
   color: var(--muted);
 }
 
+.filter-search input {
+  min-width: 180px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.filter select {
+  height: 38px;
+  min-width: 140px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+}
+
 select,
 button {
   font: inherit;
