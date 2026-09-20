@@ -446,8 +446,10 @@
               Example: <code id="resumeFilenameExample">{name}_Resume.pdf</code>
             </p>
             <p class="hint">
-              Chrome cannot read the full disk path. Paste the absolute path to your output folder so
-              Copy path can produce e.g. D:\Bid\BR-AI\09-01W\{job-folder}\.
+              Chrome cannot read the full disk path. Paste the absolute path to your output folder
+              (File Explorer → click the address bar → copy, e.g. D:\Bid\BR-AI\09-01W). Copy path then
+              yields D:\Bid\BR-AI\09-01W\{job-folder} for Explorer. Without Absolute path, Copy path
+              is disabled — relative names like 09-01W\job-folder are not valid Windows locations.
               Folder access can reset while a long generate runs in the background — click Unlock once
               (choose Allow on every visit if Chrome offers it) so saves do not stall.
             </p>

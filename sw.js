@@ -2889,7 +2889,7 @@ async function runAutofillStep(
     const ea = await startMultiStepApplyOnTab(profileId, tabId, {
       maxSteps: 14,
       uploadDocs: docs,
-      closeOnSuccess: false,
+      closeOnSuccess: isAutoSubmitAllowedSite(site),
       preferNewTab: site === "dice" || site === "jobgether"
     });
     if (!ea.ok && ea.error) {
@@ -3766,27 +3766,53 @@ async function isDiceBrowserTab(tabId) {
   return Boolean(tab?.id && isDiceTabUrl(tab.url || tab.pendingUrl || ""));
 }
 
+async function dismissDiceSuccessWizardOnTab(tabId) {
+  if (tabId == null || !(await isDiceBrowserTab(tabId))) return false;
+  try {
+    await ensureAutofillScript(tabId);
+    const res = await sendMessageToTab(
+      tabId,
+      { type: "dismiss_dice_success_wizard" },
+      { attempts: 1 }
+    );
+    return Boolean(res?.dismissed);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * After a confirmed Dice submit: close only success / apply-wizard tab(s).
- * Never closes the original job-detail tab the user started from.
+ * Keeps the original job-detail tab when Apply opened the wizard in a new tab.
+ * If Apply navigated the same tab into the wizard/success page, that tab is closed.
  */
 async function closeApplyFlowTabs({
   currentTabId = null,
   originTabId = null,
   delayMs = 1000
 } = {}) {
+  await dismissDiceSuccessWizardOnTab(currentTabId);
+  if (originTabId != null && originTabId !== currentTabId) {
+    await dismissDiceSuccessWizardOnTab(originTabId);
+  }
   await closeAllDiceSuccessTabs({ delayMs });
 
-  // Extra close for the tab we were on if it is still a success or apply wizard
-  // tab (and not the origin job listing / job-detail page).
-  if (currentTabId == null || currentTabId === originTabId) return;
-  if (!(await isDiceBrowserTab(currentTabId))) return;
-  const live = await chrome.tabs.get(currentTabId).catch(() => null);
-  if (!live?.id) return;
-  const href = live.url || live.pendingUrl || "";
-  if (applicationSuccessFromUrl(href) || isDiceApplicationUrl(href)) {
-    await closeTabQuietly(currentTabId);
-  }
+  const closeIfWizardOrSuccess = async (tabId) => {
+    if (tabId == null) return;
+    if (!(await isDiceBrowserTab(tabId))) return;
+    const live = await chrome.tabs.get(tabId).catch(() => null);
+    if (!live?.id) return;
+    const href = live.url || live.pendingUrl || "";
+    const success = Boolean(applicationSuccessFromUrl(href));
+    const wizard = isDiceApplicationUrl(href);
+    if (!success && !wizard) return;
+    await closeTabQuietly(tabId);
+  };
+
+  // Always close the tab we submitted on when it is still wizard/success.
+  await closeIfWizardOrSuccess(currentTabId);
+  // Same-tab Apply: origin === current and already handled above.
+  // New-tab Apply: leave origin job-detail alone (not wizard/success).
 }
 
 /**
@@ -3897,13 +3923,13 @@ async function clickSubmitOnTab(tabId, { frameId, clickLabel = "Submit", settleM
   return clickRes;
 }
 
-async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false, gateway = false } = {}) {
+async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, { preferNewTab = false, gateway = false, noReactionMs = APPLY_NO_REACTION_MS } = {}) {
   const start = Date.now();
   const knownTabIds = new Set((await chrome.tabs.query({})).map((t) => t.id));
   // A click that worked shows *some* reaction fast: a new tab, a navigation, or a
   // loading spinner. If none of that has happened within the no-reaction deadline,
   // the click did nothing — give up now instead of sitting on the full timeout.
-  const noReactionDeadline = start + APPLY_NO_REACTION_MS;
+  const noReactionDeadline = start + Math.max(800, Number(noReactionMs) || APPLY_NO_REACTION_MS);
 
   while (Date.now() - start < timeoutMs) {
     await sleepMs(400);
@@ -4497,9 +4523,9 @@ async function startMultiStepApplyOnTab(
   let stepBudget = stepBudgetInit;
   const useNewTab = preferNewTab || initialSite === "dice" || isGatewaySite(initialSite);
   const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
-  // Dice only: close the success wizard tab after Submit. Keep the job page open.
-  // Other sites never close the current tab.
-  const mayCloseTabs = Boolean(closeOnSuccess && autoClickSubmit);
+  // Dice always closes the success wizard after Submit. Keep the job page open
+  // when Apply used a new tab. Other sites never close tabs.
+  const mayCloseTabs = Boolean(autoClickSubmit && (closeOnSuccess || initialSite === "dice"));
   // Resolve the PDFs ONCE, against the job page we start on, and reuse them for
   // every step. Later steps land on an ATS URL that no longer matches the job
   // posting, so re-resolving mid-run could fall back to another job's files.
@@ -4528,6 +4554,7 @@ async function startMultiStepApplyOnTab(
   let greenhouseSubmitAt = 0;
   let didClickSubmit = false;
   let lookedForEntry = false;
+  let diceEntryAttempts = 0;
   let rebudgetedForLiveSite = false;
   // Buttons the AI already picked this run, so a dead end is never clicked twice.
   const aiButtonTried = new Set();
@@ -4871,10 +4898,17 @@ async function startMultiStepApplyOnTab(
         return summary;
       }
 
-      const advanced = await waitForApplyAdvance(currentTabId, prevSig, prevUrl, 10000, {
-        preferNewTab: useNewTab,
-        gateway: isGatewaySite(liveSite)
-      });
+      const advanced = await waitForApplyAdvance(
+        currentTabId,
+        prevSig,
+        prevUrl,
+        site === "dice" ? 16000 : 10000,
+        {
+          preferNewTab: useNewTab,
+          gateway: isGatewaySite(liveSite),
+          noReactionMs: site === "dice" ? 5500 : APPLY_NO_REACTION_MS
+        }
+      );
       currentTabId = advanced.tabId;
       summary.tabId = currentTabId;
       summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
@@ -4886,6 +4920,46 @@ async function startMultiStepApplyOnTab(
         summary.detail =
           "Landed on Dice Profile instead of the application. The extension will only click the teal Apply button in the job detail panel — try Apply again.";
         return summary;
+      }
+
+      // Dice: Apply click sometimes does nothing — retry, then open the wizard URL directly.
+      if (!advanced.advanced && site === "dice") {
+        diceEntryAttempts += 1;
+        const wizardUrl = (probe.applyUrls || []).find(
+          (u) => /\/job-applications\//i.test(u) && isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
+        );
+        if (diceEntryAttempts < 3) {
+          await setStatus(
+            `Auto Apply: Dice Apply did not open yet — retrying (${diceEntryAttempts}/3)...`
+          );
+          await sleepMs(700);
+          summary.steps = step + 1;
+          continue;
+        }
+        if (wizardUrl) {
+          await setStatus("Auto Apply: opening Dice application wizard directly...");
+          if (useNewTab) {
+            const newId = await openApplyUrlInNewTab(wizardUrl, currentTabId);
+            if (newId) {
+              currentTabId = newId;
+              summary.tabId = currentTabId;
+              summary.tabUrl = wizardUrl;
+              lookedForEntry = false;
+              diceEntryAttempts = 0;
+              summary.steps = step + 1;
+              continue;
+            }
+          }
+          await navigateTabToUrl(currentTabId, wizardUrl);
+          lookedForEntry = false;
+          diceEntryAttempts = 0;
+          summary.steps = step + 1;
+          continue;
+        }
+      }
+
+      if (advanced.advanced) {
+        diceEntryAttempts = 0;
       }
 
       summary.steps = step + 1;
@@ -5333,7 +5407,15 @@ async function startMultiStepApplyOnTab(
  * Uses the universal SW loop so iframe ATS forms and new-tab applies work.
  */
 async function startEasyApplyOnTab(profileId, tabId = null) {
-  return startMultiStepApplyOnTab(profileId, tabId, { maxSteps: 14 });
+  const tab = tabId
+    ? await chrome.tabs.get(tabId).catch(() => null)
+    : await getCurrentApplicationTab();
+  const site = detectSiteFromUrl(tab?.url || "");
+  return startMultiStepApplyOnTab(profileId, tabId, {
+    maxSteps: 14,
+    closeOnSuccess: isAutoSubmitAllowedSite(site),
+    preferNewTab: site === "dice" || isGatewaySite(site)
+  });
 }
 
 /**

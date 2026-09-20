@@ -96,11 +96,36 @@ export async function getOutputDirectoryName() {
 export function normalizeAbsoluteDirectoryPath(raw) {
   let path = String(raw || "").trim().replace(/^["']|["']$/g, "");
   if (!path) return "";
-  // Prefer Windows backslashes when a drive letter is present.
+
+  // Browser / Explorer "Copy as path" sometimes yields file URLs.
+  path = path.replace(/^file:\/\/\/?/i, "");
+  // file:///D:/foo → D:/foo ; keep UNC shares (\\server\share).
+  if (/^[A-Za-z]\|/.test(path)) {
+    path = path.replace(/^([A-Za-z])\|/, "$1:");
+  }
+
+  // Drive letter without separator (D:Bid\...) → D:\Bid\...
+  if (/^[A-Za-z]:[^\\/]/.test(path)) {
+    path = path.replace(/^([A-Za-z]:)/, "$1\\");
+  }
+
+  // Prefer Windows backslashes when a drive letter or UNC path is present.
   if (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\")) {
     path = path.replace(/\//g, "\\");
+    // Collapse duplicate separators (user typed D:\\Bid\\... or mixed //).
+    if (path.startsWith("\\\\")) {
+      // UNC: keep the leading \\, collapse the rest.
+      path = `\\\\${path.slice(2).replace(/\\{2,}/g, "\\")}`;
+    } else {
+      path = path.replace(/\\{2,}/g, "\\");
+    }
   }
-  return path.replace(/[\\/]+$/, "");
+
+  // Strip trailing separators (Explorer is happier without a final \).
+  path = path.replace(/[\\/]+$/, "");
+  // Windows forbids trailing dots/spaces on the final segment.
+  path = path.replace(/[. ]+$/g, "");
+  return path;
 }
 
 export async function getOutputDirectoryAbsolutePath() {
@@ -127,11 +152,11 @@ export async function buildResumeFolderAbsolutePath(jobFolderName) {
   if (!folder || folder === "untitled") return "";
   const absRoot = await getOutputDirectoryAbsolutePath();
   if (absRoot) {
-    const sep = /\\/.test(absRoot) || /^[A-Za-z]:/.test(absRoot) ? "\\" : "/";
-    // Avoid duplicating the job folder if the stored path already ends with it.
-    const rootTail = absRoot.split(/[/\\]/).filter(Boolean).pop() || "";
-    if (rootTail.toLowerCase() === folder.toLowerCase()) return absRoot;
-    return `${absRoot}${sep}${folder}`;
+    const root = normalizeAbsoluteDirectoryPath(absRoot);
+    const rootTail = root.split(/[/\\]/).filter(Boolean).pop() || "";
+    if (rootTail.toLowerCase() === folder.toLowerCase()) return root;
+    // Always join with a single Windows separator for Explorer paste.
+    return normalizeAbsoluteDirectoryPath(`${root}\\${folder}`);
   }
   const rootName = (await getOutputDirectoryName()) || "";
   return rootName ? `${rootName} / ${folder}` : folder;
@@ -292,6 +317,7 @@ export function sanitizeJobFolderName(folderName) {
     String(folderName || "untitled")
       .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
       .replace(/\s+/g, " ")
+      .replace(/[. ]+$/g, "")
       .trim() || "untitled"
   );
 }

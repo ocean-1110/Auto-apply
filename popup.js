@@ -729,11 +729,19 @@ async function pathLabelForImportedJob(job) {
 function formatPathForClipboard(pathLabel) {
   const raw = String(pathLabel || "").trim();
   if (!raw) return "";
-  // Already looks like an absolute Windows/UNC path — keep as-is.
-  if (/^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) {
-    return normalizeAbsoluteDirectoryPath(raw);
-  }
-  return raw.replace(/\s*\/\s*/g, "\\").trim();
+
+  // Already absolute (or file:// / messy drive form) — normalize for Explorer.
+  const normalized = normalizeAbsoluteDirectoryPath(raw);
+  if (isAbsoluteDiskPath(normalized)) return normalized;
+
+  // Relative labels like "09-01W / job-folder" or "Downloads / folder" are not
+  // valid Explorer paths — never turn them into a fake "09-01W\job-folder".
+  return "";
+}
+
+function isAbsoluteDiskPath(text) {
+  const raw = normalizeAbsoluteDirectoryPath(text);
+  return /^[A-Za-z]:\\/.test(raw) || raw.startsWith("\\\\");
 }
 
 async function resolveResumeFolderPath() {
@@ -742,13 +750,17 @@ async function resolveResumeFolderPath() {
     const folder = resumeFolderNameForJob(selectedJob);
     if (folder) {
       const abs = await buildResumeFolderAbsolutePath(folder);
-      if (abs) return abs;
+      if (abs && isAbsoluteDiskPath(abs)) return abs;
+      if (abs) {
+        // Absolute root missing — keep resolving other sources before giving up.
+      }
     }
     try {
       const docs = await getGeneratedDocsForJob(importedJobsSelectedId);
       const docsFolder = sanitizeJobFolderName(docs?.folderName || "");
       if (docsFolder && docsFolder !== "untitled") {
-        return await buildResumeFolderAbsolutePath(docsFolder);
+        const abs = await buildResumeFolderAbsolutePath(docsFolder);
+        if (abs && isAbsoluteDiskPath(abs)) return abs;
       }
     } catch {
       /* ignore */
@@ -758,15 +770,23 @@ async function resolveResumeFolderPath() {
   const meta = await getLastSaveMeta();
   const metaFolder = sanitizeJobFolderName(meta?.folderName || "");
   if (metaFolder && metaFolder !== "untitled") {
-    return await buildResumeFolderAbsolutePath(metaFolder);
+    const abs = await buildResumeFolderAbsolutePath(metaFolder);
+    if (abs && isAbsoluteDiskPath(abs)) return abs;
   }
   if (meta?.pathLabel) {
     // Prefer rebuilding from absolute root when pathLabel is relative-only.
-    const rebuilt = await buildResumeFolderAbsolutePath(
-      String(meta.pathLabel).split(/[/\\]/).filter(Boolean).pop() || ""
-    );
-    if (rebuilt && (await getOutputDirectoryAbsolutePath())) return rebuilt;
-    return meta.pathLabel;
+    const leaf =
+      String(meta.pathLabel)
+        .split(/[/\\]/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .pop() || "";
+    const rebuilt = await buildResumeFolderAbsolutePath(leaf);
+    if (rebuilt && isAbsoluteDiskPath(rebuilt)) return rebuilt;
+    // Never return "Root / folder" for clipboard — Explorer cannot open it.
+    if (isAbsoluteDiskPath(meta.pathLabel)) {
+      return normalizeAbsoluteDirectoryPath(meta.pathLabel);
+    }
   }
 
   try {
@@ -774,7 +794,8 @@ async function resolveResumeFolderPath() {
     const uploadMeta = data.last_upload_docs_meta;
     const uploadFolder = sanitizeJobFolderName(uploadMeta?.folderName || "");
     if (uploadFolder && uploadFolder !== "untitled") {
-      return await buildResumeFolderAbsolutePath(uploadFolder);
+      const abs = await buildResumeFolderAbsolutePath(uploadFolder);
+      if (abs && isAbsoluteDiskPath(abs)) return abs;
     }
   } catch {
     /* ignore */
@@ -783,8 +804,13 @@ async function resolveResumeFolderPath() {
   const pending = await chrome.storage.local.get(["pending_fs_folder", "last_output_dir"]);
   const folder = String(pending.pending_fs_folder || pending.last_output_dir || "").trim();
   if (folder) {
-    return await buildResumeFolderAbsolutePath(folder);
+    const abs = await buildResumeFolderAbsolutePath(folder);
+    if (abs && isAbsoluteDiskPath(abs)) return abs;
   }
+
+  // Last resort: copy the configured output root so Explorer still has something valid.
+  const absRoot = await getOutputDirectoryAbsolutePath();
+  if (absRoot && isAbsoluteDiskPath(absRoot)) return absRoot;
   return "";
 }
 
@@ -794,19 +820,20 @@ async function resolveResumeFolderPath() {
  */
 let cachedResumeFolderPath = "";
 
-function isAbsoluteDiskPath(text) {
-  const raw = String(text || "");
-  return /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\");
-}
-
 async function refreshCopyResumePathBtn() {
   if (!copyResumePathBtn) return;
   const path = await resolveResumeFolderPath();
   cachedResumeFolderPath = path ? formatPathForClipboard(path) : "";
+  const hasAbsRoot = Boolean(await getOutputDirectoryAbsolutePath());
   copyResumePathBtn.disabled = !cachedResumeFolderPath;
-  copyResumePathBtn.title = cachedResumeFolderPath
-    ? `Copy resume folder path: ${cachedResumeFolderPath}`
-    : "Generate a resume first to copy its folder path";
+  if (cachedResumeFolderPath) {
+    copyResumePathBtn.title = `Copy resume folder path: ${cachedResumeFolderPath}`;
+  } else if (!hasAbsRoot) {
+    copyResumePathBtn.title =
+      "Set Absolute path under Scrape & save (e.g. D:\\Bid\\BR-AI\\09-01W), then Copy path works in Explorer";
+  } else {
+    copyResumePathBtn.title = "Generate a resume first to copy its folder path";
+  }
 }
 
 /**
@@ -841,10 +868,9 @@ function reportCopiedPath(text) {
     setStatus(`Copied path: ${text}`, "done");
     return;
   }
-  // Copied, but only the folder name — the absolute root was never configured.
   setStatus(
-    `Copied "${text}", but that is not a full disk path. Set Absolute path under ` +
-      "Scrape & save (e.g. D:\\Bid\\US BId\\09-01W) so Copy path returns the full folder.",
+    "That is not a full disk path. Set Absolute path under Scrape & save " +
+      "(e.g. D:\\Bid\\BR-AI\\09-01W), then click Copy path again.",
     "error"
   );
   outputDirAbsPathEl?.focus();
@@ -856,25 +882,36 @@ function reportCopiedPath(text) {
  */
 function copyResumeFolderPath() {
   const cached = cachedResumeFolderPath;
-  if (cached && copyTextSync(cached)) {
+  if (cached && isAbsoluteDiskPath(cached) && copyTextSync(cached)) {
     reportCopiedPath(cached);
     refreshCopyResumePathBtn().catch(() => {});
     return;
   }
 
   (async () => {
-    const path = cached || formatPathForClipboard(await resolveResumeFolderPath());
-    if (!path) {
+    const path = formatPathForClipboard(cached || (await resolveResumeFolderPath()));
+    if (!path || !isAbsoluteDiskPath(path)) {
+      const hasAbsRoot = Boolean(await getOutputDirectoryAbsolutePath());
+      if (!hasAbsRoot) {
+        setStatus(
+          "Set Absolute path under Scrape & save first (e.g. D:\\Bid\\BR-AI\\09-01W), then click Copy path again.",
+          "error"
+        );
+        outputDirAbsPathEl?.focus();
+        return;
+      }
       setStatus("No resume folder yet — generate a resume first.", "error");
       return;
     }
     if (copyTextSync(path)) {
       reportCopiedPath(path);
+      cachedResumeFolderPath = path;
       return;
     }
     try {
       await navigator.clipboard.writeText(path);
       reportCopiedPath(path);
+      cachedResumeFolderPath = path;
     } catch (err) {
       setStatus(
         `Could not copy path (${String(err.message || err)}). Copy it manually: ${path}`,

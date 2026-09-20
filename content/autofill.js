@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-19.stop-after-fill.1";
+  const SCRIPT_BUILD = "2026-09-20.dice-apply-complete.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -3826,6 +3826,11 @@
         }
         if (applyUrls.length >= 5) break;
       }
+      // Reliable fallback when Apply is a <button> with no href: build the wizard URL.
+      if (isDiceJobBrowsePage()) {
+        const wizard = diceApplicationWizardUrl();
+        if (wizard) pushUrl(wizard);
+      }
     }
 
     if (applyUrls.length < 5 && isGreenhousePage()) {
@@ -4400,6 +4405,40 @@
     } catch {
       return false;
     }
+  }
+
+  /** Job id from Dice job-detail / search URLs (for /job-applications/{id}/wizard). */
+  function extractDiceJobId(url = location.href) {
+    try {
+      const u = new URL(String(url || ""), location.href);
+      if (!/(^|\.)dice\.com$/i.test(u.hostname)) return "";
+      const selected =
+        u.searchParams.get("selectedJobId") ||
+        u.searchParams.get("jobId") ||
+        u.searchParams.get("id") ||
+        "";
+      if (selected) return String(selected).trim();
+      const parts = u.pathname.split("/").filter(Boolean);
+      const detailIdx = parts.findIndex((p) => p === "job-detail" || p === "detail");
+      if (detailIdx >= 0 && parts[detailIdx + 1]) {
+        // Legacy: /job-detail/{slug}/{id}
+        if (parts[detailIdx] === "job-detail" && parts[detailIdx + 2]) {
+          return String(parts[detailIdx + 2]).trim();
+        }
+        return String(parts[detailIdx + 1]).trim();
+      }
+      const appIdx = parts.findIndex((p) => p === "job-applications");
+      if (appIdx >= 0 && parts[appIdx + 1]) return String(parts[appIdx + 1]).trim();
+    } catch {
+      /* ignore */
+    }
+    return "";
+  }
+
+  function diceApplicationWizardUrl(url = location.href) {
+    const id = extractDiceJobId(url);
+    if (!id) return "";
+    return `https://www.dice.com/job-applications/${encodeURIComponent(id)}/wizard`;
   }
 
   const INDEED_APPLY_SUCCESS_RE =
@@ -5533,21 +5572,48 @@
     if (!/(^|\.)dice\.com$/i.test(location.hostname)) return null;
     if (isDiceApplicationPath()) return null;
 
-    const controls = [...document.querySelectorAll("button, a, [role='button']")].filter(
-      (el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el)
-    );
+    // Prefer explicit Dice apply markers before generic text matching.
+    const marked = [];
+    for (const sel of [
+      '[data-cy*="apply"]',
+      '[data-cy*="Apply"]',
+      '[data-testid*="apply"]',
+      '[data-testid*="Apply"]',
+      '[data-test*="apply"]',
+      'button[aria-label*="pply"]',
+      'a[aria-label*="pply"]'
+    ]) {
+      try {
+        marked.push(...document.querySelectorAll(sel));
+      } catch {
+        /* ignore invalid selector */
+      }
+    }
+
+    const controls = [
+      ...marked,
+      ...document.querySelectorAll("button, a, [role='button']")
+    ].filter((el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el));
+    const seen = new Set();
     const scored = [];
     for (const el of controls) {
+      if (seen.has(el)) continue;
+      seen.add(el);
       const text = elActionText(el);
       if (ALREADY_APPLIED_TEXT_RE.test(text)) continue;
-      if (!APPLY_ONLY_TEXT_RE.test(text) && !EASY_APPLY_TEXT_RE.test(text)) continue;
+      const hint = `${el.getAttribute("data-testid") || ""} ${el.getAttribute("data-cy") || ""} ${el.id || ""} ${el.className || ""} ${el.getAttribute("aria-label") || ""}`;
+      const looksApply =
+        APPLY_ONLY_TEXT_RE.test(text) ||
+        EASY_APPLY_TEXT_RE.test(text) ||
+        /easy[-_ ]?apply|apply[-_ ]?button|jobPostingApplyButton/i.test(hint);
+      if (!looksApply) continue;
       if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(el)) continue;
       const href = String(el.href || el.getAttribute?.("href") || "");
       if (/\/profile\b/i.test(href)) continue;
 
       let score = EASY_APPLY_TEXT_RE.test(text) ? 120 : 90;
-      const hint = `${el.getAttribute("data-testid") || ""} ${el.id || ""} ${el.className || ""}`;
-      if (/easy[-_ ]?apply|apply-button|job-detail|jobDetail/i.test(hint)) score += 40;
+      if (/easy[-_ ]?apply|apply-button|job-detail|jobDetail|jobPostingApply/i.test(hint)) score += 40;
+      if (/data-cy|data-testid/i.test(hint) && /apply/i.test(hint)) score += 35;
 
       // Prefer the right-hand detail pane (Apply sits top-right of that panel).
       try {
@@ -5562,16 +5628,70 @@
 
       if (
         el.closest(
-          '[data-testid*="job-detail" i], [class*="job-detail"], [class*="JobDetail"], [class*="search-detail"], [class*="details-pane"], [class*="job-view"]'
+          '[data-testid*="job-detail" i], [class*="job-detail"], [class*="JobDetail"], [class*="search-detail"], [class*="details-pane"], [class*="job-view"], [class*="@container/job-detail"]'
         )
       ) {
         score += 60;
       }
 
-      scored.push({ type: "entry", el, text, score });
+      scored.push({ type: "entry", el, text: text || "Apply", score });
     }
     scored.sort((a, b) => b.score - a.score);
     return scored[0] || null;
+  }
+
+  /**
+   * After Dice Submit: click Close / Done on the success wizard when present.
+   * Closing the tab is handled by the service worker.
+   */
+  async function dismissDiceSuccessWizard() {
+    if (!/(^|\.)dice\.com$/i.test(location.hostname)) {
+      return { ok: false, dismissed: false };
+    }
+    const success =
+      detectApplicationSuccess() ||
+      /\/wizard\/success(?:\/|$)/i.test(location.pathname) ||
+      /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(location.pathname);
+    if (!success) return { ok: true, dismissed: false, reason: "not-success" };
+
+    const closeRe =
+      /^\s*(close|done|ok|got it|finish|return to (jobs|search|dice)|back to (jobs|search)|view (my )?applications?|continue browsing)\s*$/i;
+    const root =
+      document.querySelector(
+        '[role="dialog"], [aria-modal="true"], [class*="success" i], [data-testid*="success" i], main, body'
+      ) || document.body;
+    const buttons = [
+      ...root.querySelectorAll('button, a, [role="button"], input[type="button"]')
+    ].filter((el) => isElVisible(el) && !isSiteChromeControl(el));
+
+    for (const btn of buttons) {
+      const text = elActionText(btn);
+      if (!closeRe.test(text)) continue;
+      scrollElIntoView(btn);
+      try {
+        btn.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(400);
+      return { ok: true, dismissed: true, text: text || "Close" };
+    }
+
+    // Icon-only close (X) inside a success dialog.
+    for (const btn of buttons) {
+      const aria = String(btn.getAttribute("aria-label") || "").trim();
+      if (!/^\s*(close|dismiss)\s*$/i.test(aria)) continue;
+      if (!btn.closest('[role="dialog"], [aria-modal="true"], [class*="success" i]')) continue;
+      try {
+        btn.click();
+      } catch {
+        /* ignore */
+      }
+      await sleep(400);
+      return { ok: true, dismissed: true, text: aria || "Close" };
+    }
+
+    return { ok: true, dismissed: false };
   }
 
   function findEasyApplyEntryButton() {
@@ -7969,6 +8089,12 @@
       })
         .then((result) => sendResponse(result))
         .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true;
+    }
+    if (message?.type === "dismiss_dice_success_wizard") {
+      dismissDiceSuccessWizard()
+        .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ ok: false, dismissed: false, error: String(err?.message || err) }));
       return true;
     }
     if (message?.type === "click_easy_apply_entry") {
