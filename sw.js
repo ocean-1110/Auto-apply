@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-20.ziprecruiter-apply.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-20.jobright-linkedin-stop.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -3204,6 +3204,50 @@ function isHttpUrl(url) {
   return /^https?:\/\//i.test(String(url || ""));
 }
 
+function isLinkedInApplyUrl(url = "") {
+  try {
+    const href = String(url || "").trim();
+    if (!href) return false;
+    return /(^|\.)linkedin\.com$/i.test(new URL(href).hostname);
+  } catch {
+    return /linkedin\.com/i.test(String(url || ""));
+  }
+}
+
+/**
+ * Jobright Apply Now that lands on LinkedIn — reclassify the card and do not
+ * generate a resume or continue Auto Apply.
+ */
+async function markImportedJobAsLinkedIn(
+  importedJobId,
+  { profileId, detail = "", linkedinUrl = "" } = {}
+) {
+  const id = String(importedJobId || "").trim();
+  const text =
+    String(detail || "").trim() ||
+    "Apply opens LinkedIn — skipped; resume not generated.";
+  if (id) {
+    await setImportedJobStatus(id, {
+      status: "linkedin",
+      statusDetail: text,
+      profileId,
+      patch: {
+        source: "linkedin",
+        ...(linkedinUrl ? { applyLink: String(linkedinUrl).trim() } : null)
+      }
+    });
+    await appendApplicationEvent({
+      profileId,
+      importedJobId: id,
+      status: "linkedin",
+      source: "linkedin",
+      detail: text,
+      jdLink: linkedinUrl || ""
+    }).catch(() => {});
+  }
+  return text;
+}
+
 /** Corporate / marketing / about pages — never treat as an application destination. */
 function isMarketingOrCorporateUrl(url) {
   const href = String(url || "").trim();
@@ -3238,6 +3282,7 @@ function isAllowedApplyNavUrl(url) {
       return /\/(viewjob|apply|indeedapply|job)\b|jk=/i.test(path);
     }
     if (/(^|\.)ziprecruiter\.com$/i.test(host)) return true;
+    if (/(^|\.)jobright\.ai$/i.test(host)) return true;
     if (/(^|\.)jobgether\.com$/i.test(host)) return true;
     if (/(^|\.)builtin\.com$/i.test(host)) return true;
     if (/(^|\.)smartrecruiters\.com$/i.test(host)) return true;
@@ -3257,6 +3302,8 @@ function isAllowedApplyNavUrl(url) {
 function isPlausibleApplyDestination(url) {
   const href = String(url || "").trim();
   if (!isHttpUrl(href) || isDiceProfileUrl(href) || isMarketingOrCorporateUrl(href)) return false;
+  // LinkedIn is never an Auto Apply destination from Jobright (or elsewhere).
+  if (isLinkedInApplyUrl(href)) return false;
   if (isAllowedApplyNavUrl(href)) return true;
   try {
     const u = new URL(href);
@@ -3426,6 +3473,7 @@ async function waitBrieflyForApplyEntry(tabId, timeoutMs = APPLY_ENTRY_WAIT_MS) 
     if (
       probe?.alreadyApplied ||
       probe?.oneClickApply ||
+      probe?.linkedinRedirect ||
       probe?.jobUnavailable ||
       probe?.applicationSuccess ||
       probeHasApplyEntry(probe)
@@ -3493,6 +3541,8 @@ function pickBestApplyAction(frameResults = []) {
     frameResults.find((f) => f?.alreadyApplied)?.alreadyApplied || "";
   const oneClickApply =
     frameResults.find((f) => f?.oneClickApply)?.oneClickApply || "";
+  const linkedinRedirect =
+    frameResults.find((f) => f?.linkedinRedirect)?.linkedinRedirect || "";
   const applicationSuccess =
     frameResults.find((f) => f?.applicationSuccess)?.applicationSuccess ||
     applicationSuccessFromUrl(best?.href || frameResults[0]?.href || "") ||
@@ -3541,6 +3591,7 @@ function pickBestApplyAction(frameResults = []) {
     jobUnavailable,
     alreadyApplied,
     oneClickApply,
+    linkedinRedirect,
     applicationSuccess,
     emailVerification,
     emailVerificationText,
@@ -3980,6 +4031,17 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
       }
       // Gateway sites (Jobright/Jobgether) hand off to an employer ATS / careers apply page.
       // Never adopt marketing/about pages (e.g. halliburton.com/.../corporate-profile).
+      // Never adopt LinkedIn — Jobright → LinkedIn is a hard stop (no auto-apply).
+      if (gateway && isLinkedInApplyUrl(newUrl)) {
+        await chrome.tabs.remove(fresh.id).catch(() => {});
+        knownTabIds.add(fresh.id);
+        return {
+          advanced: false,
+          tabId,
+          reason: "linkedin_redirect",
+          linkedinUrl: newUrl
+        };
+      }
       if (
         gateway &&
         isPlausibleApplyDestination(newUrl) &&
@@ -4036,7 +4098,7 @@ async function waitForApplyAdvance(tabId, prevSig, prevUrl, timeoutMs = 15000, {
         const nextHost = new URL(tab.url).hostname.toLowerCase();
         const leftKnownAts =
           isAllowedApplyNavUrl(prevUrl) ||
-          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|ziprecruiter\.com|smartrecruiters\.com|oraclecloud\.com|builtin\.com)$/i.test(
+          /(^|\.)(dice\.com|greenhouse\.io|myworkdayjobs\.com|workdayjobs\.com|indeed\.com|ziprecruiter\.com|jobright\.ai|smartrecruiters\.com|oraclecloud\.com|builtin\.com)$/i.test(
             prevHost
           );
         if (leftKnownAts && nextHost !== prevHost && !isPlausibleApplyDestination(tab.url)) {
@@ -4289,6 +4351,39 @@ async function runApplyImportedJobCore(
         site
       };
     }
+    // Jobright → LinkedIn: reclassify before any resume generation.
+    const earlySite = detectSiteFromUrl(url);
+    if (earlySite === "jobright" || availProbe?.linkedinRedirect) {
+      let linkedinUrl = String(availProbe?.linkedinRedirect || "").trim();
+      if (!linkedinUrl) {
+        try {
+          await ensureAutofillScript(tabId);
+          const jrProbe = await sendMessageToTab(
+            tabId,
+            { type: "probe_application_form" },
+            { attempts: 2 }
+          );
+          linkedinUrl = String(jrProbe?.linkedinRedirect || "").trim();
+        } catch {
+          /* best-effort */
+        }
+      }
+      if (linkedinUrl || availProbe?.linkedinRedirect) {
+        const detail = await markImportedJobAsLinkedIn(importedJobId, {
+          profileId,
+          linkedinUrl: linkedinUrl || availProbe.linkedinRedirect,
+          detail:
+            "Jobright Apply opens LinkedIn — marked as LinkedIn; resume not generated."
+        });
+        await setStatus(`${prefix}${detail}`);
+        return {
+          ok: true,
+          status: "linkedin",
+          detail,
+          site: "linkedin"
+        };
+      }
+    }
   } catch {
     /* best-effort */
   }
@@ -4409,7 +4504,7 @@ async function runApplyImportedJobCore(
     maxSteps: 14,
     uploadDocs,
     closeOnSuccess: isAutoSubmitAllowedSite(site),
-    preferNewTab: site === "dice"
+    preferNewTab: site === "dice" || isGatewaySite(site)
   });
   if (!ea.ok && ea.error) throw new Error(ea.error);
 
@@ -4435,6 +4530,18 @@ async function runApplyImportedJobCore(
       detail: ea.detail || "Already applied on Dice.",
       site
     };
+  }
+
+  if (ea.status === "linkedin") {
+    const detail = await markImportedJobAsLinkedIn(importedJobId, {
+      profileId,
+      linkedinUrl: ea.tabUrl || "",
+      detail:
+        ea.detail ||
+        "Jobright Apply opens LinkedIn — marked as LinkedIn; resume not generated."
+    });
+    await setStatus(`${prefix}${detail}`);
+    return { ok: true, status: "linkedin", detail, site: "linkedin" };
   }
 
   if (ea.status === "skipped") {
@@ -4611,9 +4718,21 @@ async function startMultiStepApplyOnTab(
         await setStatus(
           `Auto Apply (Built In): external ATS (${applySiteLabel(liveSite)}) — continuing with application form...`
         );
+      } else if (initialSite === "jobright") {
+        await setStatus(
+          `Auto Apply (Jobright): employer ATS (${applySiteLabel(liveSite)}) — filling form, stop before Submit...`
+        );
       }
       stepBudget = stepBudgetForSite(liveSite, stepBudget);
       rebudgetedForLiveSite = true;
+    }
+    if (initialSite === "jobright" && isLinkedInApplyUrl(liveNow?.url || "")) {
+      summary.status = "linkedin";
+      summary.detail =
+        "Jobright Apply opened LinkedIn — stopped; marked as LinkedIn.";
+      summary.tabId = currentTabId;
+      summary.tabUrl = liveNow?.url || summary.tabUrl;
+      return summary;
     }
     if (initialSite === "indeed" && liveNow?.url && !isUrlOnApplySite(liveNow.url, "indeed")) {
       summary.status = "skipped";
@@ -4685,6 +4804,15 @@ async function startMultiStepApplyOnTab(
       summary.status = "needs_review";
       summary.detail = probe.oneClickApply;
       summary.tabId = currentTabId;
+      return summary;
+    }
+
+    if (probe.linkedinRedirect) {
+      summary.status = "linkedin";
+      summary.detail =
+        "Jobright Apply opens LinkedIn — stopped before applying.";
+      summary.tabId = currentTabId;
+      summary.tabUrl = probe.linkedinRedirect || summary.tabUrl;
       return summary;
     }
 
@@ -4770,7 +4898,7 @@ async function startMultiStepApplyOnTab(
           clickLabel,
           settleMs: 1000
         });
-        if (clickRes?.externalRedirect && initialSite !== "builtin") {
+        if (clickRes?.externalRedirect && !isGatewaySite(initialSite)) {
           summary.status = "skipped";
           summary.detail = externalApplyStopDetail(initialSite);
           summary.tabId = currentTabId;
@@ -4817,9 +4945,27 @@ async function startMultiStepApplyOnTab(
 
     // Not on a form yet: click Easy Apply / Apply only (never ads / Cancel / profile).
     if (!probe.anyForm) {
-      const allowedApplyUrl = (probe.applyUrls || []).find(
-        (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
-      );
+      const pickApplyUrl = (urls = []) =>
+        (urls || []).find(
+          (u) =>
+            isAllowedApplyNavUrl(u) &&
+            !isDiceProfileUrl(u) &&
+            !isLinkedInApplyUrl(u)
+        );
+      const allowedApplyUrl = pickApplyUrl(probe.applyUrls);
+      // Jobright Apply Now that only points at LinkedIn — stop before opening it.
+      if (
+        initialSite === "jobright" &&
+        !allowedApplyUrl &&
+        (probe.applyUrls || []).some((u) => isLinkedInApplyUrl(u))
+      ) {
+        const liUrl = (probe.applyUrls || []).find((u) => isLinkedInApplyUrl(u)) || "";
+        summary.status = "linkedin";
+        summary.detail = "Jobright Apply opens LinkedIn — stopped before applying.";
+        summary.tabId = currentTabId;
+        summary.tabUrl = liUrl || summary.tabUrl;
+        return summary;
+      }
       if (
         probe.best?.action?.type !== "entry" &&
         !allowedApplyUrl &&
@@ -4831,12 +4977,10 @@ async function startMultiStepApplyOnTab(
           probe = await waitBrieflyForApplyEntry(currentTabId, APPLY_ENTRY_WAIT_MS);
           lookedForEntry = true;
         }
-        if (probe.alreadyApplied || probe.oneClickApply || probe.jobUnavailable || probe.anyForm) {
+        if (probe.alreadyApplied || probe.oneClickApply || probe.linkedinRedirect || probe.jobUnavailable || probe.anyForm) {
           continue;
         }
-        const retryUrl = (probe.applyUrls || []).find(
-          (u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
-        );
+        const retryUrl = pickApplyUrl(probe.applyUrls);
         if (probe.best?.action?.type !== "entry" && !retryUrl) {
           // No recognisable Apply button ("I'm interested", "Apply for this job"...):
           // let AI read the page's buttons before giving up on this job.
@@ -4857,6 +5001,12 @@ async function startMultiStepApplyOnTab(
                 (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
               summary.steps = step + 1;
               lookedForEntry = false;
+              if (isLinkedInApplyUrl(summary.tabUrl) && initialSite === "jobright") {
+                summary.status = "linkedin";
+                summary.detail =
+                  "Jobright Apply opened LinkedIn — stopped; marked as LinkedIn.";
+                return summary;
+              }
               if (isDiceProfileUrl(summary.tabUrl) || isMarketingOrCorporateUrl(summary.tabUrl)) {
                 if (isMarketingOrCorporateUrl(summary.tabUrl) && beforeAiUrl) {
                   await navigateTabToUrl(currentTabId, beforeAiUrl).catch(() => {});
@@ -4882,9 +5032,7 @@ async function startMultiStepApplyOnTab(
       const live = await chrome.tabs.get(currentTabId).catch(() => null);
       const prevUrl = live?.url || "";
       const prevSig = probe.signature || "";
-      const applyUrl =
-        (probe.applyUrls || []).find((u) => isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)) ||
-        allowedApplyUrl;
+      const applyUrl = pickApplyUrl(probe.applyUrls) || allowedApplyUrl;
 
       if (probe.best?.action?.type === "entry") {
         await setStatus(`Auto Apply: clicking ${probe.best.action.text || "Apply"}...`);
@@ -4893,7 +5041,15 @@ async function startMultiStepApplyOnTab(
           { type: "click_apply_action", preferredType: "entry", preferNewTab: useNewTab },
           { attempts: 2, frameId: probe.best.frameId }
         );
-        if (clickRes?.externalRedirect && initialSite !== "builtin") {
+        if (clickRes?.linkedinRedirect || isLinkedInApplyUrl(clickRes?.externalUrl || "")) {
+          summary.status = "linkedin";
+          summary.detail =
+            "Jobright Apply opened LinkedIn — stopped before applying.";
+          summary.tabId = currentTabId;
+          summary.tabUrl = clickRes.linkedinRedirect || clickRes.externalUrl || summary.tabUrl;
+          return summary;
+        }
+        if (clickRes?.externalRedirect && !isGatewaySite(initialSite)) {
           summary.status = "skipped";
           summary.detail = externalApplyStopDetail(initialSite);
           summary.tabId = currentTabId;
@@ -4968,6 +5124,17 @@ async function startMultiStepApplyOnTab(
       summary.tabId = currentTabId;
       summary.tabUrl = (await chrome.tabs.get(currentTabId).catch(() => null))?.url || summary.tabUrl;
       lookedForEntry = !advanced.advanced;
+
+      if (
+        advanced.reason === "linkedin_redirect" ||
+        isLinkedInApplyUrl(advanced.linkedinUrl || summary.tabUrl)
+      ) {
+        summary.status = "linkedin";
+        summary.detail =
+          "Jobright Apply opened LinkedIn — stopped; marked as LinkedIn.";
+        summary.tabUrl = advanced.linkedinUrl || summary.tabUrl;
+        return summary;
+      }
 
       // Mis-click on the avatar lands on /profile — stop instead of continuing there.
       if (isDiceProfileUrl(summary.tabUrl)) {
@@ -5253,7 +5420,7 @@ async function startMultiStepApplyOnTab(
         clickLabel,
         settleMs: site === "dice" ? 1000 : liveSite === "workday" ? 800 : 400
       });
-      if (clickRes?.externalRedirect && initialSite !== "builtin") {
+      if (clickRes?.externalRedirect && !isGatewaySite(initialSite)) {
         summary.status = "skipped";
         summary.detail = externalApplyStopDetail(initialSite);
         summary.tabId = currentTabId;
@@ -5336,7 +5503,7 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    if (clickRes?.externalRedirect && initialSite !== "builtin") {
+    if (clickRes?.externalRedirect && !isGatewaySite(initialSite)) {
       summary.status = "skipped";
       summary.detail = externalApplyStopDetail(initialSite);
       summary.tabId = currentTabId;
@@ -7746,7 +7913,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             }
 
             const status = String(job.status || "");
-            if (status === "completed" || status === "unavailable") {
+            if (status === "completed" || status === "unavailable" || status === "linkedin") {
+              skippedCount += 1;
+              continue;
+            }
+            if (String(job.source || "").toLowerCase() === "linkedin") {
               skippedCount += 1;
               continue;
             }
@@ -7796,7 +7967,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             else if (
               result.status === "already_applied" ||
               result.status === "unavailable" ||
-              result.status === "skipped"
+              result.status === "skipped" ||
+              result.status === "linkedin"
             ) {
               skippedCount += 1;
             }
@@ -7961,6 +8133,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
               continue;
             }
 
+            // Already reclassified as LinkedIn — never generate a resume.
+            if (
+              String(job.status || "") === "linkedin" ||
+              String(job.source || "").toLowerCase() === "linkedin"
+            ) {
+              skipCount += 1;
+              continue;
+            }
+
             const jobUrl = String(job.jdLink || job.url || "").trim();
             const jdText = String(job.jdText || shared.jdText || "").trim();
 
@@ -7996,6 +8177,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
                   `Closed — skipped, marked on the job card: ${job.jobTitle || importedJobId} (${detail})`
                 );
                 continue;
+              }
+              // Jobright → LinkedIn destination: reclassify, never generate a resume.
+              if (
+                detectSiteFromUrl(jobUrl) === "jobright" ||
+                String(job.source || "").toLowerCase() === "jobright"
+              ) {
+                let linkedinUrl = "";
+                try {
+                  if (probeTabId) {
+                    await ensureAutofillScript(probeTabId);
+                    const jrProbe = await sendMessageToTab(
+                      probeTabId,
+                      { type: "probe_application_form" },
+                      { attempts: 2 }
+                    );
+                    linkedinUrl = String(jrProbe?.linkedinRedirect || "").trim();
+                  }
+                } catch {
+                  /* best-effort */
+                }
+                if (linkedinUrl) {
+                  skipCount += 1;
+                  const detail = await markImportedJobAsLinkedIn(importedJobId, {
+                    profileId,
+                    linkedinUrl,
+                    detail:
+                      "Jobright Apply opens LinkedIn — marked as LinkedIn; resume not generated."
+                  });
+                  await setStatus(
+                    `Batch ${i + 1}/${jobIds.length}: LinkedIn apply — skipped ${job.jobTitle || importedJobId} (${detail})`
+                  );
+                  continue;
+                }
               }
               if (probe.error) {
                 failCount += 1;

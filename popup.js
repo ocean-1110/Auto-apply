@@ -915,6 +915,8 @@ function displayImportedJobStatus(job) {
       return "Needs review";
     case "completed":
       return "Applied";
+    case "linkedin":
+      return "LinkedIn apply";
     case "unavailable":
       return "No longer available";
     case "check_failed":

@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-20.ziprecruiter-apply.1";
+  const SCRIPT_BUILD = "2026-09-20.jobright-linkedin-stop.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -3936,6 +3936,68 @@
     }
   }
 
+  function isLinkedInApplyUrl(url = "") {
+    try {
+      const href = String(url || "").trim();
+      if (!href) return false;
+      const host = new URL(href, location.href).hostname.toLowerCase();
+      return /(^|\.)linkedin\.com$/i.test(host);
+    } catch {
+      return /linkedin\.com/i.test(String(url || ""));
+    }
+  }
+
+  /**
+   * Jobright → LinkedIn Easy Apply destinations are not auto-applied.
+   * Reads Apply Now hrefs plus applyLink / originalUrl from page JSON.
+   */
+  function detectJobrightLinkedInApply() {
+    if (!isJobrightPage()) return "";
+    const candidates = [];
+
+    const push = (raw) => {
+      const href = String(raw || "").trim();
+      if (!href || !isLinkedInApplyUrl(href)) return;
+      try {
+        candidates.push(new URL(href, location.href).toString());
+      } catch {
+        candidates.push(href);
+      }
+    };
+
+    for (const sel of ["jobright-helper-job-detail-info", "__NEXT_DATA__", "job-posting"]) {
+      try {
+        const el = document.getElementById(sel) || document.querySelector(`script#${sel}`);
+        const raw = el?.textContent || "";
+        if (!raw) continue;
+        const data = JSON.parse(raw);
+        const jr =
+          data?.jobResult ||
+          data?.props?.pageProps?.dataSource?.jobResult ||
+          data ||
+          {};
+        push(jr.applyLink || jr.originalUrl || data?.url || "");
+      } catch {
+        /* ignore parse errors */
+      }
+    }
+
+    for (const el of visibleActionControls()) {
+      const text = elActionText(el);
+      if (JOBRIGHT_JUNK_RE.test(text)) continue;
+      const isApply =
+        APPLY_NOW_RE.test(text) ||
+        JOBGETHER_APPLY_RE.test(text) ||
+        /^\s*apply\s+externally\s*$/i.test(text);
+      if (!isApply) continue;
+      push(el.href || el.getAttribute?.("href") || el.getAttribute?.("formaction") || "");
+    }
+
+    for (const u of collectApplyUrlCandidates()) push(u);
+
+    return candidates[0] || "";
+  }
+
   function isBuiltInPage(url = location.href) {
     try {
       return /(^|\.)builtin\.com$/i.test(new URL(String(url || location.href)).hostname);
@@ -4018,6 +4080,7 @@
       }
       if (site === "greenhouse") return /(^|\.)greenhouse\.io$/i.test(target.hostname);
       if (site === "jobgether") return /(^|\.)jobgether\.com$/i.test(target.hostname);
+      if (site === "jobright") return /(^|\.)jobright\.ai$/i.test(target.hostname);
       if (site === "builtin") return /(^|\.)builtin\.com$/i.test(target.hostname);
       if (site === "ziprecruiter") return /(^|\.)ziprecruiter\.com$/i.test(target.hostname);
       if (site === "smartrecruiters") return /(^|\.)smartrecruiters\.com$/i.test(target.hostname);
@@ -4380,6 +4443,7 @@
         detectJobrightAlreadyApplied() ||
         detectZipRecruiterAlreadyApplied(),
       oneClickApply: detectZipRecruiterOneClickOnly(),
+      linkedinRedirect: detectJobrightLinkedInApply(),
       applyUrls: collectApplyUrlCandidates()
     };
   }
@@ -6363,6 +6427,53 @@
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
     await sleep(400);
     await dismissBlockingModals();
+    if (isJobrightPage()) {
+      const linkedinUrl = detectJobrightLinkedInApply();
+      if (linkedinUrl) {
+        return {
+          ok: false,
+          clicked: false,
+          linkedinRedirect: linkedinUrl,
+          externalUrl: linkedinUrl
+        };
+      }
+      const target = findJobrightApplyButton();
+      if (!target?.el) {
+        return { ok: false, clicked: false, navigateUrl: "", openInNewTab: false };
+      }
+      const href =
+        target.el.href ||
+        target.el.getAttribute?.("href") ||
+        target.el.getAttribute?.("formaction") ||
+        "";
+      if (href && isLinkedInApplyUrl(href)) {
+        const absolute = new URL(href, location.href).toString();
+        return {
+          ok: false,
+          clicked: false,
+          linkedinRedirect: absolute,
+          externalUrl: absolute
+        };
+      }
+      // Gateway: open employer ATS in a new tab (Greenhouse / Workday / etc.).
+      const res = await clickKeepingSameTab(target.el, { preferNewTab: true });
+      await sleep(1200);
+      if (res.navigateUrl && isLinkedInApplyUrl(res.navigateUrl)) {
+        return {
+          ok: false,
+          clicked: Boolean(res.clicked),
+          linkedinRedirect: res.navigateUrl,
+          externalUrl: res.navigateUrl
+        };
+      }
+      return {
+        ok: Boolean(res.clicked || res.navigateUrl),
+        clicked: Boolean(res.clicked),
+        navigateUrl: res.navigateUrl || "",
+        openInNewTab: Boolean(res.openInNewTab || true),
+        text: target.text || elActionText(target.el) || "Apply Now"
+      };
+    }
     if (isZipRecruiterPage()) {
       const oneClick = detectZipRecruiterOneClickOnly();
       if (oneClick) {
@@ -6549,7 +6660,9 @@
         detectJobrightAlreadyApplied() ||
         detectZipRecruiterAlreadyApplied();
       const oneClickApply = probe.oneClickApply || detectZipRecruiterOneClickOnly();
-      const entry = alreadyApplied || oneClickApply ? null : findEasyApplyEntryButton();
+      const linkedinRedirect = probe.linkedinRedirect || detectJobrightLinkedInApply();
+      const entry =
+        alreadyApplied || oneClickApply || linkedinRedirect ? null : findEasyApplyEntryButton();
       return {
         ok: true,
         href: location.href,
@@ -6563,6 +6676,7 @@
         jobUnavailable: probe.jobUnavailable || "",
         alreadyApplied: alreadyApplied || "",
         oneClickApply: oneClickApply || "",
+        linkedinRedirect: linkedinRedirect || "",
         applicationSuccess: detectApplicationSuccess(),
         action: entry ? { type: "entry", text: entry.text } : null,
         needsFill: false,
@@ -6601,6 +6715,7 @@
       jobUnavailable: probe.jobUnavailable || "",
       alreadyApplied: "",
       oneClickApply: "",
+      linkedinRedirect: "",
       applicationSuccess: detectApplicationSuccess(),
       action: describeAction(action),
       needsFill,
@@ -6624,6 +6739,7 @@
         externalRedirect: Boolean(entryRes?.externalRedirect),
         externalUrl: entryRes?.externalUrl || "",
         oneClickApply: entryRes?.oneClickApply || "",
+        linkedinRedirect: entryRes?.linkedinRedirect || "",
         action:
           entryRes?.clicked || entryRes?.navigateUrl || entryRes?.alreadyOpen
             ? { type: "entry", text: entryRes.text || "" }
