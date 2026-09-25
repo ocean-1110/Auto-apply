@@ -86,10 +86,23 @@ export function isComplexQuestion(q) {
   return false;
 }
 
-/** Store almost everything except long role-specific essays. */
+const JOB_SPECIFIC_RE =
+  /\bwhy (are you|do you|this role|this company|this position|this job|our company|work (here|for us)|join)\b|\b(interest(ed)? in (this|the|our) (role|position|company|job|team)|what (attracts|interests|excites) you|cover letter|about (this|the|our) (role|position|company|opportunity))\b/i;
+
+/**
+ * Motivation / fit questions are true for one posting only.
+ * A saved answer would be pasted onto the next company.
+ */
+export function isJobSpecificQuestion(q) {
+  const label = String(q?.label || q?.bankQuery || q?.text || "");
+  return JOB_SPECIFIC_RE.test(label);
+}
+
+/** Store almost everything except long role-specific essays and one-job motivation answers. */
 export function shouldBankAnswer(q, answer, fieldType = "") {
   const a = String(answer || "").trim();
   if (!a) return false;
+  if (isJobSpecificQuestion(q)) return false;
   const type = String(fieldType || q?.fieldType || "text").toLowerCase();
   if (["select", "combobox", "checkbox", "radio", "choice"].includes(type)) return true;
   if (a.length > 400) return false;

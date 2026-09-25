@@ -621,14 +621,41 @@ async function refreshFolderPermissionBanner() {
   }
 }
 
+let shownUploadSourceAt = 0;
+
 function showSaveBanner(pathLabel) {
   if (!saveBannerEl || !saveBannerPathEl) return;
   const label = pathLabel || "Files saved successfully.";
+  const heading = document.getElementById("saveBannerHeading");
+  if (heading) heading.textContent = "Files saved";
+  saveBannerEl.classList.remove("is-upload-source");
   saveBannerPathEl.textContent = label;
   saveBannerPathEl.title = label;
   const textEl = saveBannerEl.querySelector(".save-banner-text");
   if (textEl) textEl.hidden = false;
   saveBannerEl.hidden = false;
+}
+
+/** Keep the job folder on screen while resume/cover letter files are uploaded. */
+function showUploadSourceBanner(source) {
+  if (!saveBannerEl || !saveBannerPathEl || !source) return;
+  const folder = String(source.folder || "").trim();
+  const resumePath = String(source.resumePath || "").trim();
+  const coverPath = String(source.coverPath || "").trim();
+  const shown = folder || resumePath;
+  if (!shown) return;
+  const fileNames = [resumePath, coverPath]
+    .map((p) => p.split(/[/\\]/).filter(Boolean).pop() || "")
+    .filter(Boolean);
+  const heading = document.getElementById("saveBannerHeading");
+  if (heading) heading.textContent = "Uploading from";
+  saveBannerEl.classList.add("is-upload-source");
+  saveBannerPathEl.textContent = fileNames.length ? `${shown} — ${fileNames.join(" + ")}` : shown;
+  saveBannerPathEl.title = [folder, resumePath, coverPath].filter(Boolean).join("\n");
+  const textEl = saveBannerEl.querySelector(".save-banner-text");
+  if (textEl) textEl.hidden = false;
+  saveBannerEl.hidden = false;
+  shownUploadSourceAt = Number(source.at || Date.now());
 }
 
 function hideSaveBanner() {
@@ -3702,6 +3729,9 @@ grantFolderAccessBtn?.addEventListener("click", () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (extensionContextDead || !isExtensionContextValid()) return;
   if (area !== "local") return;
+  if (changes.active_upload_source?.newValue) {
+    showUploadSourceBanner(changes.active_upload_source.newValue);
+  }
   if (!changes.custom_profiles && !changes.selected_profile_id) return;
 
   (async () => {
@@ -3862,6 +3892,7 @@ panelPollTimer = setInterval(async () => {
       "pending_fs_write",
       "last_save_ready",
       "last_save_meta",
+      "active_upload_source",
       "imported_jobs_by_id",
       "imported_jobs_order",
       "imported_jobs_selected_id",
@@ -3934,8 +3965,16 @@ panelPollTimer = setInterval(async () => {
       await tryFlushPendingOutput();
     }
     if (data.last_save_ready) {
-      await chrome.storage.local.remove("last_save_ready");
+      await chrome.storage.local.remove(["last_save_ready", "active_upload_source"]);
+      data.active_upload_source = null;
       await refreshSaveBannerForCurrentJob();
+    }
+
+    if (data.active_upload_source) {
+      const uploadAt = Number(data.active_upload_source.at || 0);
+      if (uploadAt && uploadAt !== shownUploadSourceAt) {
+        showUploadSourceBanner(data.active_upload_source);
+      }
     }
 
     const nextSelected = data.imported_jobs_selected_id || null;

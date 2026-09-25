@@ -97,7 +97,8 @@ export function matchOption(value, options = []) {
     return on && !(wantLead && optLead && wantLead !== optLead);
   });
   if (want === "yes" || want === "no") {
-    return pool.find((o) => leadYesNo(normalizeText(o)) === want) || "";
+    const leads = pool.filter((o) => leadYesNo(normalizeText(o)) === want);
+    return leads.length === 1 ? leads[0] : "";
   }
   const sameNegation = pool.filter((o) => NEGATION_RE.test(normalizeText(o)) === wantNeg);
 

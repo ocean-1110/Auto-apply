@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-20.jobright-linkedin-stop.1";
+  const SCRIPT_BUILD = "2026-09-25.apply-quality.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -2056,13 +2056,19 @@
     const name = normalize(
       [el.getAttribute("name"), el.getAttribute("id"), el.getAttribute("accept"), label].join(" ")
     );
-    if (
+    const hasCover =
       /cover\s*letter|covering\s*letter|coverletter/.test(name) &&
-      !/\b(attach any|any files|additional files)\b/.test(name) &&
-      !/\bcover letter is not required\b/.test(name)
+      !/\bcover letter is not required\b/.test(name);
+    const hasResume = /\b(resume|cv|curriculum|vitae|include your resume)\b/.test(name);
+    if (
+      /\b(photo|headshot|portrait|profile picture|transcript|certificate|portfolio|writing sample)\b/.test(
+        name
+      )
     ) {
-      return "coverLetter";
+      return "other";
     }
+    if (hasCover && !hasResume) return "coverLetter";
+    if (hasResume) return "resume";
     if (
       /\b(any files|additional files|other files|supporting documents|optional attachment|attach any)\b/.test(
         name
@@ -2070,11 +2076,17 @@
     ) {
       return "other";
     }
-    if (/\b(resume|cv|curriculum|vitae|include your resume)\b/.test(name)) return "resume";
     if (/\brequired\b/.test(name) && /\b(attach|upload|file|pdf)\b/.test(name) && !/\bcover\b/.test(name)) {
       return "resume";
     }
     return "other";
+  }
+
+  function isBlockedUploadTarget(label) {
+    const name = normalize(label);
+    return /\b(photo|headshot|portrait|profile picture|transcript|certificate|portfolio|writing sample|additional files|other files|any files)\b/.test(
+      name
+    );
   }
 
   function fileFieldRoot(el) {
@@ -2320,14 +2332,18 @@
     }
     const targetedInputs = new Set(targets.map((row) => row.input));
     if (resumeFile && !targets.some((row) => row.kind === "resume")) {
-      const fallback = classified.find((row) => !targetedInputs.has(row.input));
+      const fallback = classified.find(
+        (row) => !targetedInputs.has(row.input) && !isBlockedUploadTarget(row.label)
+      );
       if (fallback) {
         targets.push({ ...fallback, file: resumeFile, kind: "resume" });
         targetedInputs.add(fallback.input);
       }
     }
     if (coverFile && !targets.some((row) => row.kind === "coverLetter")) {
-      const leftover = classified.find((row) => !targetedInputs.has(row.input));
+      const leftover = classified.find(
+        (row) => !targetedInputs.has(row.input) && !isBlockedUploadTarget(row.label)
+      );
       if (leftover) targets.push({ ...leftover, file: coverFile, kind: "coverLetter" });
     }
 
@@ -4380,14 +4396,19 @@
         identityFields >= 2 ||
         (hasApplyForm && fillableCount >= 2));
 
+    const workdayWizardEarly = isWorkdayPage() ? detectWorkdayWizardState() : null;
     const isWorkdayApplyPage =
       isWorkdayPage() &&
       (/\/apply\//i.test(location.href) ||
         Boolean(
           document.querySelector(
-            '[data-automation-id*="formField"], [data-automation-id="applyManual"], [data-automation-id*="apply"]'
+            '[data-automation-id*="formField"], [data-automation-id="applyManual"], [data-automation-id*="apply"], [data-automation-id*="wizard"], [data-automation-id*="progress"]'
           )
-        ));
+        ) ||
+        Boolean(workdayWizardEarly?.current) ||
+        Boolean(workdayWizardEarly?.isMethodSelect) ||
+        Boolean(workdayWizardEarly?.isAuth) ||
+        Boolean(workdayWizardEarly?.isReview));
 
     // Dice job cards / job-detail pages have newsletter and ad forms. Those are
     // not the application. Only the /job-applications wizard is.
@@ -5756,24 +5777,30 @@
     // Prefer explicit Dice apply markers before generic text matching.
     const marked = [];
     for (const sel of [
-      '[data-cy*="apply"]',
+      '[data-cy*="apply" i]',
       '[data-cy*="Apply"]',
-      '[data-testid*="apply"]',
+      '[data-testid*="apply" i]',
       '[data-testid*="Apply"]',
-      '[data-test*="apply"]',
-      'button[aria-label*="pply"]',
-      'a[aria-label*="pply"]'
+      '[data-test*="apply" i]',
+      'button[aria-label*="apply" i]',
+      'a[aria-label*="apply" i]',
+      'button[aria-label*="Apply"]',
+      'a[aria-label*="Apply"]'
     ]) {
       try {
-        marked.push(...document.querySelectorAll(sel));
+        marked.push(...queryAllDeep(sel));
       } catch {
-        /* ignore invalid selector */
+        try {
+          marked.push(...document.querySelectorAll(sel.replace(/ i]/g, "")));
+        } catch {
+          /* ignore invalid selector */
+        }
       }
     }
 
     const controls = [
       ...marked,
-      ...document.querySelectorAll("button, a, [role='button']")
+      ...queryAllDeep("button, a, [role='button']")
     ].filter((el) => isElVisible(el) && isElEnabled(el) && !isSiteChromeControl(el));
     const seen = new Set();
     const scored = [];
@@ -5786,7 +5813,8 @@
       const looksApply =
         APPLY_ONLY_TEXT_RE.test(text) ||
         EASY_APPLY_TEXT_RE.test(text) ||
-        /easy[-_ ]?apply|apply[-_ ]?button|jobPostingApplyButton/i.test(hint);
+        /^\s*apply with dice\s*$/i.test(text) ||
+        /easy[-_ ]?apply|apply[-_ ]?button|jobPostingApplyButton|applyButton/i.test(hint);
       if (!looksApply) continue;
       if (ENTRY_JUNK_RE.test(text) || isInsideAdOrOverlay(el)) continue;
       const href = String(el.href || el.getAttribute?.("href") || "");
@@ -5933,6 +5961,10 @@
   };
 
   const findActionButton = function (scope, { includeDisabledSubmit = false } = {}) {
+    if (isWorkdayPage()) {
+      const wdAction = findWorkdayStageAction();
+      if (wdAction) return wdAction;
+    }
     const scopeEl = scope || getApplyScope();
     const diceSubmitPage = isDiceApplicationPath() && detectDiceSubmitReviewPage();
     if (diceSubmitPage) {
@@ -6013,10 +6045,17 @@
       }
     }
 
-    // Workday Review (including short My-Info → Review flows): prefer Submit.
+    // Workday Review: prefer Submit (SW pauses — never auto-clicks).
     const wd = isWorkdayPage() ? detectWorkdayWizardState() : null;
     if (wd?.isReview) {
       if (submit) return submit;
+    }
+    // Workday mid-flow: Next / Save and Continue before Review/Submit.
+    if (isWorkdayPage() && !wd?.isReview) {
+      if (next) return next;
+      if (review) return review;
+      // Do not return submit off the Review page — uncertain / final action.
+      return null;
     }
 
     // Dice wizard chrome often still has a "Next" (job carousel). The last
@@ -6213,33 +6252,46 @@
     if (!(el instanceof Element)) return null;
     const autoId = String(el.getAttribute?.("data-automation-id") || "");
     if (!autoId) return null;
-    if (/submit/i.test(autoId)) return "submit";
-    if (/next|continue|saveAndContinue|bottom-navigation-next/i.test(autoId)) return "next";
+    if (/submitApplication|submit$/i.test(autoId) || (/submit/i.test(autoId) && !/saveAndContinue/i.test(autoId))) {
+      return "submit";
+    }
+    if (/next|continue|saveAndContinue|bottom-navigation-next|bottom-navigation-continue/i.test(autoId)) {
+      return "next";
+    }
     return null;
   }
 
   /**
-   * Workday wizards vary by employer. Detect the progress/heading on screen.
+   * Workday wizards vary by employer (often ~6–8 core stages plus login / method).
+   * Detect the current stage from progress chrome, headings, path, and fields —
+   * never assume a fixed page count.
+   * @see employer portals such as freseniusmedicalcare.wd3.myworkdayjobs.com
    */
   function detectWorkdayWizardState() {
     if (!isWorkdayPage()) return null;
 
     const STEP_NAME_RE =
-      /\b(my information|personal information|contact information|my experience|work experience|experience|education|application questions|questions|voluntary disclosures?|self[- ]?identify|review|account information|create account|sign in)\b/i;
+      /\b(autofill with resume|apply manually|use (a )?(previous|last) application|application method|how would you like to apply|my information|personal information|contact information|my experience|work experience|experience|education|additional application questions|application questions|questions|voluntary disclosures?|self[- ]?identify|disability|review|account information|create account|sign in|verify (your )?email|email verification|check your email|resume|upload)\b/i;
 
     const normalizeStep = (raw) => {
       const t = cleanLabelText(raw || "");
-      if (!t || t.length > 90) return "";
+      if (!t || t.length > 120) return "";
       const m = t.match(STEP_NAME_RE);
       if (!m) return "";
       const key = m[1].toLowerCase();
+      if (/verify|email verification|check your email/.test(key)) return "Email Verification";
       if (/create account|sign in|account information/.test(key)) return "Account";
+      if (/autofill with resume|apply manually|previous|last application|application method|how would you like to apply/.test(key)) {
+        return "Application Method";
+      }
+      if (/^resume$|^upload$/.test(key)) return "Resume";
       if (/my information|personal information|contact information/.test(key)) return "My Information";
       if (/my experience|work experience|^experience$/.test(key)) return "My Experience";
       if (/^education$/.test(key)) return "Education";
+      if (/additional application questions/.test(key)) return "Additional Questions";
       if (/application questions|^questions$/.test(key)) return "Application Questions";
       if (/voluntary/.test(key)) return "Voluntary Disclosures";
-      if (/self/.test(key)) return "Self Identify";
+      if (/self|disability/.test(key)) return "Self Identify";
       if (/review/.test(key)) return "Review";
       return m[1];
     };
@@ -6259,12 +6311,15 @@
         '[data-automation-id*="Progress"]',
         '[data-automation-id*="wizard"]',
         '[data-automation-id*="step"]',
+        '[data-automation-id*="Step"]',
         '[aria-current="step"]',
         '[aria-current="page"]',
         "nav li",
         '[role="listitem"]',
         '[role="navigation"] button',
-        '[role="navigation"] a'
+        '[role="navigation"] a',
+        '[data-automation-id="wizard-progress-bar"] button',
+        '[data-automation-id="wizard-progress-bar"] li'
       ].join(", ")
     )) {
       if (!isElVisible(el) && el.getAttribute?.("aria-current") == null) continue;
@@ -6274,9 +6329,11 @@
     const headingEl =
       document.querySelector('[data-automation-id="pageHeaderTitleText"]') ||
       document.querySelector('[data-automation-id*="pageHeader"]') ||
+      document.querySelector('[data-automation-id="dialogHeader"]') ||
       document.querySelector("h1, h2, [role='heading']");
     const heading = cleanLabelText(headingEl?.textContent || "");
     const headingStep = normalizeStep(heading);
+    const bodySlice = cleanLabelText(document.body?.innerText || "").slice(0, 2500);
 
     let current = "";
     const currentEl = queryAllDeep('[aria-current="step"], [aria-current="page"]').find((el) =>
@@ -6284,21 +6341,54 @@
     );
     if (currentEl) current = normalizeStep(currentEl.textContent || currentEl.getAttribute("aria-label"));
     if (!current && headingStep) current = headingStep;
+
+    const path = String(location.pathname || "") + String(location.search || "");
     if (!current) {
-      const path = String(location.pathname || "");
       if (/\/review/i.test(path)) current = "Review";
       else if (/\/experience/i.test(path)) current = "My Experience";
       else if (/\/education/i.test(path)) current = "Education";
+      else if (/\/additional|\/more.?questions/i.test(path)) current = "Additional Questions";
       else if (/\/questions?/i.test(path)) current = "Application Questions";
       else if (/\/voluntary/i.test(path)) current = "Voluntary Disclosures";
       else if (/\/self.?ident/i.test(path)) current = "Self Identify";
       else if (/\/(myInfo|my.?information|personal)/i.test(path)) current = "My Information";
+      else if (/\/(login|signin|createaccount|auth)/i.test(path)) current = "Account";
+      else if (/\/(applyManual|apply\b).*method|howToApply/i.test(path)) current = "Application Method";
     }
+
+    // Method chooser: Autofill with Resume / Apply Manually / Use Last Application.
+    const methodButtons = queryAllDeep("button, a, [role='button'], [data-automation-id]").filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    const hasMethodChoices = methodButtons.some((el) => {
+      const t = elActionText(el);
+      const id = String(el.getAttribute?.("data-automation-id") || "");
+      return (
+        /autofill with resume|apply manually|apply with resume|use (a )?(previous|last) application/i.test(
+          t
+        ) || /applyManual|autofillWithResume|useLastApplication/i.test(id)
+      );
+    });
+    if (hasMethodChoices && (!current || current === "Account" || /apply/i.test(heading))) {
+      current = "Application Method";
+    }
+
     if (headingStep && !seen.has(headingStep)) pushStep(headingStep);
     if (current && !seen.has(current)) pushStep(current);
 
     const isReview =
-      current === "Review" || /review/i.test(heading) || /\/review(?:\/|$|\?)/i.test(location.pathname);
+      current === "Review" ||
+      /\/review(?:\/|$|\?)/i.test(path) ||
+      (/^\s*review\b/i.test(heading) &&
+        Boolean(
+          queryAllDeep("button, [role='button'], input[type='submit']").find((el) => {
+            if (!isElVisible(el)) return false;
+            const t = elActionText(el);
+            const id = String(el.getAttribute?.("data-automation-id") || "");
+            return /^\s*submit\b/i.test(t) || /submitApplication/i.test(id);
+          })
+        ));
+
     const isAuth =
       current === "Account" ||
       /create account|sign in|log in|register/i.test(heading) ||
@@ -6307,22 +6397,109 @@
           'input[type="password"], [data-automation-id*="password"], [name*="password" i]'
         )
       ) &&
-        /create account|sign in|log in|register|account/i.test(
-          document.body?.innerText?.slice(0, 2000) || ""
-        ));
+        /create account|sign in|log in|register|account/i.test(bodySlice));
+
+    const isEmailVerification =
+      current === "Email Verification" ||
+      /\b(verify your email|email verification|check your email|enter (the )?verification code|we (have )?sent (you )?(a )?code)\b/i.test(
+        heading + " " + bodySlice.slice(0, 800)
+      );
+
+    const isMethodSelect = current === "Application Method" || hasMethodChoices;
+
+    const parsingBusy = Boolean(
+      queryAllDeep('[data-automation-id*="loading"], [aria-busy="true"], [class*="spinner" i], [class*="loading" i]').find(
+        (el) => isElVisible(el)
+      ) ||
+        /\b(parsing|analyzing|reading) (your )?resume\b/i.test(bodySlice.slice(0, 1200))
+    );
+
+    const isResumeStage =
+      current === "Resume" ||
+      (/resume|upload/i.test(heading) &&
+        Boolean(document.querySelector('input[type="file"], [data-automation-id*="file"], [data-automation-id*="upload"]')));
 
     return {
       current: current || headingStep || "",
       heading,
       steps,
-      stepCount: steps.length || (current ? 1 : 0),
+      stepCount: Math.max(steps.length, current ? 1 : 0),
       isReview,
       isAuth,
+      isEmailVerification,
+      isMethodSelect,
+      isResumeStage,
+      parsingBusy,
       isExperience: current === "My Experience" || /experience/i.test(current || ""),
       isEducation: current === "Education",
       isMyInfo: current === "My Information",
+      isQuestions:
+        current === "Application Questions" ||
+        current === "Additional Questions" ||
+        /questions/i.test(current || ""),
+      isDisclosures: current === "Voluntary Disclosures" || current === "Self Identify",
       isSimpleFlow: steps.length > 0 && steps.length <= 4
     };
+  }
+
+  /** Workday stage CTA: method chooser, Save and Continue, or Review Submit (for pause). */
+  function findWorkdayStageAction() {
+    if (!isWorkdayPage()) return null;
+    const wd = detectWorkdayWizardState();
+    const controls = queryAllDeep(
+      "button, a, [role='button'], input[type='button'], input[type='submit'], [data-automation-id]"
+    ).filter((el) => isElVisible(el) && !isSiteChromeControl(el));
+
+    if (wd?.isMethodSelect) {
+      const scored = [];
+      for (const el of controls) {
+        if (!isElEnabled(el)) continue;
+        const text = elActionText(el);
+        const id = String(el.getAttribute?.("data-automation-id") || "");
+        let score = 0;
+        if (/autofill with resume|apply with resume/i.test(text) || /autofillWithResume/i.test(id)) {
+          score = 140;
+        } else if (/use (a )?(previous|last) application/i.test(text) || /useLastApplication/i.test(id)) {
+          score = 100;
+        } else if (/apply manually/i.test(text) || /applyManual/i.test(id)) {
+          score = 90;
+        }
+        if (!score) continue;
+        scored.push({ type: "next", el, text: text || "Continue", score });
+      }
+      scored.sort((a, b) => b.score - a.score);
+      if (scored[0]) return scored[0];
+    }
+
+    // Review: surface Submit so the SW can pause — never auto-click it here.
+    if (wd?.isReview) {
+      for (const el of controls) {
+        const text = elActionText(el);
+        const id = String(el.getAttribute?.("data-automation-id") || "");
+        const auto = workdayAutomationAction(el);
+        if (auto === "submit" || /^\s*submit(\s+application)?\s*$/i.test(text) || /submitApplication/i.test(id)) {
+          return { type: "submit", el, text: text || "Submit", score: 200 };
+        }
+      }
+    }
+
+    const scoredNext = [];
+    for (const el of controls) {
+      if (!isElEnabled(el)) continue;
+      const text = elActionText(el);
+      if (ENTRY_JUNK_RE.test(text) || EASY_BACK_RE.test(text)) continue;
+      if (isInsideAdOrOverlay(el)) continue;
+      const auto = workdayAutomationAction(el);
+      const cls = auto || classifyActionButton(text);
+      if (cls === "submit") continue; // never treat Submit as a progress click off Review
+      if (cls !== "next" && cls !== "review") continue;
+      if (/^\s*submit\b/i.test(text)) continue;
+      let score = actionButtonScore(el, cls) + (auto === "next" ? 40 : 0);
+      if (/save\s*(and|&)\s*continue/i.test(text)) score += 50;
+      scoredNext.push({ type: cls === "review" ? "review" : "next", el, text, score });
+    }
+    scoredNext.sort((a, b) => b.score - a.score);
+    return scoredNext[0] || null;
   }
 
   async function clickGreenhouseApplyEntry() {
@@ -6351,17 +6528,76 @@
   }
 
   async function clickWorkdayApplyEntry() {
+    const wd = detectWorkdayWizardState();
+    if (wd?.isReview) {
+      return { ok: true, clicked: false, alreadyOpen: true, text: "workday review" };
+    }
+    if (wd?.isEmailVerification) {
+      return {
+        ok: false,
+        clicked: false,
+        emailVerification: true,
+        text: "Workday email verification required"
+      };
+    }
+
     const modalBtns = queryAllDeep("button, a, [role='button'], [data-automation-id]").filter(
       (el) => isElVisible(el) && isElEnabled(el)
     );
+
+    // Application method: prefer Autofill with Resume → last application → Apply Manually.
+    const methodHit = findWorkdayStageAction();
+    if (wd?.isMethodSelect && methodHit?.el) {
+      scrollElIntoView(methodHit.el);
+      safeClick(methodHit.el);
+      await sleep(1600);
+      // Resume autofill often shows a parsing spinner before Continue appears.
+      for (let i = 0; i < 20; i += 1) {
+        const state = detectWorkdayWizardState();
+        if (!state?.parsingBusy) break;
+        await sleep(500);
+      }
+      return {
+        ok: true,
+        clicked: true,
+        text: methodHit.text || "Application method"
+      };
+    }
+
     const autofillResume = modalBtns.find((el) =>
       /autofill with resume|apply with resume|upload (a )?resume/i.test(elActionText(el))
     );
     if (autofillResume) {
       scrollElIntoView(autofillResume);
       safeClick(autofillResume);
-      await sleep(1400);
+      await sleep(1600);
+      for (let i = 0; i < 20; i += 1) {
+        if (!detectWorkdayWizardState()?.parsingBusy) break;
+        await sleep(500);
+      }
       return { ok: true, clicked: true, text: elActionText(autofillResume) || "Autofill with Resume" };
+    }
+
+    const useLast = modalBtns.find((el) =>
+      /use (a )?(previous|last) application/i.test(elActionText(el))
+    );
+    if (useLast) {
+      scrollElIntoView(useLast);
+      safeClick(useLast);
+      await sleep(1400);
+      return { ok: true, clicked: true, text: elActionText(useLast) || "Use Last Application" };
+    }
+
+    const applyManually = modalBtns.find((el) => {
+      const t = elActionText(el);
+      const id = String(el.getAttribute?.("data-automation-id") || "");
+      return /apply manually/i.test(t) || /applyManual/i.test(id);
+    });
+    if (applyManually) {
+      scrollElIntoView(applyManually);
+      safeClick(applyManually);
+      await sleep(1400);
+      return { ok: true, clicked: true, text: elActionText(applyManually) || "Apply Manually" };
     }
 
     const authCta = modalBtns.find((el) =>
@@ -6385,7 +6621,7 @@
       scrollElIntoView(applyBtn);
       safeClick(applyBtn);
       await sleep(1400);
-      const after = queryAllDeep("button, a, [role='button']").filter(
+      const after = queryAllDeep("button, a, [role='button'], [data-automation-id]").filter(
         (el) => isElVisible(el) && isElEnabled(el)
       );
       const resumeOpt = after.find((el) =>
@@ -6394,13 +6630,28 @@
       if (resumeOpt) {
         scrollElIntoView(resumeOpt);
         safeClick(resumeOpt);
-        await sleep(1400);
+        await sleep(1600);
+        for (let i = 0; i < 20; i += 1) {
+          if (!detectWorkdayWizardState()?.parsingBusy) break;
+          await sleep(500);
+        }
         return { ok: true, clicked: true, text: elActionText(resumeOpt) || "Autofill with Resume" };
+      }
+      const manualOpt = after.find((el) => /apply manually/i.test(elActionText(el)));
+      if (manualOpt) {
+        scrollElIntoView(manualOpt);
+        safeClick(manualOpt);
+        await sleep(1400);
+        return { ok: true, clicked: true, text: elActionText(manualOpt) || "Apply Manually" };
       }
       return { ok: true, clicked: true, text: elActionText(applyBtn) || "Apply" };
     }
 
-    if (/\/apply\//i.test(location.href) || probeApplicationForm().isApplicationForm) {
+    if (
+      /\/apply\//i.test(location.href) ||
+      probeApplicationForm().isApplicationForm ||
+      Boolean(detectWorkdayWizardState()?.current)
+    ) {
       return { ok: true, clicked: false, alreadyOpen: true, text: "workday apply" };
     }
     return { ok: false, clicked: false };
@@ -6424,9 +6675,75 @@
     };
   }
 
+  /**
+   * Dice job-detail → application wizard.
+   * Prefer the teal Apply CTA; fall back to /job-applications/{id}/wizard.
+   */
+  async function clickDiceApplyEntry({ preferNewTab = true } = {}) {
+    if (!/(^|\.)dice\.com$/i.test(location.hostname)) {
+      return { ok: false, clicked: false };
+    }
+    if (isDiceApplicationPath()) {
+      return { ok: true, clicked: false, alreadyOpen: true, text: "dice application" };
+    }
+
+    dismissBlockingModalsOnce();
+    const target = findDiceJobDetailApplyButton();
+    const wizardFallback = diceApplicationWizardUrl();
+
+    if (target?.el) {
+      scrollElIntoView(target.el);
+      const res = await clickKeepingSameTab(target.el, { preferNewTab: Boolean(preferNewTab) });
+      await sleep(res.clicked || res.navigateUrl ? 1400 : 600);
+
+      let navigateUrl = String(res.navigateUrl || "").trim();
+      if (navigateUrl && isDiceProfileUrl(navigateUrl)) {
+        navigateUrl = "";
+      }
+      if (!navigateUrl && wizardFallback) {
+        // Click registered but SPA did not navigate — open the wizard directly.
+        navigateUrl = wizardFallback;
+      }
+      if (navigateUrl || res.clicked) {
+        return {
+          ok: true,
+          clicked: Boolean(res.clicked),
+          navigateUrl: navigateUrl || "",
+          openInNewTab: Boolean(res.openInNewTab || preferNewTab),
+          text: target.text || elActionText(target.el) || "Apply"
+        };
+      }
+    }
+
+    if (wizardFallback) {
+      return {
+        ok: true,
+        clicked: false,
+        navigateUrl: wizardFallback,
+        openInNewTab: Boolean(preferNewTab),
+        text: "Open Dice application"
+      };
+    }
+
+    return { ok: false, clicked: false, navigateUrl: "", openInNewTab: false };
+  }
+
+  function isDiceProfileUrl(url = "") {
+    try {
+      const u = new URL(String(url || ""), location.href);
+      if (!/(^|\.)dice\.com$/i.test(u.hostname)) return false;
+      return /\/profile(?:\/|\?|#|$)/i.test(u.pathname + u.search + u.hash);
+    } catch {
+      return /dice\.com\/profile/i.test(String(url || ""));
+    }
+  }
+
   async function clickEasyApplyEntry({ preferNewTab = false } = {}) {
     await sleep(400);
     await dismissBlockingModals();
+    if (/(^|\.)dice\.com$/i.test(location.hostname)) {
+      return clickDiceApplyEntry({ preferNewTab: preferNewTab !== false });
+    }
     if (isJobrightPage()) {
       const linkedinUrl = detectJobrightLinkedInApply();
       if (linkedinUrl) {
@@ -6650,8 +6967,11 @@
 
   function getApplyActionSnapshot() {
     const probe = probeApplicationForm();
-    const emailVerification = detectGreenhouseEmailVerification();
     const workdayWizard = isWorkdayPage() ? detectWorkdayWizardState() : null;
+    const greenhouseEmail = detectGreenhouseEmailVerification();
+    const emailVerification = workdayWizard?.isEmailVerification
+      ? { ok: true, text: "Workday email verification — verify, then return to Auto Apply." }
+      : greenhouseEmail;
     // Job listing / job-detail: only Easy Apply or Apply. Never ads, Cancel, Next job.
     if (!probe.isApplicationForm) {
       const alreadyApplied =
@@ -6661,8 +6981,13 @@
         detectZipRecruiterAlreadyApplied();
       const oneClickApply = probe.oneClickApply || detectZipRecruiterOneClickOnly();
       const linkedinRedirect = probe.linkedinRedirect || detectJobrightLinkedInApply();
-      const entry =
-        alreadyApplied || oneClickApply || linkedinRedirect ? null : findEasyApplyEntryButton();
+      // Workday method / auth chooser can appear before classic form fields.
+      const workdayStage = isWorkdayPage() ? findWorkdayStageAction() : null;
+      const entry = alreadyApplied || oneClickApply || linkedinRedirect
+        ? null
+        : workdayStage?.type === "next"
+          ? workdayStage
+          : findEasyApplyEntryButton();
       return {
         ok: true,
         href: location.href,
@@ -6678,9 +7003,11 @@
         oneClickApply: oneClickApply || "",
         linkedinRedirect: linkedinRedirect || "",
         applicationSuccess: detectApplicationSuccess(),
-        action: entry ? { type: "entry", text: entry.text } : null,
+        action: entry
+          ? { type: workdayStage?.type === "next" ? "next" : "entry", text: entry.text }
+          : null,
         needsFill: false,
-        uploadsBusy: false,
+        uploadsBusy: Boolean(workdayWizard?.parsingBusy),
         applyUrls: probe.applyUrls || []
       };
     }
@@ -6691,13 +7018,13 @@
         action = { type: "entry", el: action.el, text: t };
       }
     }
-    const busy = uploadsStillBusy();
+    const busy = uploadsStillBusy() || Boolean(workdayWizard?.parsingBusy);
     const diceSubmitPage = isDiceApplicationPath() && detectDiceSubmitReviewPage();
-    // A Submit button on the page does not mean the page is finished. Required
-    // fields still waiting on an answer keep this true, so Apply fills them
-    // before it submits; optional blanks are ignored so they cannot stall it.
-    const needsFill =
-      action?.type === "submit" || diceSubmitPage
+    // Workday Review: stop for Submit — do not keep filling optional blanks.
+    const onWorkdayReview = Boolean(workdayWizard?.isReview);
+    const needsFill = onWorkdayReview
+      ? false
+      : action?.type === "submit" || diceSubmitPage
         ? busy || formNeedsFill({ requiredOnly: true })
         : formNeedsFill() || busy;
     return {

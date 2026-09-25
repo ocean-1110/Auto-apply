@@ -38,6 +38,7 @@ import { awaitTabComplete } from "./tab-utils.js";
 import {
   getOutputDirectoryHandle,
   getOutputDirectoryName,
+  buildResumeFolderAbsolutePath,
   setPendingOutputFiles,
   clearPendingOutputFiles,
   setLastSaveMeta,
@@ -54,14 +55,13 @@ import {
   activateGeneratedDocsForJob,
   clearGeneratedDocsForJob
 } from "./upload-assets.js";
-import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, classifyApplicationQuestions, isComplexQuestion, shouldBankAnswer, generateRoleSummaries, DEFAULT_OPENAI_FORM_MODEL } from "./ai-answers.js";
+import { generateHumanizedApplicationAnswers, generateConstrainedChoiceAnswers, classifyApplicationQuestions, isComplexQuestion, isJobSpecificQuestion, shouldBankAnswer, generateRoleSummaries, DEFAULT_OPENAI_FORM_MODEL } from "./ai-answers.js";
 import { findQaMatch, findQaMatchesBatch, saveQa, recordQaUsage } from "./qa-store.js";
 import { upsertPendingQa, dismissPendingMatchingQuestion } from "./pending-qa.js";
 import { getKbStatus, getStoredKb, rebuildProfileKb, buildFallbackKb } from "./profile-kb.js";
 import { planFormAnswers, pickApplicationButton, isChoiceKind } from "./form-planner.js";
 import {
   generateApplicationBrief,
-  getApplicationBrief,
   storeApplicationBrief
 } from "./application-brief.js";
 import { appendApplicationEvent } from "./application-log.js";
@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-20.jobright-linkedin-stop.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-25.apply-quality.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1424,7 +1424,7 @@ async function getCurrentApplicationTab() {
   return httpTabs.find((t) => t.active) || httpTabs[0] || null;
 }
 
-async function getAutofillAiContext() {
+async function getAutofillAiContext({ job = null, docs = null, jobId = "" } = {}) {
   const stored = await chrome.storage.local.get([
     "last_job_title",
     "last_company_name",
@@ -1434,23 +1434,37 @@ async function getAutofillAiContext() {
     "last_application_brief",
     "last_resume_json"
   ]);
+  const id = String(jobId || docs?.importedJobId || "").trim();
+  const fromDocs =
+    docs?.answerContext && typeof docs.answerContext === "object" ? docs.answerContext : null;
+  // last_* is whichever job finished generating most recently. Apply for a
+  // queued job may use it only when that slot is still this same job.
+  let lastOwned = !id;
+  if (id) {
+    const last = await getLastGeneratedDocs().catch(() => null);
+    lastOwned = String(last?.importedJobId || "") === id;
+  }
+  const lastResume =
+    lastOwned && stored.last_resume_json && typeof stored.last_resume_json === "object"
+      ? stored.last_resume_json
+      : null;
   return {
     jobMeta: {
-      jobTitle: stored.last_job_title || "",
-      companyName: stored.last_company_name || "",
-      jdText: stored.last_jd_text || "",
-      jdLink: stored.last_jd_link || ""
+      jobTitle: job?.jobTitle || (lastOwned ? stored.last_job_title : "") || fromDocs?.jobTitle || "",
+      companyName:
+        job?.companyName || (lastOwned ? stored.last_company_name : "") || fromDocs?.companyName || "",
+      jdText: job?.jdText || (lastOwned ? stored.last_jd_text : "") || "",
+      jdLink: job?.jdLink || job?.url || (lastOwned ? stored.last_jd_link : "") || fromDocs?.jdLink || ""
     },
-    resumeText: stored.last_response || "",
-    applicationBrief: stored.last_application_brief || null,
-    resumeData: stored.last_resume_json && typeof stored.last_resume_json === "object"
-      ? stored.last_resume_json
-      : null
+    resumeText: String(fromDocs?.resumeText || (lastOwned ? stored.last_response : "") || ""),
+    applicationBrief: fromDocs?.applicationBrief || (lastOwned ? stored.last_application_brief : null) || null,
+    resumeData: fromDocs?.resumeData || lastResume
   };
 }
 
-async function loadFormHistory(applicantInfo = {}, jobMeta = {}) {
-  const resume = (await getStoredResumeJson()) || {};
+async function loadFormHistory(applicantInfo = {}, jobMeta = {}, resumeOverride = undefined) {
+  const resume =
+    resumeOverride !== undefined ? resumeOverride || {} : (await getStoredResumeJson()) || {};
   const workHistory = buildWorkHistory(resume);
   const educationHistory = buildEducationHistory(resume, applicantInfo);
 
@@ -1538,7 +1552,7 @@ async function resolveTextAnswers({
 
   // Pass 1 — Q&A bank before any LLM (skip long thinking essays).
   for (const q of list) {
-    if (isComplexQuestion(q)) {
+    if (isComplexQuestion(q) || isJobSpecificQuestion(q)) {
       stillNeed.push(q);
       continue;
     }
@@ -1592,7 +1606,7 @@ async function resolveTextAnswers({
     }
 
     // Second bank try with cleaned classifier query (looser threshold).
-    if (kind !== "thinking") {
+    if (kind !== "thinking" && !isJobSpecificQuestion(q)) {
       const rematch =
         (await tryQaBankMatch(profileId, bankQuery, { threshold: 0.75 })) ||
         (bankQuery !== q.label
@@ -1622,7 +1636,7 @@ async function resolveTextAnswers({
         ? `Answering ${forAi.length} question(s) from Q&A gaps — ${thinkingCount} need JD/resume...`
         : `Answering ${forAi.length} question(s) with ${formModel}...`
     );
-    const brief = applicationBrief || (await getApplicationBrief());
+    const brief = applicationBrief || null;
     const aiResult = await generateHumanizedApplicationAnswers({
       apiKey,
       model: formModel,
@@ -1686,17 +1700,34 @@ function matchAnswerToOption(answer, options = []) {
     if (/^n(o)?\b/.test(t)) return "no";
     return "";
   };
+  const tokens = (text) => text.split(/[^a-z0-9]+/).filter((t) => t.length > 2);
   const wantLead = lead(want);
+  const wantTokens = tokens(want);
+  const leadMatches = [];
+  const scored = [];
 
-  return (
-    options.find((o) => {
-      const opt = String(o).trim().toLowerCase();
-      const optLead = lead(opt);
-      if (wantLead && optLead) return wantLead === optLead;
-      if (wantLead || optLead) return false;
-      return opt.includes(want) || want.includes(opt);
-    }) || ""
-  );
+  for (const o of options) {
+    const opt = String(o).trim().toLowerCase();
+    const optLead = lead(opt);
+    if (wantLead && optLead && wantLead !== optLead) continue;
+    if ((wantLead && !optLead) || (!wantLead && optLead)) continue;
+    if (wantLead && optLead && wantTokens.length <= 1) {
+      leadMatches.push(o);
+      continue;
+    }
+    const optTokens = new Set(tokens(opt));
+    const hits = wantTokens.filter((t) => optTokens.has(t)).length;
+    const score = wantTokens.length ? hits / wantTokens.length : 0;
+    if (score >= 0.5) scored.push({ o, score });
+  }
+
+  // "Yes" is safe only when the form has a single Yes option. Two Yes options
+  // (citizen vs needs sponsorship) must not both match the first one.
+  if (leadMatches.length === 1 && !scored.length) return leadMatches[0];
+  scored.sort((a, b) => b.score - a.score);
+  if (!scored.length) return "";
+  if (scored.length === 1 || scored[0].score > scored[1].score) return scored[0].o;
+  return "";
 }
 
 /**
@@ -1717,6 +1748,10 @@ async function resolveChoiceAnswers(
   let bankHits = 0;
 
   for (const q of list) {
+    if (isJobSpecificQuestion(q)) {
+      stillNeed.push(q);
+      continue;
+    }
     const match = await tryQaBankMatch(profileId, q.label, { threshold: 0.82 });
     if (match?.record?.answer) {
       // Prefer bank answer that exists in the option list when options are known.
@@ -1773,7 +1808,9 @@ async function resolveChoiceAnswers(
     const bankQuery = meta.bankQuery || q.label;
     if (kind === "skip" || kind === "identity") continue;
 
-    const rematch = await tryQaBankMatch(profileId, bankQuery, { threshold: 0.75 });
+    const rematch = isJobSpecificQuestion(q)
+      ? null
+      : await tryQaBankMatch(profileId, bankQuery, { threshold: 0.75 });
     if (rematch?.record?.answer) {
       let answer = rematch.record.answer;
       if (Array.isArray(q.options) && q.options.length) {
@@ -1799,7 +1836,7 @@ async function resolveChoiceAnswers(
       const withOptions = forAi.filter((q) => Array.isArray(q.options) && q.options.length);
       if (withOptions.length) {
         await setStatus(`Choosing answers for ${withOptions.length} dropdown/radio question(s)...`);
-        const brief = applicationBrief || (await getApplicationBrief());
+        const brief = applicationBrief || null;
         const aiResult = await generateConstrainedChoiceAnswers({
           apiKey,
           model: formModel,
@@ -1821,13 +1858,19 @@ async function resolveChoiceAnswers(
         const qById = new Map(withOptions.map((q) => [q.id, q]));
         for (const row of aiResult.answers || []) {
           if (!row?.id || !row?.answer) continue;
-          resolved.push({ id: row.id, answer: row.answer, source: "ai" });
           const q = qById.get(row.id);
-          if (q?.label) {
+          let answer = String(row.answer || "").trim();
+          if (q && Array.isArray(q.options) && q.options.length) {
+            const onList = matchAnswerToOption(answer, q.options);
+            if (!onList) continue;
+            answer = onList;
+          }
+          resolved.push({ id: row.id, answer, source: "ai" });
+          if (q?.label && shouldBankAnswer(q, answer, q.fieldType || "select")) {
             await saveReusableQa({
               profileId,
               question: q.bankQuery || q.label,
-              answer: row.answer,
+              answer,
               fieldType: q.fieldType || "select",
               site
             });
@@ -1844,15 +1887,17 @@ async function resolveChoiceAnswers(
   return resolved;
 }
 
-async function formatUploadDocsLocation(docs) {
-  // The docs' OWN labels always win. getLastSaveMeta() is global — it points at
-  // whichever job was saved most recently — so consulting it before the docs'
-  // own folderName used to label this job's PDFs with another job's folder.
-  const ownFolder = String(docs?.pathLabel || docs?.folderName || "").trim();
-  let folder = ownFolder;
-  if (!folder) {
-    const save = (await getLastSaveMeta().catch(() => null)) || {};
-    folder = String(save.pathLabel || save.folderName || "").trim();
+async function formatUploadDocsLocation(docs, { job = null } = {}) {
+  // Never use getLastSaveMeta() here. That slot is the last job written in a
+  // batch, so it would label this job's PDFs with another job's folder.
+  const jobFolder = extractFolderNameFromSaveMeta(job?.resumeFolder || job?.folderName || "");
+  const docsFolder = extractFolderNameFromSaveMeta(docs?.folderName || "");
+  const folderName = jobFolder || docsFolder;
+  let folder = "";
+  if (folderName) {
+    folder = (await buildResumeFolderAbsolutePath(folderName).catch(() => "")) || folderName;
+  } else {
+    folder = String(docs?.pathLabel || "").trim();
   }
   const resumeName = String(docs?.resume?.fileName || "").trim();
   const coverName = String(docs?.coverLetter?.fileName || "").trim();
@@ -1860,17 +1905,41 @@ async function formatUploadDocsLocation(docs) {
     if (!name) return "";
     if (!folder) return name;
     const base = folder.replace(/[\\/]+$/, "");
-    if (base.endsWith(name)) return base;
-    return `${base} / ${name}`;
+    if (base.toLowerCase().endsWith(name.toLowerCase())) return base;
+    const sep = /\\/.test(base) ? "\\" : " / ";
+    return `${base}${sep}${name}`;
   };
   const resumePath = joinPath(resumeName);
   const coverPath = joinPath(coverName);
   return {
     folder,
+    folderName,
     resumePath,
     coverPath,
     summary: [resumePath, coverPath].filter(Boolean).join("  +  ") || folder
   };
+}
+
+/** Panel banner + status so you can see which folder is being uploaded. */
+async function announceUploadSource(loc) {
+  const folder = String(loc?.folder || "").trim();
+  const resumePath = String(loc?.resumePath || "").trim();
+  const coverPath = String(loc?.coverPath || "").trim();
+  if (!folder && !resumePath && !coverPath) return;
+  await chrome.storage.local.set({
+    active_upload_source: {
+      folder,
+      resumePath,
+      coverPath,
+      at: Date.now()
+    }
+  });
+  const files = [resumePath, coverPath].filter(Boolean).join("  +  ");
+  await setStatus(
+    folder
+      ? `Uploading resume & cover letter from ${folder}${files ? ` (${files})` : ""}`
+      : `Uploading ${files}`
+  );
 }
 
 function uploadDocsMismatchError(resolved) {
@@ -1907,53 +1976,106 @@ async function findImportedJobByUrl(url) {
  * and never hand over files that are known to belong to a different job.
  */
 async function resolveUploadDocsForTab(tabId, { explicitDocs = null } = {}) {
-  if (explicitDocs?.resume?.base64 || explicitDocs?.coverLetter?.base64) {
-    return { docs: explicitDocs, mismatch: null };
-  }
-
   const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
   const url = tab?.url || "";
   const match = url ? await findImportedJobByUrl(url) : null;
 
-  let jobLoadError = "";
-  if (match) {
-    let forJob = null;
-    try {
-      forJob = await ensureUploadDocsForImportedJob(match.jobId, match.job);
-    } catch (err) {
-      // e.g. "unlock the output folder" — more actionable than a generic message.
-      jobLoadError = String(err?.message || err);
+  if (explicitDocs?.resume?.base64 || explicitDocs?.coverLetter?.base64) {
+    const tagged = String(explicitDocs.importedJobId || "").trim();
+    if (match && tagged && tagged !== match.jobId) {
+      return {
+        docs: null,
+        error: `These PDFs belong to a different job than the page that is open (${match.job?.jobTitle || match.jobId}).`,
+        mismatch: {
+          expected: match.job?.jobTitle || match.jobId,
+          got: explicitDocs.pathLabel || explicitDocs.folderName || tagged
+        }
+      };
     }
+    return { docs: explicitDocs, mismatch: null };
+  }
+
+  let jobLoadError = "";
+  const loadJob = async (jobId, job) => {
+    try {
+      return await ensureUploadDocsForImportedJob(jobId, job);
+    } catch (err) {
+      jobLoadError = String(err?.message || err);
+      return null;
+    }
+  };
+
+  if (match) {
+    const forJob = await loadJob(match.jobId, match.job);
     if (forJob?.resume?.base64 || forJob?.coverLetter?.base64) {
       return { docs: forJob, mismatch: null };
+    }
+
+    const last = await getLastGeneratedDocs();
+    const lastJobId = String(last?.importedJobId || "").trim();
+    if (
+      lastJobId === match.jobId &&
+      (last?.resume?.base64 || last?.coverLetter?.base64)
+    ) {
+      return { docs: last, mismatch: null };
+    }
+    const folder = extractFolderNameFromSaveMeta(match.job?.resumeFolder || "");
+    return {
+      docs: null,
+      error:
+        jobLoadError ||
+        (folder
+          ? `No resume PDF found in this job's folder (${folder}). Generate a resume for this job, then Apply.`
+          : "No resume is saved for this job. Generate a resume first, then Apply."),
+      mismatch: lastJobId && lastJobId !== match.jobId
+        ? {
+            expected: match.job?.jobTitle || match.jobId,
+            got: last?.pathLabel || last?.folderName || lastJobId
+          }
+        : null
+    };
+  }
+
+  // ATS pages (Greenhouse, Workday, Dice wizard) do not share the posting URL.
+  // The job selected in the panel is the one the user is applying to.
+  const selectedId = String(
+    (await chrome.storage.local.get(IMPORTED_JOBS_SELECTED_ID_KEY))[IMPORTED_JOBS_SELECTED_ID_KEY] || ""
+  ).trim();
+  if (selectedId) {
+    const selected = (await getImportedJobsById())[selectedId];
+    if (selected) {
+      const forSelected = await loadJob(selectedId, selected);
+      if (forSelected?.resume?.base64 || forSelected?.coverLetter?.base64) {
+        return { docs: forSelected, mismatch: null };
+      }
+      const folder = extractFolderNameFromSaveMeta(selected.resumeFolder || "");
+      return {
+        docs: null,
+        error:
+          jobLoadError ||
+          (folder
+            ? `No resume PDF found in the selected job's folder (${folder}). Generate a resume for this job, then Apply.`
+            : "No resume is saved for the selected job. Generate a resume first, then Apply.")
+      };
     }
   }
 
   const last = await getLastGeneratedDocs();
-  if (!last?.resume?.base64 && !last?.coverLetter?.base64) {
-    return { docs: last, mismatch: null, error: jobLoadError };
-  }
-
-  // The global slot has files. Refuse them when they demonstrably belong to a
-  // different queued job than the one this page is showing.
-  const lastJobId = String(last.importedJobId || "").trim();
-  if (match && lastJobId && lastJobId !== match.jobId) {
-    const byId = await getImportedJobsById();
-    const otherJob = byId[lastJobId];
+  const lastJobId = String(last?.importedJobId || "").trim();
+  if (lastJobId) {
     return {
       docs: null,
-      error: jobLoadError,
+      error:
+        "This page is not the job those resume files were built for. Select that job in the panel, then Apply.",
       mismatch: {
-        expected: match.job?.jobTitle || match.jobId,
-        got:
-          last.pathLabel ||
-          last.folderName ||
-          otherJob?.jobTitle ||
-          lastJobId
+        expected: "the job open on this page",
+        got: last?.pathLabel || last?.folderName || lastJobId
       }
     };
   }
-
+  if (!last?.resume?.base64 && !last?.coverLetter?.base64) {
+    return { docs: last, mismatch: null, error: jobLoadError };
+  }
   return { docs: last, mismatch: null };
 }
 
@@ -2086,10 +2208,19 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   }
   const docs = resolvedDocs.docs;
   const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
-  const ctx = await getAutofillAiContext();
+  let boundJob = null;
+  const boundJobId = String(docs?.importedJobId || "").trim();
+  if (boundJobId) {
+    boundJob = (await getImportedJobsById())[boundJobId] || null;
+  }
+  const ctx = await getAutofillAiContext({ job: boundJob, docs, jobId: boundJobId });
   let history = { workHistory: [], educationHistory: [] };
   try {
-    history = await loadFormHistory(applicantInfo, ctx.jobMeta);
+    history = await loadFormHistory(
+      applicantInfo,
+      ctx.jobMeta,
+      boundJobId ? ctx.resumeData : undefined
+    );
   } catch {
     history = { workHistory: [], educationHistory: [] };
   }
@@ -2111,8 +2242,8 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
   }
 
   const loc = await formatUploadDocsLocation(docs);
-  if (loc.summary) {
-    await setStatus(`Uploading from ${loc.summary}...`);
+  if (loc.folder || loc.summary) {
+    await announceUploadSource(loc);
   }
 
   const site = detectSiteFromUrl(tab.url || "");
@@ -2570,8 +2701,11 @@ async function runAiFormPlan({ tabId, profileId, applicantInfo, ctx, site }) {
     const bankMatches = await findQaMatchesBatch(
       profileId,
       fields.map((f) => ({ id: f.id, text: f.label })),
-      { limit: 3, threshold: 0.5 }
+      { limit: 3, threshold: 0.82 }
     ).catch(() => new Map());
+    for (const field of fields) {
+      if (isJobSpecificQuestion(field)) bankMatches.delete(field.id);
+    }
 
     const buttons = [];
     for (const fr of frames) {
@@ -2879,6 +3013,7 @@ async function runAutofillStep(
   }
   const docs = resolvedDocs.docs;
   const loc = await formatUploadDocsLocation(docs);
+  if (loc.folder || loc.summary) await announceUploadSource(loc);
 
   if (shouldUseJobCardApplyPath(tab.url || "", probe)) {
     if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
@@ -2895,7 +3030,7 @@ async function runAutofillStep(
     const ea = await startMultiStepApplyOnTab(profileId, tabId, {
       maxSteps: 14,
       uploadDocs: docs,
-      closeOnSuccess: isAutoSubmitAllowedSite(site),
+      closeOnSuccess: site === "dice" || isAutoSubmitAllowedSite(site),
       preferNewTab: site === "dice" || site === "jobgether"
     });
     if (!ea.ok && ea.error) {
@@ -3149,7 +3284,7 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
   const ea = await startMultiStepApplyOnTab(profileId, tab.id, {
     maxSteps: 14,
     uploadDocs: docs,
-    closeOnSuccess: isAutoSubmitAllowedSite(site),
+    closeOnSuccess: site === "dice" || isAutoSubmitAllowedSite(site),
     preferNewTab: site === "dice" || isGatewaySite(site)
   });
   if (!ea.ok && ea.error) {
@@ -4402,16 +4537,16 @@ async function runApplyImportedJobCore(
 
   const liveJob = (await getImportedJobsById())[importedJobId];
   let uploadDocs = await ensureUploadDocsForImportedJob(importedJobId, liveJob);
+  const savedLoc = await formatUploadDocsLocation(uploadDocs, { job: liveJob });
 
   if (uploadDocs?.resume?.base64 || uploadDocs?.coverLetter?.base64) {
-    const resumeName = uploadDocs.resume?.fileName || "resume";
-    const coverName = uploadDocs.coverLetter?.fileName
-      ? ` + ${uploadDocs.coverLetter.fileName}`
-      : "";
-    await setStatus(`${prefix}Using saved files: ${resumeName}${coverName}`);
+    await setStatus(
+      `${prefix}Using this job's files from ${savedLoc.folder || savedLoc.folderName || "the saved folder"}`
+    );
+    await announceUploadSource(savedLoc);
     await setImportedJobStatus(importedJobId, {
       status: "opening_form",
-      statusDetail: `${prefix}Resume ready — opening application form...`
+      statusDetail: `${prefix}Resume ready from ${savedLoc.folder || savedLoc.folderName || "this job's folder"} — opening application form...`
     });
   } else if (extractFolderNameFromSaveMeta(liveJob?.resumeFolder || "")) {
     throw new Error(
@@ -4487,23 +4622,31 @@ async function runApplyImportedJobCore(
     );
   }
 
-  const loc = await formatUploadDocsLocation(uploadDocs);
+  const loc = await formatUploadDocsLocation(uploadDocs, {
+    job: (await getImportedJobsById())[importedJobId]
+  });
   await setImportedJobStatus(importedJobId, {
     status: "filling",
-    statusDetail: loc.summary
-      ? `${prefix}Uploading ${loc.summary} and filling the form (${site})...`
-      : `${prefix}Running Auto Apply (${site})...`
+    statusDetail: loc.folder
+      ? `${prefix}Uploading from ${loc.folder}`
+      : loc.summary
+        ? `${prefix}Uploading ${loc.summary} and filling the form (${site})...`
+        : `${prefix}Running Auto Apply (${site})...`
   });
+  if (loc.folder || loc.summary) await announceUploadSource(loc);
   await setStatus(
-    loc.summary
-      ? `${prefix}Uploading from ${loc.summary} onto ${site}...`
-      : `${prefix}Running Auto Apply (${site})...`
+    loc.folder
+      ? `${prefix}Uploading from ${loc.folder} onto ${site}...`
+      : loc.summary
+        ? `${prefix}Uploading from ${loc.summary} onto ${site}...`
+        : `${prefix}Running Auto Apply (${site})...`
   );
 
   const ea = await startMultiStepApplyOnTab(profileId, tabId, {
     maxSteps: 14,
     uploadDocs,
-    closeOnSuccess: isAutoSubmitAllowedSite(site),
+    // Dice: always auto-submit and close the success wizard tab.
+    closeOnSuccess: site === "dice" || isAutoSubmitAllowedSite(site),
     preferNewTab: site === "dice" || isGatewaySite(site)
   });
   if (!ea.ok && ea.error) throw new Error(ea.error);
@@ -4664,10 +4807,12 @@ async function startMultiStepApplyOnTab(
   const stepBudgetInit = stepBudgetForSite(initialSite, maxSteps);
   let stepBudget = stepBudgetInit;
   const useNewTab = preferNewTab || initialSite === "dice" || isGatewaySite(initialSite);
-  const autoClickSubmit = isAutoSubmitAllowedSite(initialSite);
+  const autoClickSubmit = isAutoSubmitAllowedSite(initialSite) || initialSite === "dice";
   // Dice always closes the success wizard after Submit. Keep the job page open
   // when Apply used a new tab. Other sites never close tabs.
-  const mayCloseTabs = Boolean(autoClickSubmit && (closeOnSuccess || initialSite === "dice"));
+  const mayCloseTabs = Boolean(
+    autoClickSubmit && (closeOnSuccess || initialSite === "dice")
+  );
   // Resolve the PDFs ONCE, against the job page we start on, and reuse them for
   // every step. Later steps land on an ATS URL that no longer matches the job
   // posting, so re-resolving mid-run could fall back to another job's files.
@@ -4827,12 +4972,21 @@ async function startMultiStepApplyOnTab(
       workdayStepHint = probe.workdayWizard.current || workdayStepHint;
       const detected = Number(probe.workdayWizard.stepCount || 0);
       if (detected > 0) {
-        const adaptive = Math.min(22, Math.max(detected + 5, 8));
-        if (adaptive < stepBudget) stepBudget = adaptive;
+        // Budget from observed progress + room for optional disclosures / retries.
+        const adaptive = Math.min(24, Math.max(detected + 8, 14));
+        if (adaptive > stepBudget) stepBudget = adaptive;
       }
     }
 
-    if (probe.emailVerification && liveSite === "greenhouse") {
+    if (probe.emailVerification && (liveSite === "greenhouse" || liveSite === "workday")) {
+      if (liveSite === "workday") {
+        summary.status = "needs_review";
+        summary.detail =
+          probe.emailVerificationText ||
+          "Workday email verification required. Verify your email, return to the application tab, then run Auto Apply again.";
+        summary.tabId = currentTabId;
+        return summary;
+      }
       const otp = await completeGreenhouseEmailVerification(currentTabId, {
         afterEpochMs: greenhouseSubmitAt || Date.now() - 15_000
       });
@@ -5067,6 +5221,30 @@ async function startMultiStepApplyOnTab(
             "Dice tried to open Profile instead of Apply. Click the teal Apply button in the job detail panel, then run Auto Apply again.";
           return summary;
         }
+        // Dice: if Apply returned a wizard URL, open it (new tab preferred).
+        if (
+          site === "dice" &&
+          clickRes?.navigateUrl &&
+          isDiceApplicationUrl(clickRes.navigateUrl)
+        ) {
+          if (useNewTab || clickRes.openInNewTab) {
+            const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, currentTabId);
+            if (newId) {
+              currentTabId = newId;
+              summary.tabId = currentTabId;
+              summary.tabUrl = clickRes.navigateUrl;
+              summary.steps = step + 1;
+              lookedForEntry = false;
+              diceEntryAttempts = 0;
+              continue;
+            }
+          }
+          await navigateTabToUrl(currentTabId, clickRes.navigateUrl);
+          lookedForEntry = false;
+          diceEntryAttempts = 0;
+          summary.steps = step + 1;
+          continue;
+        }
         if (clickRes?.navigateUrl && isAllowedApplyNavUrl(clickRes.navigateUrl)) {
           if (useNewTab || clickRes.openInNewTab) {
             const newId = await openApplyUrlInNewTab(clickRes.navigateUrl, currentTabId);
@@ -5212,16 +5390,22 @@ async function startMultiStepApplyOnTab(
     }
 
     await setStatus(
-      loc.summary
-        ? `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — uploading ${loc.summary}...`
-        : `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — filling form...`
+      loc.folder
+        ? `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — uploading from ${loc.folder}`
+        : loc.summary
+          ? `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — uploading ${loc.summary}...`
+          : `Auto Apply (${stepLabel}): step ${step + 1}/${stepBudget} — filling form...`
     );
+    if (loc.folder || loc.summary) await announceUploadSource(loc);
     const fillRes = await startAutofillOnCurrentPage(profileId, currentTabId, { uploadDocs: runUploadDocs });
     if (fillRes?.skipped && step === 0) {
       return { ok: false, error: fillRes.error || "Autofill skipped.", ...summary, status: "failed" };
     }
-    if (Number(fillRes?.uploadedCount || 0) > 0 && loc.summary) {
-      await setStatus(`Uploaded ${loc.summary} (${fillRes.uploadedCount} file(s)). Filling remaining fields...`);
+    if (Number(fillRes?.uploadedCount || 0) > 0 && (loc.folder || loc.summary)) {
+      await setStatus(
+        `Uploaded from ${loc.folder || "this job's folder"}: ${[loc.resumePath, loc.coverPath].filter(Boolean).join("  +  ") || loc.summary} (${fillRes.uploadedCount} file(s)).`
+      );
+      await announceUploadSource(loc);
     }
     summary.filled += Number(fillRes?.filledCount || 0);
     summary.uploaded += Number(fillRes?.uploadedCount || 0);
@@ -5303,10 +5487,38 @@ async function startMultiStepApplyOnTab(
     }
 
     if (probe.uploadsBusy) {
+      // Workday resume parse / upload — wait briefly, then continue filling.
+      if (liveSite === "workday" || initialSite === "workday") {
+        await setStatus(
+          `Auto Apply (${stepLabel}): waiting for Workday resume upload/parse...`
+        );
+        for (let w = 0; w < 24; w += 1) {
+          await sleepMs(500);
+          probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
+          if (!probe.uploadsBusy) break;
+        }
+        if (!probe.uploadsBusy) {
+          summary.steps = step + 1;
+          continue;
+        }
+      }
       summary.status = "needs_review";
       summary.detail =
         "File upload is still in progress on this page. Wait for the resume/cover letter to finish uploading, then run Auto Apply again.";
       return summary;
+    }
+
+    // Workday Review: always stop before Submit (never auto-click).
+    if (
+      (liveSite === "workday" || initialSite === "workday") &&
+      (probe.workdayWizard?.isReview || probe.best?.action?.type === "submit") &&
+      !probe.needsFill
+    ) {
+      return pauseAtSubmitForReview(
+        currentTabId,
+        summary,
+        probe.best?.action?.text || "Submit"
+      );
     }
 
     // Dice: never advance while custom / unanswered fields remain. Notify and stop
@@ -5367,9 +5579,31 @@ async function startMultiStepApplyOnTab(
       }
     }
 
-    // Non-Dice: one fill per step, then stop and highlight Apply / Submit.
-    // The old path asked AI to click a button and kept calling the filler.
-    if (site !== "dice") {
+    const actionTypeNow = String(probe.best?.action?.type || "");
+    const multiStepAts = new Set([
+      "workday",
+      "greenhouse",
+      "indeed",
+      "ziprecruiter",
+      "smartrecruiters",
+      "zohorecruit",
+      "oraclecloud"
+    ]);
+    const allowMultiStep =
+      site === "dice" || multiStepAts.has(site) || multiStepAts.has(liveSite);
+    // Single-page / unknown boards: one fill, then highlight for the user.
+    // Workday and other multi-step ATS keep clicking Next until Review/Submit.
+    if (!allowMultiStep) {
+      return pauseFilledAskHighlight(currentTabId, summary, probe);
+    }
+    if (
+      allowMultiStep &&
+      site !== "dice" &&
+      actionTypeNow !== "next" &&
+      actionTypeNow !== "review" &&
+      actionTypeNow !== "submit"
+    ) {
+      // Filled but no recognized progress control — highlight and stop.
       return pauseFilledAskHighlight(currentTabId, summary, probe);
     }
 
@@ -5649,7 +5883,7 @@ async function startEasyApplyOnTab(profileId, tabId = null) {
   const site = detectSiteFromUrl(tab?.url || "");
   return startMultiStepApplyOnTab(profileId, tabId, {
     maxSteps: 14,
-    closeOnSuccess: isAutoSubmitAllowedSite(site),
+    closeOnSuccess: site === "dice" || isAutoSubmitAllowedSite(site),
     preferNewTab: site === "dice" || isGatewaySite(site)
   });
 }
@@ -6500,83 +6734,99 @@ function extractFolderNameFromSaveMeta(value) {
 
 /**
  * Resolve resume/cover letter PDFs for an imported job:
- * 1) per-job IndexedDB cache
- * 2) files saved under the job's output folder
- * 3) panel-assisted folder read (permission gesture)
+ * 1) that job's output folder on disk (source of truth after batch save)
+ * 2) per-job IndexedDB cache when it was saved into the same folder
+ * Never the global "last generated" slot — that is whichever job finished last.
  */
 async function ensureUploadDocsForImportedJob(jobId, job = null) {
   const id = String(jobId || "").trim();
   if (!id) return null;
 
-  let docs = await getGeneratedDocsForJob(id);
-  if (docs?.resume?.base64 || docs?.coverLetter?.base64) {
-    await activateGeneratedDocsForJob(id);
-    const rootLabel = (await getOutputDirectoryName()) || "";
-    if (!docs.pathLabel && (rootLabel || docs.folderName)) {
-      docs = await stampDocsPath(
-        docs,
-        rootLabel && docs.folderName ? `${rootLabel} / ${docs.folderName}` : docs.folderName || rootLabel,
-        id
-      );
+  const expectedFolder = extractFolderNameFromSaveMeta(
+    job?.resumeFolder || job?.folderName || ""
+  );
+
+  const pinDocs = async (docs) => {
+    if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return docs;
+    const prior = await getGeneratedDocsForJob(id).catch(() => null);
+    const answerContext = docs.answerContext || prior?.answerContext || null;
+    const folderName =
+      expectedFolder || extractFolderNameFromSaveMeta(docs.folderName || "") || docs.folderName || "";
+    const pathLabel = folderName
+      ? (await buildResumeFolderAbsolutePath(folderName).catch(() => "")) || folderName
+      : docs.pathLabel || "";
+    const next = {
+      ...docs,
+      folderName,
+      pathLabel,
+      importedJobId: id,
+      ...(answerContext ? { answerContext } : {})
+    };
+    await setGeneratedDocsForJob(id, next);
+    return next;
+  };
+
+  const loadFromFolder = async (folderName) => {
+    if (!folderName) return null;
+    await setStatus(`Loading saved resume/cover letter from ${folderName}...`);
+    let docs = null;
+    try {
+      docs = await readJobUploadDocsFromDirectory(folderName, { interactive: false });
+    } catch (err) {
+      if (err?.code !== "NEEDS_PERMISSION") {
+        docs = null;
+      } else {
+        try {
+          await ensurePanelVisible();
+        } catch {
+          /* panel may already be open */
+        }
+        const panelRes = await notifyPanelToLoadJobDocs(folderName, id);
+        if (panelRes?.ok && (panelRes.docs?.resume || panelRes.docs?.coverLetter)) {
+          docs = panelRes.docs;
+        } else if (panelRes?.needsPermission) {
+          throw new Error(
+            "Click once in the extension panel to unlock the output folder, then click Apply again."
+          );
+        }
+      }
     }
-    return docs;
-  }
 
-  const folderName = extractFolderNameFromSaveMeta(job?.resumeFolder || job?.folderName || "");
-  if (!folderName) return null;
-
-  await setStatus(`Loading saved resume/cover letter from ${folderName}...`);
-
-  try {
-    docs = await readJobUploadDocsFromDirectory(folderName, { interactive: false });
-  } catch (err) {
-    if (err?.code !== "NEEDS_PERMISSION") {
-      docs = null;
-    } else {
+    if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
       try {
         await ensurePanelVisible();
       } catch {
-        /* panel may already be open */
+        /* ignore */
       }
       const panelRes = await notifyPanelToLoadJobDocs(folderName, id);
-      if (panelRes?.ok && (panelRes.docs?.resume || panelRes.docs?.coverLetter)) {
-        docs = panelRes.docs;
-      } else if (panelRes?.needsPermission) {
+      if (panelRes?.ok) docs = panelRes.docs;
+      if (panelRes?.needsPermission) {
         throw new Error(
           "Click once in the extension panel to unlock the output folder, then click Apply again."
         );
       }
     }
-  }
-
-  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) {
-    // One more try via panel even when SW read returned empty (permission/path issues).
-    try {
-      await ensurePanelVisible();
-    } catch {
-      /* ignore */
-    }
-    const panelRes = await notifyPanelToLoadJobDocs(folderName, id);
-    if (panelRes?.ok) docs = panelRes.docs;
-    if (panelRes?.needsPermission) {
-      throw new Error(
-        "Click once in the extension panel to unlock the output folder, then click Apply again."
-      );
-    }
-  }
-
-  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return null;
-
-  const rootLabel = (await getOutputDirectoryName()) || "";
-  docs = {
-    ...docs,
-    pathLabel:
-      docs.pathLabel ||
-      (rootLabel && docs.folderName ? `${rootLabel} / ${docs.folderName}` : docs.folderName || rootLabel)
+    if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return null;
+    return pinDocs({ ...docs, folderName: docs.folderName || folderName });
   };
-  await setGeneratedDocsForJob(id, docs);
-  await activateGeneratedDocsForJob(id);
-  return docs;
+
+  // Disk folder recorded on the job card wins over a cache that may belong
+  // to a different save (or carry the last batch job's path label).
+  if (expectedFolder) {
+    const fromDisk = await loadFromFolder(expectedFolder);
+    if (fromDisk) return fromDisk;
+  }
+
+  const cached = await getGeneratedDocsForJob(id);
+  const cachedFolder = extractFolderNameFromSaveMeta(cached?.folderName || "");
+  const cacheOk =
+    (cached?.resume?.base64 || cached?.coverLetter?.base64) &&
+    (!expectedFolder ||
+      !cachedFolder ||
+      cachedFolder.toLowerCase() === expectedFolder.toLowerCase());
+  if (cacheOk) return pinDocs(cached);
+
+  return null;
 }
 
 /**
@@ -6615,10 +6865,24 @@ async function waitForPanelFolderUnlock(rootLabel, folderName, timeoutMs = 12000
  * Does NOT use chrome.downloads — that triggers Save As dialogs when Chrome
  * is set to "Ask where to save each file".
  */
-async function commitOutputBundle(folderName, files, { importedJobId = "" } = {}) {
+async function mergeJobAnswerContext(jobId, patch) {
+  const id = String(jobId || "").trim();
+  if (!id || !patch || typeof patch !== "object") return;
+  const docs = await getGeneratedDocsForJob(id);
+  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64) return;
+  await setGeneratedDocsForJob(id, {
+    ...docs,
+    answerContext: { ...(docs.answerContext || {}), ...patch }
+  });
+}
+
+async function commitOutputBundle(folderName, files, { importedJobId = "", answerContext = null } = {}) {
   let docs = null;
   try {
     docs = pickUploadDocsFromBundle(folderName, files);
+    if (answerContext && typeof answerContext === "object") {
+      docs = { ...docs, answerContext };
+    }
     if (importedJobId) {
       await setGeneratedDocsForJob(importedJobId, docs);
     } else {
@@ -6754,7 +7018,14 @@ async function saveResumeAndCoverLetter(
   }
 
   const saved = await commitOutputBundle(folderName, files, {
-    importedJobId: jobMeta?.importedJobId || ""
+    importedJobId: jobMeta?.importedJobId || "",
+    answerContext: {
+      resumeText: String(output || "").slice(0, 20000),
+      resumeData: resumeData || null,
+      jobTitle: jobMeta?.jobTitle || "",
+      companyName: jobMeta?.companyName || "",
+      jdLink: jobMeta?.jdLink || ""
+    }
   });
   const savedDir = saved?.pathLabel || "";
   const docs = saved?.docs || pickUploadDocsFromBundle(folderName, files);
@@ -7202,6 +7473,9 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
       applicantInfo
     });
     await storeApplicationBrief(brief);
+    if (brief && meta?.importedJobId) {
+      await mergeJobAnswerContext(meta.importedJobId, { applicationBrief: brief });
+    }
   } catch (briefErr) {
     if (isCancelError(briefErr)) throw briefErr;
     await storeApplicationBrief(null);
@@ -8909,6 +9183,9 @@ async function resolvePreviewJobContext() {
               applicantInfo
             });
             await storeApplicationBrief(brief);
+            if (brief && jobMeta.importedJobId) {
+              await mergeJobAnswerContext(jobMeta.importedJobId, { applicationBrief: brief });
+            }
           }
         } catch {
           await storeApplicationBrief(null);

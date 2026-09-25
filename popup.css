@@ -1570,6 +1570,13 @@ textarea:focus {
   font-size: 13px;
 }
 
+.save-banner.is-upload-source .save-banner-text span {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: unset;
+  word-break: break-all;
+}
+
 .perm-banner .save-banner-text strong {
   color: var(--amber);
 }

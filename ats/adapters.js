@@ -26,7 +26,8 @@ export const ATS_ADAPTERS = [
     autoSubmitAllowed: true,
     // Dice Easy Apply is profile + upload + Next/Submit; AI form planning slows/breaks it.
     aiFormAssist: false,
-    stepBudget: 12
+    // Job detail Apply → wizard fill → Submit → success close.
+    stepBudget: 14
   },
   {
     id: "indeed",
@@ -47,9 +48,11 @@ export const ATS_ADAPTERS = [
     id: "workday",
     label: "Workday",
     hostPatterns: [/(^|\.)myworkdayjobs\.com$/i, /(^|\.)workdayjobs\.com$/i],
+    // Never auto-submit: stop on Review / Submit for user confirmation.
     autoSubmitAllowed: false,
     isEmployerAts: true,
-    stepBudget: 16
+    // ~6–8 core stages plus login, method, resume parse, optional disclosures.
+    stepBudget: 22
   },
   {
     id: "greenhouse",

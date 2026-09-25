@@ -351,6 +351,7 @@ export async function readJobUploadDocsFromDirectory(folderName, { interactive =
 
   let resume = null;
   let coverLetter = null;
+  const otherPdfs = [];
 
   for await (const [name, handle] of jobDir.entries()) {
     if (!handle || handle.kind !== "file") continue;
@@ -369,12 +370,14 @@ export async function readJobUploadDocsFromDirectory(folderName, { interactive =
       coverLetter = entry;
       continue;
     }
-    if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower)) {
+    if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower) || /(^|[^a-z])cv([^a-z]|$)/i.test(lower)) {
       resume = entry;
       continue;
     }
-    if (!resume) resume = entry;
+    otherPdfs.push(entry);
   }
+
+  if (!resume && otherPdfs.length === 1) resume = otherPdfs[0];
 
   if (!resume?.base64 && !coverLetter?.base64) return null;
   return { folderName: safeFolder, resume, coverLetter };

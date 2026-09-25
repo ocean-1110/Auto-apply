@@ -68,6 +68,8 @@ function normalizeDocsPayload(docs = {}) {
     folderName: docs?.folderName || "",
     pathLabel: docs?.pathLabel || "",
     importedJobId: docs?.importedJobId || "",
+    answerContext:
+      docs?.answerContext && typeof docs.answerContext === "object" ? docs.answerContext : null,
     updatedAt: Date.now()
   };
 }
@@ -136,6 +138,7 @@ export async function clearGeneratedDocsForJob(jobId) {
 export function pickUploadDocsFromBundle(folderName, files = []) {
   let resume = null;
   let coverLetter = null;
+  const otherPdfs = [];
 
   for (const file of files) {
     if (!file || file.encoding !== "base64") continue;
@@ -148,14 +151,18 @@ export function pickUploadDocsFromBundle(folderName, files = []) {
       coverLetter = entry;
       continue;
     }
-    if (/_resume\.pdf$/i.test(lower) || (/resume/i.test(lower) && lower.endsWith(".pdf"))) {
+    if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower) || /(^|[^a-z])cv([^a-z]|$)/i.test(lower)) {
       resume = entry;
       continue;
     }
-    if (!resume && lower.endsWith(".pdf")) {
-      resume = entry;
-    }
+    if (!lower.endsWith(".pdf")) continue;
+    otherPdfs.push(entry);
   }
+
+  // A custom filename with no "resume" in it is still the resume when it is the
+  // only other PDF. Several unnamed PDFs are not guessed — that uploaded the
+  // wrong document.
+  if (!resume && otherPdfs.length === 1) resume = otherPdfs[0];
 
   return { folderName: folderName || "", resume, coverLetter };
 }
