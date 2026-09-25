@@ -349,33 +349,44 @@ export async function readJobUploadDocsFromDirectory(folderName, { interactive =
     return null;
   }
 
-  let resume = null;
-  let coverLetter = null;
-  const otherPdfs = [];
+    let resume = null;
+    let coverLetter = null;
+    let resumeModified = -1;
+    let coverModified = -1;
+    const otherPdfs = [];
 
-  for await (const [name, handle] of jobDir.entries()) {
-    if (!handle || handle.kind !== "file") continue;
-    const lower = String(name || "").toLowerCase();
-    if (!lower.endsWith(".pdf")) continue;
+    for await (const [name, handle] of jobDir.entries()) {
+      if (!handle || handle.kind !== "file") continue;
+      const lower = String(name || "").toLowerCase();
+      if (!lower.endsWith(".pdf")) continue;
 
-    const file = await handle.getFile();
-    const buffer = new Uint8Array(await file.arrayBuffer());
-    const entry = {
-      fileName: name,
-      mimeType: file.type || "application/pdf",
-      base64: uint8ArrayToBase64(buffer)
-    };
+      const file = await handle.getFile();
+      const buffer = new Uint8Array(await file.arrayBuffer());
+      const entry = {
+        fileName: name,
+        mimeType: file.type || "application/pdf",
+        base64: uint8ArrayToBase64(buffer)
+      };
+      const modified = Number(file.lastModified) || 0;
 
-    if (/cover.?letter/i.test(lower)) {
-      coverLetter = entry;
-      continue;
+      if (/cover.?letter/i.test(lower)) {
+        if (!coverLetter || modified >= coverModified) {
+          coverLetter = entry;
+          coverModified = modified;
+        }
+        continue;
+      }
+      if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower) || /(^|[^a-z])cv([^a-z]|$)/i.test(lower)) {
+        // An older resume left in the same folder must not win over the latest one.
+        if (!resume || modified >= resumeModified) {
+          resume = entry;
+          resumeModified = modified;
+        }
+        continue;
+      }
+      otherPdfs.push({ ...entry, modified });
     }
-    if (/_resume\.pdf$/i.test(lower) || /resume/i.test(lower) || /(^|[^a-z])cv([^a-z]|$)/i.test(lower)) {
-      resume = entry;
-      continue;
-    }
-    otherPdfs.push(entry);
-  }
+    otherPdfs.sort((a, b) => (b.modified || 0) - (a.modified || 0));
 
   if (!resume && otherPdfs.length === 1) resume = otherPdfs[0];
 

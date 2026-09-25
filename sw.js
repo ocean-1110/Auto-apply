@@ -1154,7 +1154,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-25.apply-quality.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-25.dice-resume-file.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -3714,10 +3714,12 @@ function pickBestApplyAction(frameResults = []) {
     }
   }
   const applyUrls = [];
+  let wizardUrl = "";
   for (const f of frameResults) {
     for (const u of f?.applyUrls || []) {
       if (u && !applyUrls.includes(u)) applyUrls.push(u);
     }
+    if (!wizardUrl && f?.wizardUrl) wizardUrl = String(f.wizardUrl);
   }
   return {
     best,
@@ -3734,6 +3736,7 @@ function pickBestApplyAction(frameResults = []) {
     diceSubmitPage,
     fillableCount: Math.max(0, ...frameResults.map((f) => Number(f?.fillableCount || 0))),
     applyUrls,
+    wizardUrl,
     needsFill: frameResults.some((f) => f?.needsFill),
     uploadsBusy: frameResults.some((f) => f?.uploadsBusy),
     signature: best?.signature || frameResults[0]?.signature || "",
@@ -4927,7 +4930,25 @@ async function startMultiStepApplyOnTab(
       probe = await getApplyActionFromTab(currentTabId).catch(() => probe);
     }
 
-    if (probe.applicationSuccess && didClickSubmit) {
+    const dicePageUrl = liveNow?.url || summary.tabUrl || "";
+    const onDiceJobPage = site === "dice" && !isDiceApplicationUrl(dicePageUrl);
+    if (onDiceJobPage) {
+      // Job detail is not the application. Do not fill, submit, or mark Applied
+      // from list badges or job-description text. Open the wizard instead.
+      probe.applicationSuccess = "";
+      probe.anyForm = false;
+      probe.diceSubmitPage = false;
+      probe.needsFill = false;
+      probe.uploadsBusy = false;
+      if (probe.wizardUrl || probe.best?.action?.type === "entry") {
+        probe.alreadyApplied = "";
+      }
+      if (probe.best?.action?.type && probe.best.action.type !== "entry") {
+        probe.best = null;
+      }
+    }
+
+    if (probe.applicationSuccess && didClickSubmit && !onDiceJobPage) {
       if (mayCloseTabs) {
         await setStatus("Application succeeded — closing Dice success tab...");
         await closeApplyFlowTabs({ currentTabId, originTabId, delayMs: 1000 });
@@ -4938,7 +4959,7 @@ async function startMultiStepApplyOnTab(
       return summary;
     }
 
-    if (probe.alreadyApplied) {
+    if (probe.alreadyApplied && !onDiceJobPage) {
       summary.status = "already_applied";
       summary.detail = probe.alreadyApplied;
       summary.tabId = currentTabId;
@@ -5135,7 +5156,9 @@ async function startMultiStepApplyOnTab(
           continue;
         }
         const retryUrl = pickApplyUrl(probe.applyUrls);
-        if (probe.best?.action?.type !== "entry" && !retryUrl) {
+        const diceWizard =
+          site === "dice" && isDiceApplicationUrl(probe.wizardUrl) ? probe.wizardUrl : "";
+        if (probe.best?.action?.type !== "entry" && !retryUrl && !diceWizard) {
           // No recognisable Apply button ("I'm interested", "Apply for this job"...):
           // let AI read the page's buttons before giving up on this job.
           if (aiButtonPicks < 3 && !probe.blockedReason) {
@@ -5278,6 +5301,23 @@ async function startMultiStepApplyOnTab(
         }
         await navigateTabToUrl(currentTabId, applyUrl);
         lookedForEntry = false;
+      } else if (site === "dice" && isDiceApplicationUrl(probe.wizardUrl)) {
+        await setStatus("Auto Apply: opening the Dice application...");
+        if (useNewTab) {
+          const newId = await openApplyUrlInNewTab(probe.wizardUrl, currentTabId);
+          if (newId) {
+            currentTabId = newId;
+            summary.tabId = currentTabId;
+            summary.tabUrl = probe.wizardUrl;
+            summary.steps = step + 1;
+            lookedForEntry = false;
+            continue;
+          }
+        }
+        await navigateTabToUrl(currentTabId, probe.wizardUrl);
+        lookedForEntry = false;
+        summary.steps = step + 1;
+        continue;
       } else {
         summary.status = "skipped";
         summary.detail =
@@ -5322,22 +5362,16 @@ async function startMultiStepApplyOnTab(
         return summary;
       }
 
-      // Dice: Apply click sometimes does nothing — retry, then open the wizard URL directly.
+      // Dice job page: open the application wizard as soon as Apply does not leave this page.
       if (!advanced.advanced && site === "dice") {
         diceEntryAttempts += 1;
-        const wizardUrl = (probe.applyUrls || []).find(
-          (u) => /\/job-applications\//i.test(u) && isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
-        );
-        if (diceEntryAttempts < 3) {
-          await setStatus(
-            `Auto Apply: Dice Apply did not open yet — retrying (${diceEntryAttempts}/3)...`
-          );
-          await sleepMs(700);
-          summary.steps = step + 1;
-          continue;
-        }
+        const wizardUrl =
+          (probe.applyUrls || []).find(
+            (u) => /\/job-applications\//i.test(u) && isAllowedApplyNavUrl(u) && !isDiceProfileUrl(u)
+          ) ||
+          (isDiceApplicationUrl(probe.wizardUrl) ? probe.wizardUrl : "");
         if (wizardUrl) {
-          await setStatus("Auto Apply: opening Dice application wizard directly...");
+          await setStatus("Auto Apply: opening the Dice application...");
           if (useNewTab) {
             const newId = await openApplyUrlInNewTab(wizardUrl, currentTabId);
             if (newId) {
@@ -5353,6 +5387,14 @@ async function startMultiStepApplyOnTab(
           await navigateTabToUrl(currentTabId, wizardUrl);
           lookedForEntry = false;
           diceEntryAttempts = 0;
+          summary.steps = step + 1;
+          continue;
+        }
+        if (diceEntryAttempts < 3) {
+          await setStatus(
+            `Auto Apply: Dice Apply did not open yet — retrying (${diceEntryAttempts}/3)...`
+          );
+          await sleepMs(700);
           summary.steps = step + 1;
           continue;
         }

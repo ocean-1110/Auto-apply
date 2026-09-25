@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-25.apply-quality.1";
+  const SCRIPT_BUILD = "2026-09-25.dice-resume-file.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -2051,15 +2051,49 @@
     });
   }
 
+  const COVER_LETTER_RE = /cover\s*letter|covering\s*letter|coverletter|cover-letter|cover_letter/;
+  const RESUME_FILE_RE = /\b(resume|curriculum|vitae)\b|\bcv\b/;
+
+  /** The caption on this upload itself, not the shared "Resume" section around it. */
+  function nearestUploadCaption(el) {
+    const bits = [];
+    if (el?.id) {
+      try {
+        const byFor = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (byFor) bits.push(byFor.textContent || "");
+      } catch {
+        /* ignore invalid id */
+      }
+    }
+    bits.push(el?.getAttribute?.("aria-label") || "");
+    const prev = el?.previousElementSibling;
+    if (prev && /LABEL|SPAN|DIV|P|LEGEND|H\d/i.test(prev.tagName || "")) {
+      bits.push(prev.textContent || "");
+    }
+    const parent = el?.parentElement;
+    if (parent) {
+      const heading = parent.querySelector(
+        ":scope > label, :scope > legend, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > p, :scope > span"
+      );
+      if (heading) bits.push(heading.textContent || "");
+    }
+    return normalize(bits.filter(Boolean).join(" ").slice(0, 400));
+  }
+
   function classifyFileInput(el) {
-    const label = fileFieldContext(el);
-    const name = normalize(
-      [el.getAttribute("name"), el.getAttribute("id"), el.getAttribute("accept"), label].join(" ")
+    const attrs = normalize(
+      [
+        el.getAttribute("name"),
+        el.getAttribute("id"),
+        el.getAttribute("data-testid"),
+        el.getAttribute("data-cy"),
+        el.getAttribute("aria-label"),
+        el.getAttribute("accept")
+      ].join(" ")
     );
-    const hasCover =
-      /cover\s*letter|covering\s*letter|coverletter/.test(name) &&
-      !/\bcover letter is not required\b/.test(name);
-    const hasResume = /\b(resume|cv|curriculum|vitae|include your resume)\b/.test(name);
+    const nearest = nearestUploadCaption(el);
+    const context = normalize(fileFieldContext(el));
+    const name = `${attrs} ${nearest} ${context}`;
     if (
       /\b(photo|headshot|portrait|profile picture|transcript|certificate|portfolio|writing sample)\b/.test(
         name
@@ -2067,8 +2101,30 @@
     ) {
       return "other";
     }
+
+    const attrCover = COVER_LETTER_RE.test(attrs);
+    const attrResume = RESUME_FILE_RE.test(attrs);
+    if (attrCover && !attrResume) return "coverLetter";
+    if (attrResume && !attrCover) return "resume";
+
+    // Text from the smallest box that contains only this file input.
+    const exclusiveKind = slotKindFromText(exclusiveFieldText(el));
+    if (exclusiveKind) return exclusiveKind;
+    const nearKind = slotKindFromText(nearest);
+    if (nearKind) return nearKind;
+    // A parent that names both Resume and Cover letter must not pick the slot.
+    // That was putting Cover_Letter.pdf in the resume box, and the resume PDF
+    // in the cover-letter box.
+    if (
+      (COVER_LETTER_RE.test(nearest) && RESUME_FILE_RE.test(nearest)) ||
+      (COVER_LETTER_RE.test(context) && RESUME_FILE_RE.test(context))
+    ) {
+      return "other";
+    }
+    const hasCover = COVER_LETTER_RE.test(context);
+    const hasResume = RESUME_FILE_RE.test(context);
     if (hasCover && !hasResume) return "coverLetter";
-    if (hasResume) return "resume";
+    if (hasResume && !hasCover) return "resume";
     if (
       /\b(any files|additional files|other files|supporting documents|optional attachment|attach any)\b/.test(
         name
@@ -2076,10 +2132,54 @@
     ) {
       return "other";
     }
-    if (/\brequired\b/.test(name) && /\b(attach|upload|file|pdf)\b/.test(name) && !/\bcover\b/.test(name)) {
+    if (/\brequired\b/.test(name) && /\b(attach|upload|file|pdf)\b/.test(name) && !COVER_LETTER_RE.test(name)) {
       return "resume";
     }
     return "other";
+  }
+
+  function rowIsCoverLetterField(row) {
+    const input = row?.input;
+    const blob = normalize(
+      [
+        input?.getAttribute?.("aria-label"),
+        input?.getAttribute?.("name"),
+        input?.getAttribute?.("id"),
+        input?.getAttribute?.("data-testid"),
+        input?.getAttribute?.("data-cy"),
+        nearestUploadCaption(input)
+      ].join(" ")
+    );
+    return COVER_LETTER_RE.test(blob) && !RESUME_FILE_RE.test(blob);
+  }
+
+  function fileNameKind(file) {
+    const name = normalize(file?.name || "");
+    if (!name) return "";
+    if (COVER_LETTER_RE.test(name)) return "coverLetter";
+    if (RESUME_FILE_RE.test(name)) return "resume";
+    return "";
+  }
+
+  function slotKindFromText(text) {
+    const n = normalize(text);
+    if (!n) return "";
+    const cover = COVER_LETTER_RE.test(n);
+    const resume = RESUME_FILE_RE.test(n);
+    if (cover && !resume) return "coverLetter";
+    if (resume && !cover) return "resume";
+    return "";
+  }
+
+  /** Caption of this upload only. A shared Resume/Cover letter section is ignored. */
+  function exclusiveFieldText(el) {
+    const root = fileFieldRoot(el);
+    if (!root) return nearestUploadCaption(el);
+    const clone = root.cloneNode(true);
+    clone
+      .querySelectorAll("input, textarea, select, button, svg, [contenteditable]")
+      .forEach((n) => n.remove());
+    return normalize(cleanLabelText(clone.textContent).slice(0, 400));
   }
 
   function isBlockedUploadTarget(label) {
@@ -2139,6 +2239,8 @@
   function dropzoneForInput(input) {
     const root = fileFieldRoot(input);
     if (!root) return input;
+    const files = root.querySelectorAll?.('input[type="file"]') || [];
+    if (files.length !== 1) return input;
     return (
       root.querySelector(
         '[class*="drop"], [class*="Drop"], [data-testid*="drop"], [data-testid*="upload"], [class*="upload"]'
@@ -2201,16 +2303,24 @@
     });
   }
 
-  async function revealApplicationUploads() {
-    const re =
-      /upload (a )?(new )?(resume|cv|cover letter)|attach (a )?(resume|cv|cover letter)|add (a )?cover letter|replace (resume|cv)/i;
+  async function revealApplicationUploads({ resume = true, coverLetter = true } = {}) {
+    const resumeRe = /upload (a |your )?(new )?(resume|cv)\b|attach (a |your )?(resume|cv)\b|replace (resume|cv)\b/i;
+    const coverRe = /upload (a |your )?(new )?cover letter|attach (a |your )?cover letter|add (a )?cover letter|replace cover letter/i;
     const controls = [...document.querySelectorAll("button, a, [role='button'], label")].filter(
       (el) => isElVisible(el) && isElEnabled(el)
     );
     let clicked = 0;
     for (const el of controls) {
       const text = elActionText(el);
-      if (!re.test(text)) continue;
+      const isCover = coverRe.test(text);
+      const isResume = resumeRe.test(text) && !COVER_LETTER_RE.test(normalize(text));
+      if (coverLetter && isCover) {
+        /* open the cover-letter box only */
+      } else if (resume && isResume) {
+        /* open the resume box only */
+      } else {
+        continue;
+      }
       try {
         scrollElIntoView(el);
         el.click();
@@ -2219,7 +2329,7 @@
       } catch {
         /* ignore */
       }
-      if (clicked >= 3) break;
+      if (clicked >= 2) break;
     }
     return clicked;
   }
@@ -2287,13 +2397,169 @@
     return !uploadsStillBusy();
   }
 
+  function diceControlBlob(el) {
+    const own = normalize(elActionText(el));
+    let node = el?.parentElement || null;
+    let hood = "";
+    for (let i = 0; i < 5 && node; i += 1) {
+      const text = normalize(cleanLabelText(node.innerText || "").slice(0, 500));
+      if (text) hood = text;
+      const files = node.querySelectorAll?.('input[type="file"]') || [];
+      if (files.length > 1) break;
+      node = node.parentElement;
+    }
+    return { own, hood };
+  }
+
+  /**
+   * Dice keeps the account's saved resume selected until Replace / Upload new
+   * is used. Click that control, and if a resume radio already names this
+   * job's PDF, select that radio. Never click the cover-letter control.
+   */
+  async function focusDiceResumeReplace(fileName) {
+    const wanted = normalize(fileName).replace(/\spdf$/, "");
+    const controls = [...document.querySelectorAll("button, a, [role='button'], label, input[type='radio']")].filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    if (wanted) {
+      for (const el of controls) {
+        if (String(el.type || "").toLowerCase() !== "radio") continue;
+        const { own, hood } = diceControlBlob(el);
+        if (COVER_LETTER_RE.test(own)) continue;
+        if (own.includes(wanted) || hood.includes(wanted)) {
+          try {
+            el.click();
+            await sleep(200);
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+      }
+    }
+    let best = null;
+    let bestScore = 0;
+    for (const el of controls) {
+      const { own, hood } = diceControlBlob(el);
+      if (!own || COVER_LETTER_RE.test(own)) continue;
+      const hoodIsCover = COVER_LETTER_RE.test(hood) && !RESUME_FILE_RE.test(hood);
+      if (hoodIsCover) continue;
+      let score = 0;
+      if (/upload (a |your )?(new |different )?(resume|cv)/.test(own)) score += 120;
+      if (/replace (resume|cv)/.test(own)) score += 110;
+      if (/^(replace|change|upload new|upload)$/.test(own) && RESUME_FILE_RE.test(hood)) score += 90;
+      if (String(el.type || "").toLowerCase() === "radio" && /upload|replace|different|new resume|new cv/.test(own)) {
+        score += 80;
+      }
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    if (!best) return;
+    try {
+      scrollElIntoView(best);
+      best.click();
+      await sleep(400);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** After the PDF is attached, select the radio that names this file. */
+  async function pinDiceUploadedResume(fileName) {
+    const wanted = normalize(fileName).replace(/\spdf$/, "");
+    if (!wanted) return;
+    const radios = [...document.querySelectorAll("input[type='radio'], [role='radio']")].filter(
+      (el) => isElVisible(el) && isElEnabled(el)
+    );
+    for (const el of radios) {
+      const { own, hood } = diceControlBlob(el);
+      if (COVER_LETTER_RE.test(own)) continue;
+      if (!own.includes(wanted) && !hood.includes(wanted)) continue;
+      if (COVER_LETTER_RE.test(hood) && !RESUME_FILE_RE.test(hood)) continue;
+      try {
+        el.click();
+        await sleep(150);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+  }
+
+  function chooseUploadTargets(inputs, resumeFile, coverFile) {
+    const rows = inputs.map((input) => {
+      const exclusive = exclusiveFieldText(input);
+      const nearest = nearestUploadCaption(input);
+      const kind =
+        slotKindFromText(exclusive) ||
+        slotKindFromText(nearest) ||
+        (classifyFileInput(input) === "other" ? "" : classifyFileInput(input));
+      return {
+        input,
+        kind,
+        label: exclusive || nearest || fileFieldContext(input),
+        top: input.getBoundingClientRect?.().top || 0
+      };
+    });
+    const coverRows = rows.filter((row) => row.kind === "coverLetter" || rowIsCoverLetterField(row));
+    const resumeRows = rows
+      .filter((row) => row.kind === "resume" && !coverRows.includes(row))
+      .sort((a, b) => scoreResumeField(b.label) - scoreResumeField(a.label) || a.top - b.top);
+    let resumeRow = resumeRows[0] || null;
+    let coverRow = coverRows.find((row) => row.input !== resumeRow?.input) || null;
+    if (resumeFile && !resumeRow) {
+      const open = rows
+        .filter(
+          (row) =>
+            row.input !== coverRow?.input &&
+            !coverRows.includes(row) &&
+            !isBlockedUploadTarget(row.label)
+        )
+        .sort((a, b) => a.top - b.top);
+      resumeRow = open[0] || null;
+    }
+    if (coverFile && !coverRow) {
+      const open = rows
+        .filter(
+          (row) =>
+            row.input !== resumeRow?.input &&
+            row.kind !== "resume" &&
+            !isBlockedUploadTarget(row.label)
+        )
+        .sort((a, b) => a.top - b.top);
+      coverRow = open[0] || null;
+    }
+    const targets = [];
+    if (resumeFile && resumeRow && fileNameKind(resumeFile) !== "coverLetter") {
+      targets.push({ ...resumeRow, file: resumeFile, kind: "resume" });
+    }
+    if (
+      coverFile &&
+      coverRow &&
+      coverRow.input !== resumeRow?.input &&
+      fileNameKind(coverFile) !== "resume"
+    ) {
+      targets.push({ ...coverRow, file: coverFile, kind: "coverLetter" });
+    }
+    return targets;
+  }
+
   async function uploadApplicationFiles(uploadFiles = {}) {
-    await revealApplicationUploads();
     const uploaded = [];
     const skipped = [];
     const dice = /(^|\.)dice\.com$/i.test(location.hostname);
-    const resumeDoc = uploadFiles.resume;
-    const coverDoc = uploadFiles.coverLetter;
+    let resumeDoc = uploadFiles.resume;
+    let coverDoc = uploadFiles.coverLetter;
+    // The stored slots can be swapped. The file name is what the PDF actually is.
+    const resumeNameKind = fileNameKind({ name: resumeDoc?.fileName || "" });
+    const coverNameKind = fileNameKind({ name: coverDoc?.fileName || "" });
+    if (resumeNameKind === "coverLetter" && coverNameKind === "resume") {
+      const swap = resumeDoc;
+      resumeDoc = coverDoc;
+      coverDoc = swap;
+    }
 
     const resumeFile =
       resumeDoc?.base64 &&
@@ -2310,6 +2576,12 @@
       return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-docs" }], settled: true };
     }
 
+    // Dice pre-selects the account resume. Open Replace on the resume box
+    // before attaching this job's PDF. Leave the cover-letter box closed
+    // until the resume file is in place.
+    if (dice && resumeFile) await focusDiceResumeReplace(resumeFile.name);
+    await revealApplicationUploads({ resume: true, coverLetter: !dice });
+
     const inputs = collectFileInputs();
     if (!inputs.length) {
       return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-file-inputs" }], settled: true };
@@ -2318,34 +2590,9 @@
     const classified = inputs.map((input) => ({
       input,
       kind: classifyFileInput(input),
-      label: fileFieldContext(input)
+      label: exclusiveFieldText(input) || nearestUploadCaption(input) || fileFieldContext(input)
     }));
-
-    const resumeRows = classified
-      .filter((row) => row.kind === "resume")
-      .sort((a, b) => scoreResumeField(b.label) - scoreResumeField(a.label));
-    const coverRows = classified.filter((row) => row.kind === "coverLetter");
-    const targets = [];
-    if (resumeFile && resumeRows.length) targets.push({ ...resumeRows[0], file: resumeFile, kind: "resume" });
-    if (coverFile) {
-      for (const row of coverRows) targets.push({ ...row, file: coverFile, kind: "coverLetter" });
-    }
-    const targetedInputs = new Set(targets.map((row) => row.input));
-    if (resumeFile && !targets.some((row) => row.kind === "resume")) {
-      const fallback = classified.find(
-        (row) => !targetedInputs.has(row.input) && !isBlockedUploadTarget(row.label)
-      );
-      if (fallback) {
-        targets.push({ ...fallback, file: resumeFile, kind: "resume" });
-        targetedInputs.add(fallback.input);
-      }
-    }
-    if (coverFile && !targets.some((row) => row.kind === "coverLetter")) {
-      const leftover = classified.find(
-        (row) => !targetedInputs.has(row.input) && !isBlockedUploadTarget(row.label)
-      );
-      if (leftover) targets.push({ ...leftover, file: coverFile, kind: "coverLetter" });
-    }
+    const targets = chooseUploadTargets(inputs, resumeFile, dice ? null : coverFile);
 
     // Top → bottom: resume first, then cover letter.
     targets.sort((a, b) => {
@@ -2383,6 +2630,33 @@
           kind: row.kind,
           label: row.label
         });
+      }
+    }
+
+    if (dice && resumeFile && uploaded.some((row) => row.kind === "resume")) {
+      await pinDiceUploadedResume(resumeFile.name);
+    }
+
+    if (dice && coverFile && fileNameKind(coverFile) !== "resume") {
+      const resumeInput = targets.find((row) => row.kind === "resume")?.input || null;
+      await revealApplicationUploads({ resume: false, coverLetter: true });
+      const coverTarget = chooseUploadTargets(collectFileInputs(), null, coverFile).find(
+        (row) => row.kind === "coverLetter" && row.input !== resumeInput && !used.has(row.input)
+      );
+      if (coverTarget?.input) {
+        scrollElIntoView(coverTarget.input);
+        await sleep(100);
+        const ok = setFileOnInput(coverTarget.input, coverFile);
+        if (ok) {
+          used.add(coverTarget.input);
+          uploaded.push({
+            kind: "coverLetter",
+            fileName: coverFile.name,
+            label: coverTarget.label
+          });
+        } else {
+          skipped.push({ reason: "set-failed", kind: "coverLetter", label: coverTarget.label });
+        }
       }
     }
 
@@ -4798,6 +5072,7 @@
     if (isGreenhousePage()) return detectGreenhouseApplySuccess();
     if (isWorkdayPage()) return detectWorkdayApplySuccess();
     if (isIndeedPage()) return detectIndeedApplySuccess();
+    if (/(^|\.)dice\.com$/i.test(location.hostname)) return detectDiceApplySuccess();
     const href = String(location.href || "");
     const path = String(location.pathname || "");
     if (
@@ -4813,6 +5088,24 @@
     const blob = `${document.title || ""}\n${document.body?.innerText || ""}`.slice(0, 12000);
     const match = blob.match(APPLY_SUCCESS_RE);
     return match ? cleanLabelText(match[0]).slice(0, 160) : "";
+  }
+
+  /** Dice success is the wizard confirmation, never job-description copy on the posting. */
+  function detectDiceApplySuccess() {
+    const path = String(location.pathname || "");
+    if (
+      /\/wizard\/success(?:\/|$)/i.test(path) ||
+      /\/job-applications\/[^/]+\/(?:wizard\/)?success\b/i.test(path)
+    ) {
+      return "Application submitted (confirmation page).";
+    }
+    if (!isDiceApplicationPath()) return "";
+    const root = getDiceWizardRoot() || document;
+    const headings = queryAllDeep("h1, h2, [role='heading']", root)
+      .map((el) => cleanLabelText(el.textContent || ""))
+      .filter((text) => text && text.length <= 180);
+    const hit = headings.find((text) => APPLY_SUCCESS_RE.test(text));
+    return hit ? hit.slice(0, 160) : "";
   }
   const EASY_BACK_RE = /\b(back|previous|cancel|close|dismiss|return)\b/i;
   const ENTRY_JUNK_RE =
@@ -5164,33 +5457,49 @@
     );
   }
 
-  /** Dice job detail: the teal button already says "Applied". */
+  /** Dice job detail: the Apply CTA itself says "Applied". List badges do not count. */
   function detectDiceAlreadyApplied() {
     if (!/(^|\.)dice\.com$/i.test(location.hostname)) return "";
     if (isDiceApplicationPath()) return "";
+    if (findDiceJobDetailApplyButton()?.el) return "";
 
-    const controls = [
-      ...document.querySelectorAll("button, a, [role='button'], span, div")
-    ];
-    for (const el of controls) {
-      if (!isElVisible(el)) continue;
-      if (isSiteChromeControl(el) || isInsideAdOrOverlay(el)) continue;
-      const text = elActionText(el);
-      if (!ALREADY_APPLIED_TEXT_RE.test(text)) continue;
-
-      // Prefer the job-detail pane CTA; still accept a clear Applied control.
-      const inDetail = Boolean(
+    const inOtherJob = (el) =>
+      Boolean(
         el.closest(
-          '[data-testid*="job-detail" i], [class*="job-detail"], [class*="JobDetail"], [class*="search-detail"], [class*="details-pane"], [class*="job-view"]'
+          [
+            '[data-testid*="job-card" i]',
+            '[class*="job-card"]',
+            '[class*="JobCard"]',
+            '[class*="recommended"]',
+            '[class*="similar-job"]',
+            '[class*="similarJob"]',
+            '[class*="search-result"]',
+            '[class*="job-list"]',
+            '[id*="job-list"]'
+          ].join(", ")
         )
       );
+
+    const controls = queryAllDeep("button, a, [role='button']").filter(
+      (el) =>
+        isElVisible(el) &&
+        !isSiteChromeControl(el) &&
+        !isInsideAdOrOverlay(el) &&
+        !inOtherJob(el)
+    );
+    for (const el of controls) {
+      const text = elActionText(el);
+      if (!ALREADY_APPLIED_TEXT_RE.test(text)) continue;
       try {
         const rect = el.getBoundingClientRect();
-        if (inDetail || rect.left > window.innerWidth * 0.3) {
-          return "Already applied on Dice (button shows Applied).";
-        }
+        const inHeader =
+          rect.top > 40 &&
+          rect.top < window.innerHeight * 0.45 &&
+          rect.width >= 72 &&
+          rect.left > window.innerWidth * 0.28;
+        if (inHeader) return "Already applied on Dice (the Apply button shows Applied).";
       } catch {
-        if (inDetail) return "Already applied on Dice (button shows Applied).";
+        /* ignore */
       }
     }
     return "";
@@ -7008,7 +7317,11 @@
           : null,
         needsFill: false,
         uploadsBusy: Boolean(workdayWizard?.parsingBusy),
-        applyUrls: probe.applyUrls || []
+        applyUrls: probe.applyUrls || [],
+        wizardUrl:
+          /(^|\.)dice\.com$/i.test(location.hostname) && !isDiceApplicationPath()
+            ? diceApplicationWizardUrl()
+            : ""
       };
     }
     let action = findActionButton(null, { includeDisabledSubmit: true });
@@ -7047,7 +7360,8 @@
       action: describeAction(action),
       needsFill,
       uploadsBusy: busy,
-      applyUrls: probe.applyUrls || []
+      applyUrls: probe.applyUrls || [],
+      wizardUrl: ""
     };
   }
 
