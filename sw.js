@@ -6535,18 +6535,26 @@ function detectPdfPaperFromHtml(html) {
 
 async function htmlToPdfBase64(html) {
   const htmlText = String(html || "");
-  const url = `data:text/html;charset=utf-8,${encodeURIComponent(htmlText)}`;
-  const tab = await chrome.tabs.create({ url, active: false });
+  // A data: URL of a full resume often never reports "complete" (and can exceed
+  // Chrome's URL limit). Load a blank tab, then inject the HTML.
+  const tab = await chrome.tabs.create({ url: "about:blank", active: false });
   if (!tab.id) throw new Error("Failed to create render tab.");
   const tabId = tab.id;
 
   try {
-    await awaitTabComplete(tabId);
-    await sleepMs(250);
+    await awaitTabComplete(tabId, 10000);
     const debuggee = { tabId };
     await debuggerAttach(debuggee);
     try {
       await debuggerCommand(debuggee, "Page.enable");
+      const tree = await debuggerCommand(debuggee, "Page.getFrameTree");
+      const frameId = tree?.frameTree?.frame?.id;
+      if (!frameId) throw new Error("PDF render tab has no document frame.");
+      await debuggerCommand(debuggee, "Page.setDocumentContent", {
+        frameId,
+        html: htmlText
+      });
+      await sleepMs(300);
       const paper = detectPdfPaperFromHtml(htmlText);
       const printParams = {
         printBackground: true,
