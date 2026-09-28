@@ -1,4 +1,5 @@
 import { getAllTemplates, DEFAULT_TEMPLATE_ID, resumeJsonToHtml } from "./templates/index.js";
+import { mountResumeModelPicker } from "./openai-models.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import { formatAtsTooltip } from "./ats-score.js";
 import { closeHostWindow } from "./close-host.js";
@@ -514,6 +515,7 @@ els.regenerateBtn?.addEventListener("click", () => {
   regenerateFromPrompt().catch(() => {});
 });
 els.closeBtn.addEventListener("click", () => closeHostWindow());
+mountResumeModelPicker(document.getElementById("resumeModelPicker"));
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;

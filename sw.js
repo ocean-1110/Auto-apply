@@ -17,6 +17,13 @@ import { scoreResumeAgainstJd } from "./ats-score.js";
 import { ensureAtsReadyResume } from "./ats-rewrite.js";
 import { DEFAULT_TEMPLATE_ID, templateRequiresTechnicalSummary } from "./templates/index.js";
 import { TECHNICAL_SUMMARY_PROMPT } from "./prompts/technical-summary.js";
+import { cleanJdForPrompt } from "./jd-clean.js";
+import {
+  buildStrongHumanizeAppendix,
+  getStrongHumanizeMode,
+  shouldApplyStrongHumanize
+} from "./prompts/humanize-resume.js";
+import { prepareEmailBidDraft, sendConfirmedEmailBid } from "./email-bid.js";
 import { buildCoverLetterHtml } from "./cover-letter-html.js";
 import {
   chatCompletion,
@@ -25,6 +32,7 @@ import {
   RESUME_JSON_SYSTEM_PROMPT
 } from "./openai.js";
 import { getEnv } from "./env.js";
+import { getSelectedResumeModelId } from "./openai-models.js";
 import { getApplicantInfo, saveApplicantInfo, APPLICANT_INFO_KEY } from "./applicant-info.js";
 import { getProfileProjectContext } from "./project-manifest.js";
 import {
@@ -1125,7 +1133,7 @@ async function getOpenAiSettings() {
       "OpenAI API key is missing. Add OPENAI_API_KEY to the extension .env file (see .env.example), then reload the extension."
     );
   }
-  const model = (await getEnv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)) || DEFAULT_OPENAI_MODEL;
+  const model = (await getSelectedResumeModelId()) || DEFAULT_OPENAI_MODEL;
   return { apiKey, model };
 }
 
@@ -1154,7 +1162,7 @@ async function tryQaBankMatch(profileId, question, { threshold = 0.82 } = {}) {
 }
 
 // Must match SCRIPT_BUILD in content/autofill.js.
-const AUTOFILL_SCRIPT_BUILD = "2026-09-25.dice-resume-file.1";
+const AUTOFILL_SCRIPT_BUILD = "2026-09-25.email-bid-indeed.1";
 const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/shared.js",
   "content/scrapers/schema.js",
@@ -1162,6 +1170,7 @@ const AUTOFILL_CONTENT_FILES = [
   "content/scrapers/dice.js",
   "content/scrapers/greenhouse.js",
   "content/scrapers/hiringcafe.js",
+  "content/scrapers/indeed.js",
   "content/scrapers/runner.js",
   "content/autofill.js"
 ];
@@ -1471,7 +1480,7 @@ async function loadFormHistory(applicantInfo = {}, jobMeta = {}, resumeOverride 
   const needsSummary = workHistory.filter((job) => String(job.summary || "").trim().length < 80);
   if (needsSummary.length) {
     try {
-      const { apiKey, model } = await getOpenAiSettings();
+      const { apiKey, model } = await getOpenAiFormSettings();
       if (apiKey) {
         const result = await generateRoleSummaries({
           apiKey,
@@ -1968,14 +1977,47 @@ async function findImportedJobByUrl(url) {
 /**
  * Resume/cover letter PDFs to upload on THIS page.
  *
- * `getLastGeneratedDocs()` is a single global slot holding whatever was generated
- * or activated most recently, so after a batch build it points at the last job in
- * the batch. Applying to any other job from the panel would then upload that
- * job's PDFs. Match the tab to its queued job first and load that job's files;
- * only fall back to the global slot when the page is not a job we have queued,
- * and never hand over files that are known to belong to a different job.
+ * The job selected in the panel (or the job Apply was started for) is loaded
+ * from its own output folder first. A Dice wizard URL does not match the job
+ * posting, and the global "last generated" slot is whichever job finished
+ * last, so either of those would upload the wrong resume.
  */
-async function resolveUploadDocsForTab(tabId, { explicitDocs = null } = {}) {
+async function resolveUploadDocsForTab(tabId, { explicitDocs = null, importedJobId = "" } = {}) {
+  const selectedFromStore = String(
+    (await chrome.storage.local.get(IMPORTED_JOBS_SELECTED_ID_KEY))[IMPORTED_JOBS_SELECTED_ID_KEY] || ""
+  ).trim();
+  const preferredId = String(importedJobId || explicitDocs?.importedJobId || selectedFromStore || "").trim();
+
+  let jobLoadError = "";
+  const loadJob = async (jobId, job) => {
+    try {
+      return await ensureUploadDocsForImportedJob(jobId, job);
+    } catch (err) {
+      jobLoadError = String(err?.message || err);
+      return null;
+    }
+  };
+
+  if (preferredId) {
+    const preferred = (await getImportedJobsById())[preferredId] || null;
+    const forPreferred = await loadJob(preferredId, preferred);
+    if (forPreferred?.resume?.base64 || forPreferred?.coverLetter?.base64) {
+      return { docs: forPreferred, mismatch: null };
+    }
+    const folder = extractFolderNameFromSaveMeta(preferred?.resumeFolder || "");
+    if (folder || preferred) {
+      return {
+        docs: null,
+        error:
+          jobLoadError ||
+          (folder
+            ? `No resume PDF found in the selected job's folder (${folder}). Generate a resume for this job, then Apply.`
+            : "No resume is saved for the selected job. Generate a resume first, then Apply."),
+        mismatch: null
+      };
+    }
+  }
+
   const tab = tabId ? await chrome.tabs.get(tabId).catch(() => null) : null;
   const url = tab?.url || "";
   const match = url ? await findImportedJobByUrl(url) : null;
@@ -1992,18 +2034,8 @@ async function resolveUploadDocsForTab(tabId, { explicitDocs = null } = {}) {
         }
       };
     }
-    return { docs: explicitDocs, mismatch: null };
+    if (!tagged) return { docs: explicitDocs, mismatch: null };
   }
-
-  let jobLoadError = "";
-  const loadJob = async (jobId, job) => {
-    try {
-      return await ensureUploadDocsForImportedJob(jobId, job);
-    } catch (err) {
-      jobLoadError = String(err?.message || err);
-      return null;
-    }
-  };
 
   if (match) {
     const forJob = await loadJob(match.jobId, match.job);
@@ -2199,7 +2231,10 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     };
   }
 
-  const resolvedDocs = await resolveUploadDocsForTab(tab.id, { explicitDocs: uploadDocs });
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id, {
+    explicitDocs: uploadDocs,
+    importedJobId: String(uploadDocs?.importedJobId || "").trim()
+  });
   if (resolvedDocs.mismatch) {
     return {
       ok: false,
@@ -2207,6 +2242,9 @@ async function startAutofillOnCurrentPage(profileId, tabId = null, { uploadDocs 
     };
   }
   const docs = resolvedDocs.docs;
+  if (!docs?.resume?.base64 && !docs?.coverLetter?.base64 && resolvedDocs.error) {
+    return { ok: false, error: resolvedDocs.error };
+  }
   const hasUploadDocs = Boolean(docs?.resume?.base64 || docs?.coverLetter?.base64);
   let boundJob = null;
   const boundJobId = String(docs?.importedJobId || "").trim();
@@ -3006,13 +3044,19 @@ async function runAutofillStep(
     return clickPageSubmitOnly(tabId, { probe, pageUrl: tab.url || "" });
   }
 
-  // Pick the PDFs for the job on screen, not the last job generated.
-  const resolvedDocs = await resolveUploadDocsForTab(tab.id, { explicitDocs: uploadDocs });
+  // The selected job's folder on disk, before any file is attached.
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id, {
+    explicitDocs: uploadDocs,
+    importedJobId: String(uploadDocs?.importedJobId || "").trim()
+  });
   if (resolvedDocs.mismatch) {
     return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
   }
   const docs = resolvedDocs.docs;
-  const loc = await formatUploadDocsLocation(docs);
+  const docsJob = docs?.importedJobId
+    ? (await getImportedJobsById())[docs.importedJobId] || null
+    : null;
+  const loc = await formatUploadDocsLocation(docs, { job: docsJob });
   if (loc.folder || loc.summary) await announceUploadSource(loc);
 
   if (shouldUseJobCardApplyPath(tab.url || "", probe)) {
@@ -3241,7 +3285,7 @@ async function clickPageSubmitOnly(tabId, { probe = null, pageUrl = "" } = {}) {
  * same engine as job-card Apply. Dice clicks Submit automatically.
  * Other ATS pause on Submit so a second Apply click sends the form.
  */
-async function runPanelApply(profileId, { preferredAction = "" } = {}) {
+async function runPanelApply(profileId, { preferredAction = "", importedJobId = "" } = {}) {
   const tab = await getCurrentApplicationTab();
   if (!tab?.id) {
     return { ok: false, error: "No application tab found. Open the job application page first." };
@@ -3265,8 +3309,8 @@ async function runPanelApply(profileId, { preferredAction = "" } = {}) {
     return clickPageSubmitOnly(tab.id, { probe, pageUrl: tab.url || "" });
   }
 
-  // PDFs for the job on screen — not whatever the last batch build left behind.
-  const resolvedDocs = await resolveUploadDocsForTab(tab.id);
+  // The selected job's folder is read from disk before any file is attached.
+  const resolvedDocs = await resolveUploadDocsForTab(tab.id, { importedJobId });
   if (resolvedDocs.mismatch) {
     return { ok: false, error: uploadDocsMismatchError(resolvedDocs) };
   }
@@ -4816,11 +4860,24 @@ async function startMultiStepApplyOnTab(
   const mayCloseTabs = Boolean(
     autoClickSubmit && (closeOnSuccess || initialSite === "dice")
   );
-  // Resolve the PDFs ONCE, against the job page we start on, and reuse them for
-  // every step. Later steps land on an ATS URL that no longer matches the job
-  // posting, so re-resolving mid-run could fall back to another job's files.
-  const runUploadDocs = uploadDocs || (await resolveUploadDocsForTab(tab.id)).docs;
-  const loc = await formatUploadDocsLocation(runUploadDocs);
+  // Read the selected job's folder once, then reuse those PDFs on every step.
+  // The Dice wizard URL does not match the job posting, so a later lookup
+  // would pick a different job's files.
+  const runResolved = await resolveUploadDocsForTab(tab.id, {
+    explicitDocs: uploadDocs,
+    importedJobId: String(uploadDocs?.importedJobId || "").trim()
+  });
+  if (!runResolved.docs?.resume?.base64 && !runResolved.docs?.coverLetter?.base64) {
+    return {
+      ok: false,
+      error: runResolved.error || "No resume PDF found in the selected job's folder."
+    };
+  }
+  const runUploadDocs = runResolved.docs;
+  const runJob = runUploadDocs.importedJobId
+    ? (await getImportedJobsById())[runUploadDocs.importedJobId] || null
+    : null;
+  const loc = await formatUploadDocsLocation(runUploadDocs, { job: runJob });
   await ensureCostSession(tab.url || "");
   const summary = {
     ok: true,
@@ -7011,7 +7068,7 @@ async function saveResumeAndCoverLetter(
     try {
       await setStatus("Resume ready. Generating cover letter via OpenAI...");
       const coverPrompt = await buildCoverLetterPrompt({
-        jdText: jobMeta.jdText || "",
+        jdText: cleanJdForPrompt(jobMeta.jdText || "", { companyName: jobMeta.companyName || "" }) || jobMeta.jdText || "",
         jobTitle: jobMeta.jobTitle || "",
         companyName: jobMeta.companyName || "",
         // Candidate info lives on the resume profile, not the CoverLetter one.
@@ -7197,19 +7254,29 @@ async function runGenerationPipeline({ profileId, jobMeta }) {
   }
   // buildPrompt fills the template's {CANDIDATE_INFORMATION} / {PROJECT_MANIFESTS}
   // slots, or appends both sections when the template has no placeholders.
-  const basePrompt = await buildPrompt(profileId, meta.jdText || "", {
+  const promptJd = cleanJdForPrompt(meta.jdText || "", {
+    companyName: meta.companyName || ""
+  });
+  const basePrompt = await buildPrompt(profileId, promptJd || meta.jdText || "", {
     jobTitle: meta.jobTitle || "",
     companyName: meta.companyName || "",
     projectManifests: projectContext.list,
     projectManifestBlock: projectContext.block
   });
+  const humanizeMode = await getStrongHumanizeMode();
+  const humanize = shouldApplyStrongHumanize(humanizeMode, {
+    jdLink: meta.jdLink || "",
+    site: meta.applySite || ""
+  })
+    ? `\n\n${buildStrongHumanizeAppendix()}`
+    : "";
   // Only templates that render a Technical Summary ask the model to produce one.
   const wantsTechnicalSummary = templateRequiresTechnicalSummary(
     meta.templateId || DEFAULT_TEMPLATE_ID
   );
   const resumePrompt = wantsTechnicalSummary
-    ? `${basePrompt}\n\n${TECHNICAL_SUMMARY_PROMPT}`
-    : basePrompt;
+    ? `${basePrompt}${humanize}\n\n${TECHNICAL_SUMMARY_PROMPT}`
+    : `${basePrompt}${humanize}`;
 
   assertNotCancelled();
   await setStatus("Calling OpenAI for resume JSON...");
@@ -7859,7 +7926,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             : "Apply: filling the form and continuing the application..."
         );
         const result = await runPanelApply(profileId, {
-          preferredAction
+          preferredAction,
+          importedJobId: String(message.importedJobId || "").trim()
         });
         if (result.skipped) {
           await setStatus(`Apply skipped: ${result.error}`);
@@ -8089,7 +8157,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
         panelApplyRunToken = acquireGenerationLock();
         await setStatus("Apply: filling the form and continuing the application...");
-        const result = await runPanelApply(profileId, { preferredAction: message.preferredAction || "" });
+        const result = await runPanelApply(profileId, {
+          preferredAction: message.preferredAction || "",
+          importedJobId: String(message.importedJobId || "").trim()
+        });
         if (result.skipped || !result.ok) {
           const err = result.error || "Apply failed.";
           await setStatus(`Apply failed: ${err}`);
@@ -9312,4 +9383,164 @@ async function resolvePreviewJobContext() {
   })();
 
   return false;
+});
+
+async function emailBidPerson(profileId) {
+  const info = await getApplicantInfo(profileId).catch(() => ({}));
+  const first = String(info.firstName || "").trim();
+  const last = String(info.lastName || "").trim();
+  return {
+    id: profileId || "",
+    email: String(info.email || "").trim(),
+    firstName: first,
+    lastName: last,
+    name: [first, last].filter(Boolean).join(" "),
+    phone: String(info.phone || "").trim(),
+    linkedin: String(info.linkedinUrl || info.linkedin || "").trim()
+  };
+}
+
+async function runEmailBidAi(prompt) {
+  const { apiKey, model } = await getOpenAiFormSettings();
+  const result = await chatCompletion({
+    apiKey,
+    model,
+    temperature: 0.3,
+    maxTokens: 2500,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Follow the user instructions. Return only the requested JSON. Never invent email addresses or phone numbers."
+      },
+      { role: "user", content: String(prompt || "") }
+    ]
+  });
+  return String(result?.content || "");
+}
+
+async function recordEmailBidSheet(jobMeta = {}) {
+  const settings = await resolveSheetSettings(jobMeta);
+  if (!settings.spreadsheetUrl || !settings.webAppUrl) {
+    return { ok: true, skipped: true, reason: "no-sheet" };
+  }
+  const jdLink = String(jobMeta.jdLink || jobMeta.jobLink || "").trim();
+  const jobTitle = jobMeta.jobTitle || jobMeta.title || "";
+  const companyName = jobMeta.companyName || jobMeta.company || "";
+  if (jdLink) {
+    try {
+      const links = await getExistingJobLinks({
+        spreadsheetUrl: settings.spreadsheetUrl,
+        webAppUrl: settings.webAppUrl,
+        sheetName: settings.sheetName
+      });
+      if (isJobLinkOnSheet(links, jdLink)) {
+        await updateJobStatusInSpreadsheet({
+          spreadsheetUrl: settings.spreadsheetUrl,
+          webAppUrl: settings.webAppUrl,
+          sheetName: settings.sheetName,
+          jdLink,
+          applicationStatus: "Applied"
+        });
+        return { ok: true, updated: true };
+      }
+    } catch {
+      /* append below */
+    }
+  }
+  await appendJobToSpreadsheet({
+    spreadsheetUrl: settings.spreadsheetUrl,
+    webAppUrl: settings.webAppUrl,
+    sheetName: settings.sheetName,
+    jobTitle,
+    companyName,
+    jdLink,
+    applicationStatus: "Applied"
+  });
+  return { ok: true, appended: true };
+}
+
+async function showLatestResumeDownload() {
+  try {
+    const results = await chrome.downloads.search({
+      query: ["Resume"],
+      limit: 15,
+      orderBy: ["-startTime"]
+    });
+    const hit = (results || []).find((item) => /resume/i.test(item.filename || "") && /\.pdf$/i.test(item.filename || ""));
+    if (!hit?.id) return "";
+    await chrome.downloads.show(hit.id);
+    return hit.filename || "";
+  } catch {
+    return "";
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "email_bid_prepare") {
+    (async () => {
+      const person = await emailBidPerson(message.profileId);
+      const jobMeta = {
+        jobTitle: message.jobTitle || "",
+        title: message.jobTitle || "",
+        companyName: message.companyName || "",
+        company: message.companyName || "",
+        jdLink: message.jdLink || "",
+        jdText: message.jdText || ""
+      };
+      const stored = await chrome.storage.local.get("last_resume_json");
+      const resumeJson =
+        stored.last_resume_json && typeof stored.last_resume_json === "object"
+          ? stored.last_resume_json
+          : null;
+      const draft = await prepareEmailBidDraft(person, jobMeta, resumeJson, {
+        runAiPrompt: runEmailBidAi,
+        reportStatus: (text) => setStatus(text)
+      });
+      safeSendResponse(sendResponse, draft);
+    })().catch((err) => {
+      safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+    });
+    return true;
+  }
+
+  if (message?.type === "email_bid_open") {
+    (async () => {
+      const person = await emailBidPerson(message.profileId);
+      const jobMeta = {
+        jobTitle: message.jobTitle || "",
+        title: message.jobTitle || "",
+        companyName: message.companyName || "",
+        company: message.companyName || "",
+        jdLink: message.jdLink || "",
+        jdText: message.jdText || ""
+      };
+      const result = await sendConfirmedEmailBid(
+        person,
+        {
+          toEmails: message.toEmails || [],
+          subject: message.subject || "",
+          body: message.body || "",
+          jobMeta
+        },
+        {
+          reportStatus: (text) => setStatus(text),
+          recordSheetApplied: () => recordEmailBidSheet(jobMeta),
+          openWebCompose: async ({ url }) => {
+            const shown = await showLatestResumeDownload();
+            await chrome.tabs.create({ url, active: true });
+            if (shown) {
+              await setStatus(`Email Bid · resume shown in Downloads (${shown}). Attach it, then Send.`);
+            }
+          }
+        }
+      );
+      safeSendResponse(sendResponse, result);
+    })().catch((err) => {
+      safeSendResponse(sendResponse, { ok: false, error: String(err?.message || err) });
+    });
+    return true;
+  }
+
+  return undefined;
 });

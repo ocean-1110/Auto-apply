@@ -1591,6 +1591,40 @@ textarea:focus {
   flex: 0 0 auto;
 }
 
+.email-bid-contacts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.email-bid-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  align-items: start;
+  text-align: left;
+}
+
+.email-bid-row strong {
+  font-weight: 600;
+}
+
+.email-bid-row .email-bid-detail {
+  grid-column: 2;
+  color: var(--muted, #667);
+  font-size: 12px;
+}
+
+.humanize-field {
+  min-width: 0;
+  margin: 0;
+}
+
+.humanize-field select {
+  width: 100%;
+}
+
 /* ——— Accordion / Q&A ——— */
 
 .accordion {
@@ -1918,6 +1952,10 @@ body.ui-sidebar .gen-options-row .ats-rewrite-toggle {
   grid-column: 1 / -1;
 }
 
+body.ui-sidebar .gen-options-row .model-picker {
+  grid-column: 1 / -1;
+}
+
 body.ui-sidebar .content {
   width: 100%;
   min-width: 0;
@@ -1965,4 +2003,93 @@ body.ui-sidebar .content {
   .icon-btn {
     min-width: 0;
   }
+}
+
+.model-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.model-picker-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-picker-btn {
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--neo);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--inset-sm);
+  cursor: pointer;
+}
+
+.model-picker-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border-radius: 16px;
+  background: var(--neo);
+  box-shadow: var(--raised);
+  max-height: 280px;
+  overflow: auto;
+}
+
+.model-picker-menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-picker-menu button:hover,
+.model-picker-menu button.is-selected {
+  background: rgba(47, 128, 237, 0.12);
+}
+
+.model-picker-menu strong {
+  font-size: 13px;
+}
+
+.model-picker-menu .model-picker-price {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.model-picker-menu span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 500;
 }

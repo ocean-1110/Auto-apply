@@ -3,6 +3,7 @@ import {
   getResumeProfiles,
   deleteCustomProfile
 } from "./profiles.js";
+import { mountResumeModelPicker } from "./openai-models.js";
 import { getAllTemplates, DEFAULT_TEMPLATE_ID } from "./templates/index.js";
 import { extractSpreadsheetId, buildSheetRowTsv, updateJobStatusInSpreadsheet, getExistingJobLinks, normalizeSheetJobLink } from "./sheets.js";
 import { formatAtsTooltip } from "./ats-score.js";
@@ -2440,6 +2441,11 @@ async function loadSettings() {
     atsRewriteToggleEl.checked = data.ats_rewrite_enabled === true;
     updateAtsRewriteToggleLabel();
   }
+  const humanizeModeEl = document.getElementById("humanizeMode");
+  if (humanizeModeEl) {
+    const mode = String(data.strong_humanize_mode || "auto");
+    humanizeModeEl.value = mode === "on" || mode === "off" ? mode : "auto";
+  }
   updateGenerateButtonLabel();
   setImportedJobsFilter(data.imported_jobs_filter || "all", { persist: false });
   setImportedJobsStatusFilter(data.imported_jobs_status_filter || "all", { persist: false });
@@ -3874,7 +3880,119 @@ previewModeToggleEl?.addEventListener("change", () => {
 atsRewriteToggleEl?.addEventListener("change", () => {
   persistAtsRewriteSetting().catch(() => {});
 });
+document.getElementById("humanizeMode")?.addEventListener("change", (event) => {
+  const value = String(event.target?.value || "auto");
+  chrome.storage.local.set({ strong_humanize_mode: value }).catch(() => {});
+});
 
+const emailBidFindBtn = document.getElementById("emailBidFindBtn");
+const emailBidOpenBtn = document.getElementById("emailBidOpenBtn");
+const emailBidContactsEl = document.getElementById("emailBidContacts");
+const emailBidSubjectEl = document.getElementById("emailBidSubject");
+const emailBidBodyEl = document.getElementById("emailBidBody");
+
+function selectedEmailBidRecipients() {
+  return [...(emailBidContactsEl?.querySelectorAll("input[type=checkbox]:checked") || [])]
+    .map((box) => String(box.value || "").trim())
+    .filter(Boolean);
+}
+
+function renderEmailBidContacts(contacts = []) {
+  if (!emailBidContactsEl) return;
+  emailBidContactsEl.innerHTML = "";
+  if (!contacts.length) {
+    emailBidContactsEl.hidden = true;
+    return;
+  }
+  emailBidContactsEl.hidden = false;
+  for (const contact of contacts) {
+    const email = String(contact.email || "").trim();
+    if (!email) continue;
+    const row = document.createElement("label");
+    row.className = "email-bid-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = contact.checked !== false;
+    box.value = email;
+    const name = document.createElement("strong");
+    name.textContent = `${contact.name || email} · ${email}`;
+    const detail = document.createElement("span");
+    detail.className = "email-bid-detail";
+    detail.textContent = [contact.role, contact.phone].filter(Boolean).join(" · ");
+    row.append(box, name, detail);
+    emailBidContactsEl.append(row);
+  }
+}
+
+function emailBidJobFields() {
+  return {
+    profileId: profileSelectEl?.value || "",
+    jobTitle: jobTitleEl?.value || "",
+    companyName: companyNameEl?.value || "",
+    jdLink: jdLinkEl?.value || "",
+    jdText: jdTextEl?.value || ""
+  };
+}
+
+emailBidFindBtn?.addEventListener("click", async () => {
+  const fields = emailBidJobFields();
+  if (!String(fields.jdText || "").trim() && !String(fields.companyName || "").trim()) {
+    setStatus("Email Bid needs a company or job description.", "error");
+    return;
+  }
+  emailBidFindBtn.disabled = true;
+  setStatus("Email Bid · finding hiring contacts…", "running");
+  try {
+    const draft = await chrome.runtime.sendMessage({ type: "email_bid_prepare", ...fields });
+    if (!draft?.ok) {
+      setStatus(draft?.error || "Email Bid found no hiring contacts.", "error");
+      renderEmailBidContacts(draft?.contacts || []);
+      return;
+    }
+    renderEmailBidContacts(draft.contacts || []);
+    if (emailBidSubjectEl) emailBidSubjectEl.value = draft.subject || "";
+    if (emailBidBodyEl) emailBidBodyEl.value = draft.body || "";
+    if (emailBidOpenBtn) emailBidOpenBtn.disabled = !(draft.contacts || []).length;
+    const sources = draft.contactSources || {};
+    setStatus(
+      `Email Bid draft ready — JD ${sources.jd || 0} · site ${sources.site || 0} · AI ${sources.ai || 0}. Review To, then open mail.`
+    );
+  } catch (err) {
+    setStatus(`Email Bid failed: ${String(err?.message || err)}`, "error");
+  } finally {
+    emailBidFindBtn.disabled = false;
+  }
+});
+
+emailBidOpenBtn?.addEventListener("click", async () => {
+  const toEmails = selectedEmailBidRecipients();
+  if (!toEmails.length) {
+    setStatus("Email Bid — check at least one recipient.", "error");
+    return;
+  }
+  emailBidOpenBtn.disabled = true;
+  setStatus("Email Bid · opening mail…", "running");
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "email_bid_open",
+      ...emailBidJobFields(),
+      toEmails,
+      subject: emailBidSubjectEl?.value || "",
+      body: emailBidBodyEl?.value || ""
+    });
+    if (!result?.ok) {
+      setStatus(result?.error || "Email Bid could not open mail.", "error");
+      return;
+    }
+    setStatus(result.statusMessage || "Email Bid opened in mail. Attach the resume, then Send.");
+  } catch (err) {
+    setStatus(`Email Bid failed: ${String(err?.message || err)}`, "error");
+  } finally {
+    emailBidOpenBtn.disabled = false;
+  }
+});
+
+mountResumeModelPicker(document.getElementById("resumeModelPicker"));
 loadSettings().catch((err) => setStatus(`Init failed: ${String(err.message || err)}`, "error"));
 setSidebarMode("manual");
 refreshImportedJobsFromStorage().catch(() => {});

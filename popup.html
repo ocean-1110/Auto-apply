@@ -381,6 +381,15 @@
                     <span class="neo-switch-track" aria-hidden="true"></span>
                     <span class="neo-switch-label" id="atsRewriteToggleLabel">Standard mode</span>
                   </label>
+                  <div id="resumeModelPicker"></div>
+                  <label class="field humanize-field" title="On Greenhouse, Ashby, and Lever, Auto rewrites resume prose so it reads less like AI.">
+                    <span>Voice</span>
+                    <select id="humanizeMode">
+                      <option value="auto">Auto</option>
+                      <option value="on">Humanize</option>
+                      <option value="off">Plain</option>
+                    </select>
+                  </label>
                 </div>
                 <div class="primary-action-btns">
                   <div class="primary-action-main">
@@ -411,6 +420,39 @@
               </div>
             </div>
           </section>
+
+          <details class="accordion" id="emailBidSection">
+            <summary>
+              <span>Email Bid</span>
+              <span class="accordion-note">Hiring contacts</span>
+            </summary>
+            <div class="accordion-body">
+              <p class="hint">
+                Finds recruiter, HR, and hiring-manager addresses already published in the job
+                description or on the company site. Review the To list, then open Outlook or Gmail
+                and send it yourself. Addresses are never invented.
+              </p>
+              <div class="row">
+                <button type="button" id="emailBidFindBtn" class="icon-btn icon-btn-accent" title="Find hiring contacts and draft a note">
+                  <svg class="btn-icon" aria-hidden="true"><use href="#i-generate"/></svg>
+                  <span class="btn-label">Find contacts</span>
+                </button>
+              </div>
+              <div id="emailBidContacts" class="email-bid-contacts" hidden></div>
+              <label class="field">
+                <span>Subject</span>
+                <input id="emailBidSubject" type="text" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Message</span>
+                <textarea id="emailBidBody" rows="6" placeholder="Draft appears after Find contacts"></textarea>
+              </label>
+              <button type="button" id="emailBidOpenBtn" class="icon-btn icon-btn-accent" disabled title="Open a prefilled Outlook or Gmail compose window">
+                <svg class="btn-icon" aria-hidden="true"><use href="#i-send"/></svg>
+                <span class="btn-label">Open in Outlook / Gmail</span>
+              </button>
+            </div>
+          </details>
 
           <details class="accordion" id="qaBankSection">
             <summary>

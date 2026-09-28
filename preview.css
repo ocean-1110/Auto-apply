@@ -436,3 +436,94 @@ textarea:focus {
     min-height: 420px;
   }
 }
+
+.model-picker {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 320px;
+}
+
+.model-picker-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-picker-btn {
+  width: 100%;
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--neo);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--inset-sm);
+  cursor: pointer;
+}
+
+.model-picker-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border-radius: 16px;
+  background: var(--neo);
+  box-shadow: var(--raised);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.model-picker-menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-picker-menu button:hover,
+.model-picker-menu button.is-selected {
+  background: rgba(47, 128, 237, 0.12);
+}
+
+.model-picker-menu strong {
+  font-size: 14px;
+}
+
+.model-picker-menu .model-picker-price {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.model-picker-menu span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 500;
+}

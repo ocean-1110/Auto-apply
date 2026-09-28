@@ -66,6 +66,7 @@
         "content/scrapers/dice.js",
         "content/scrapers/greenhouse.js",
         "content/scrapers/hiringcafe.js",
+        "content/scrapers/indeed.js",
         "content/scrapers/runner.js",
         "content/autofill.js"
       ],

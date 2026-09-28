@@ -64,6 +64,22 @@ export const ATS_ADAPTERS = [
     emailOtp: true
   },
   {
+    id: "ashby",
+    label: "Ashby",
+    hostPatterns: [/(^|\.)ashbyhq\.com$/i],
+    autoSubmitAllowed: false,
+    isEmployerAts: true,
+    stepBudget: 14
+  },
+  {
+    id: "lever",
+    label: "Lever",
+    hostPatterns: [/(^|\.)lever\.co$/i],
+    autoSubmitAllowed: false,
+    isEmployerAts: true,
+    stepBudget: 14
+  },
+  {
     id: "jobright",
     label: "Jobright",
     hostPatterns: [/(^|\.)jobright\.ai$/i],

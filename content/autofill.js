@@ -6,7 +6,7 @@
 (function resumeBotAutofill() {
   // Keyed by build, not a plain boolean: a tab that already ran an older copy of
   // this script would otherwise block the updated one from installing.
-  const SCRIPT_BUILD = "2026-09-25.dice-resume-file.1";
+  const SCRIPT_BUILD = "2026-09-25.email-bid-indeed.1";
   const FIELD_FILL_DELAY_MS = 500;
   if (window.__resumeBotAutofillBuild === SCRIPT_BUILD) return;
   if (window.__resumeBotAutofillMessageListener) {
@@ -2276,7 +2276,7 @@
     }
   }
 
-  function setFileOnInput(input, file) {
+  function setFileOnInput(input, file, { drop = true } = {}) {
     if (!input || !file) return false;
     let ok = false;
     try {
@@ -2292,8 +2292,35 @@
     } catch {
       ok = false;
     }
-    dispatchFileDrop(dropzoneForInput(input), file);
+    // A drop on a shared parent lands the resume in the cover-letter box.
+    if (drop) dispatchFileDrop(dropzoneForInput(input), file);
     return ok || Boolean(input.files && input.files.length > 0);
+  }
+
+  /** Page order: top to bottom, then left to right. Dice slot 1 is resume, slot 2 is cover letter. */
+  function fileInputsInPageOrder() {
+    const list = collectFileInputs().map((input, index) => ({ input, index }));
+    list.sort((a, b) => {
+      const ar = a.input.getBoundingClientRect();
+      const br = b.input.getBoundingClientRect();
+      const aBox = ar.width > 2 || ar.height > 2;
+      const bBox = br.width > 2 || br.height > 2;
+      if (aBox && bBox) {
+        if (Math.abs(ar.top - br.top) > 12) return ar.top - br.top;
+        if (Math.abs(ar.left - br.left) > 12) return ar.left - br.left;
+      }
+      return a.index - b.index;
+    });
+    return list
+      .map((row) => row.input)
+      .filter((input) => {
+        const blob = normalize(
+          [input.getAttribute("name"), input.getAttribute("id"), input.getAttribute("aria-label"), input.getAttribute("accept")].join(
+            " "
+          )
+        );
+        return !/\b(photo|headshot|portrait|profile picture|transcript|portfolio|writing sample)\b/.test(blob);
+      });
   }
 
   function collectFileInputs() {
@@ -2576,11 +2603,42 @@
       return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-docs" }], settled: true };
     }
 
-    // Dice pre-selects the account resume. Open Replace on the resume box
-    // before attaching this job's PDF. Leave the cover-letter box closed
-    // until the resume file is in place.
-    if (dice && resumeFile) await focusDiceResumeReplace(resumeFile.name);
-    await revealApplicationUploads({ resume: true, coverLetter: !dice });
+    // Dice shows two file fields in order: the first is the resume, the second
+    // is the cover letter. Labels on that page name both, so they must not
+    // decide which PDF goes where.
+    if (dice) {
+      let ordered = fileInputsInPageOrder();
+      if (ordered.length < 2 && (resumeFile || coverFile)) {
+        await revealApplicationUploads({ resume: true, coverLetter: false });
+        ordered = fileInputsInPageOrder();
+      }
+      if (ordered.length < 2 && coverFile) {
+        await revealApplicationUploads({ resume: false, coverLetter: true });
+        ordered = fileInputsInPageOrder();
+      }
+      if (!ordered.length) {
+        return { uploadedCount: 0, uploaded, skipped: [{ reason: "no-file-inputs" }], settled: true };
+      }
+      const slots = [
+        resumeFile ? { input: ordered[0], file: resumeFile, kind: "resume" } : null,
+        coverFile && ordered[1] ? { input: ordered[1], file: coverFile, kind: "coverLetter" } : null
+      ].filter((row) => row?.input);
+      for (const row of slots) {
+        scrollElIntoView(row.input);
+        await sleep(120);
+        const ok = setFileOnInput(row.input, row.file, { drop: false });
+        if (ok) {
+          uploaded.push({ kind: row.kind, fileName: row.file.name, label: row.kind });
+        } else {
+          skipped.push({ reason: "set-failed", kind: row.kind, label: row.kind });
+        }
+        await sleep(150);
+      }
+      const settled = await waitForUploadsToSettle(500);
+      return { uploadedCount: uploaded.length, uploaded, skipped, settled };
+    }
+
+    await revealApplicationUploads({ resume: true, coverLetter: true });
 
     const inputs = collectFileInputs();
     if (!inputs.length) {
@@ -4333,6 +4391,22 @@
     }
   }
 
+  function isAshbyPage(url = location.href) {
+    try {
+      return /(^|\.)ashbyhq\.com$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isLeverPage(url = location.href) {
+    try {
+      return /(^|\.)lever\.co$/i.test(new URL(String(url || location.href)).hostname);
+    } catch {
+      return false;
+    }
+  }
+
   function isAtsGatewayPage(url = location.href) {
     return isSmartRecruitersPage(url) || isZohoRecruitPage(url) || isOracleCloudPage(url);
   }
@@ -4348,6 +4422,8 @@
     if (isSmartRecruitersPage(url)) return "smartrecruiters";
     if (isZohoRecruitPage(url)) return "zohorecruit";
     if (isOracleCloudPage(url)) return "oraclecloud";
+    if (isAshbyPage(url)) return "ashby";
+    if (isLeverPage(url)) return "lever";
     try {
       if (/(^|\.)dice\.com$/i.test(new URL(String(url || location.href)).hostname)) return "dice";
     } catch {
@@ -4378,6 +4454,8 @@
         return /(^|\.)zohorecruit\.com$/i.test(target.hostname) || /(^|\.)recruit\.zoho\./i.test(target.hostname);
       }
       if (site === "oraclecloud") return /(^|\.)oraclecloud\.com$/i.test(target.hostname);
+      if (site === "ashby") return /(^|\.)ashbyhq\.com$/i.test(target.hostname);
+      if (site === "lever") return /(^|\.)lever\.co$/i.test(target.hostname);
       return target.origin === location.origin;
     } catch {
       return false;
